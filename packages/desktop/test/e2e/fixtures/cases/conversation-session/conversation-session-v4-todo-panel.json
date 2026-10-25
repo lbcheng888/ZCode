@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "caseName": "conversation-session-v4-todo-panel",
+  "spec": "./test/e2e/conversation-session/conversation-session-v4-todo-panel.test.ts",
+  "providerFixtures": [
+    "./test/e2e/fixtures/upstream/common.json",
+    "./test/e2e/fixtures/upstream/conversation-session/conversation-session-v4-todo-panel.json"
+  ],
+  "fileFixtures": [],
+  "requests": [
+    {
+      "id": "v4-todo-panel-title",
+      "description": "E2E_TODO_SEED 首发的 case-local 标题生成响应。",
+      "kind": "common",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "E2E_TODO_SEED 首发会触发默认 title sidecar；固定 case-local 标题响应，避免回放 500，并用该首发 marker 隔离跨 case 匹配。"
+    },
+    {
+      "id": "v4-todo-panel-seed",
+      "description": "首轮固定回复，建立没有 plan 的空态 session。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "空态断言需要一个已建立且 turn 已结束的 session；首轮文案固定。"
+    },
+    {
+      "id": "v4-todo-panel-write-1-tool",
+      "description": "第一个 TodoWrite 返回 1 pending + 1 in_progress 的清单。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-tool-use",
+      "syntheticReason": "todo 面板需要固定清单才能断言 0/2 进度与 in_progress 文案；真实模型不会稳定选择同一份清单。"
+    },
+    {
+      "id": "v4-todo-panel-write-1-follow",
+      "description": "第一个 TodoWrite 的续轮受控流，保持 turn running 以断言实时面板。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "controlled-stream",
+      "syntheticReason": "需要在 todo 面板出现后仍保持 running，证明断言的是实时更新而不是 turn 结束后的静态投影。"
+    },
+    {
+      "id": "v4-todo-panel-write-2-tool",
+      "description": "第二个 TodoWrite 返回 2 completed + 1 pending 的清单。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-tool-use",
+      "syntheticReason": "需要一份真正变化的清单来驱动 plan 更新与 completed 过滤；重复同一清单不会产生新投影。"
+    },
+    {
+      "id": "v4-todo-panel-write-2-follow",
+      "description": "第二个 TodoWrite 的续轮固定收尾文本。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "该续轮只用于让 turn 结束并留下可断言的 timeline 文本。"
+    },
+    {
+      "id": "v4-todo-panel-clear-tool",
+      "description": "第三个 TodoWrite 返回空清单，清空 plan。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-tool-use",
+      "syntheticReason": "清空语义只由空清单 TodosUpdated 触发（tool 结果提取不到步骤），需要固定 todos: []。"
+    },
+    {
+      "id": "v4-todo-panel-clear-follow",
+      "description": "清空 TodoWrite 的续轮固定收尾文本。",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "该续轮只用于让 turn 结束并留下可断言的 timeline 文本。"
+    }
+  ]
+}

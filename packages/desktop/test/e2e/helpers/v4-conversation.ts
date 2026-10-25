@@ -54,6 +54,7 @@ import {
   TID_V4_STOP,
   TID_V4_TIMELINE,
   TID_V4_TIMELINE_BOTTOM,
+  TID_V4_TODO_PANEL,
   TID_V4_TURN_NAVIGATOR,
   TID_V4_TURN_NAVIGATOR_ITEM,
   TID_V4_TURN_NAVIGATOR_TOOLTIP,
@@ -1379,6 +1380,102 @@ export function getV4GoalProjection(): Promise<{
     V4_MAIN_PANE_ID,
     TID_CHAT_SUMMARY_PANEL,
   );
+}
+
+export interface V4TodoPanelProjection {
+  /** TodoPanel 是否挂载：plan 为 null/空清单或全部完成时组件返回 null。 */
+  present: boolean;
+  /** composer 是否挂载，用于区分“面板按设计隐藏”和“pane/composer 尚未就绪”。 */
+  composerPresent: boolean;
+  /** 折叠态头部渲染的 `${completed}/${total}`；头部没有计数时为 null。 */
+  ratio: string | null;
+  completed: number | null;
+  total: number | null;
+  /** 面板当前渲染文本（折叠态只有 activeItem 与计数，已完成项不渲染）。 */
+  text: string;
+  /** 面板与 composer 是否共享 timeline bottom dock。 */
+  inComposerDock: boolean;
+  /** 面板是否在 DOM 顺序与几何上都位于 composer 上方（sticky dock 内的挂载顺序）。 */
+  beforeComposer: boolean;
+}
+
+/** 读取 composer 上方的 todo 进度条投影（文本 + 计数 + 与 composer 的相对位置）。 */
+export function getV4TodoPanelProjection(): Promise<V4TodoPanelProjection> {
+  return browser.execute(
+    (paneTestId, paneId, todoPanelTestId, composerTestId) => {
+      const pane = document.querySelector<HTMLElement>(`[data-testid="${paneTestId}-${paneId}"]`);
+      const panel = pane?.querySelector<HTMLElement>(`[data-testid="${todoPanelTestId}"]`) ?? null;
+      const composer =
+        pane?.querySelector<HTMLElement>(`[data-testid="${composerTestId}"]`) ?? null;
+      const text = (panel?.innerText ?? "").replace(/\u00a0/g, " ");
+      // 计数只在头部按钮内渲染；展开态列表内容里的数字不能被误读成进度。
+      const headerText =
+        panel?.querySelector<HTMLElement>("button[aria-expanded]")?.innerText ?? text;
+      const ratioMatch = headerText.match(/(\d+)\s*\/\s*(\d+)/);
+      const panelDock = panel?.closest('[data-v4-composer-dock="true"]') ?? null;
+      const composerDock = composer?.closest('[data-v4-composer-dock="true"]') ?? null;
+      const inComposerDock = panelDock !== null && panelDock === composerDock;
+      const beforeComposer =
+        inComposerDock &&
+        panel !== null &&
+        composer !== null &&
+        (panel.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 &&
+        panel.getClientRects().length > 0 &&
+        panel.getBoundingClientRect().bottom <= composer.getBoundingClientRect().top + 2;
+      return {
+        present: panel !== null,
+        composerPresent: composer !== null,
+        ratio: ratioMatch ? `${ratioMatch[1]}/${ratioMatch[2]}` : null,
+        completed: ratioMatch ? Number(ratioMatch[1]) : null,
+        total: ratioMatch ? Number(ratioMatch[2]) : null,
+        text,
+        inComposerDock,
+        beforeComposer,
+      };
+    },
+    TID_V4_SESSION_PANE,
+    V4_MAIN_PANE_ID,
+    TID_V4_TODO_PANEL,
+    TID_V4_COMPOSER,
+  );
+}
+
+/** 等待 todo 面板出现并显示指定 `${completed}/${total}` 进度。 */
+export async function waitForV4TodoPanelRatio(
+  ratio: string,
+  timeoutMsg: string,
+  timeout = 30000,
+): Promise<V4TodoPanelProjection> {
+  let latest: V4TodoPanelProjection | null = null;
+  try {
+    await browser.waitUntil(
+      async () => {
+        latest = await getV4TodoPanelProjection();
+        return latest.present && latest.ratio === ratio;
+      },
+      { timeout, timeoutMsg },
+    );
+  } catch (error) {
+    const failure = await getV4TodoPanelProjection().catch(() => null);
+    throw new Error(`${timeoutMsg}; latest=${JSON.stringify(failure)}`, { cause: error });
+  }
+  return latest ?? getV4TodoPanelProjection();
+}
+
+/** 等待 todo 面板卸载（plan 清空或全部完成时 TodoPanel 返回 null）。 */
+export async function waitForV4TodoPanelHidden(
+  timeoutMsg: string,
+  timeout = 30000,
+): Promise<void> {
+  try {
+    await browser.waitUntil(
+      async () => !(await getV4TodoPanelProjection()).present,
+      { timeout, timeoutMsg },
+    );
+  } catch (error) {
+    const failure = await getV4TodoPanelProjection().catch(() => null);
+    throw new Error(`${timeoutMsg}; latest=${JSON.stringify(failure)}`, { cause: error });
+  }
 }
 
 /** 打开 latest user query 行内编辑并填入新文本，但不提交。 */
