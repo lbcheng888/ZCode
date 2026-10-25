@@ -777,6 +777,7 @@ export class SqliteSessionStore
     objective: string;
     sessionID: SessionId;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
   }): Promise<SessionGoal | null> {
     return createSessionTarget(this.db, input);
   }
@@ -816,6 +817,7 @@ export class SqliteSessionStore
     reason?: string;
     tokensUsedDelta?: number;
     turnsUsedDelta?: number;
+    goalLayerEnabled?: boolean;
   }): Promise<SessionGoal | null> {
     return finishSessionTargetRun(this.db, input);
   }
@@ -830,6 +832,7 @@ export class SqliteSessionStore
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
     turnsUsedDelta?: number;
+    goalLayerEnabled?: boolean;
   }): Promise<SessionGoal | null> {
     return accountSessionTargetUsage(this.db, input);
   }

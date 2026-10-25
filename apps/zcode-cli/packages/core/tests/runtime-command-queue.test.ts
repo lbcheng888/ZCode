@@ -49,6 +49,36 @@ function promptCommand(
   } as RuntimeCommand;
 }
 
+function targetContinuationLoopCommand(
+  id: string,
+  priority: RuntimeCommandPriority,
+  inputId: string,
+  resolved: unknown[],
+): RuntimeCommand {
+  return {
+    createdAt: new Date("2026-06-29T00:02:00.000Z"),
+    id: id as RuntimeCommandId,
+    mode: "target-continuation-loop",
+    options: {
+      inputId,
+      traceContext: {
+        sessionId: "sess_runtime_command_queue",
+        spanId: `span_${id}`,
+        traceId: "trace_runtime_command_queue",
+      },
+      trigger: "manual",
+    },
+    priority,
+    reject: () => {},
+    resolve: (result: unknown) => resolved.push(result),
+    traceContext: {
+      sessionId: "sess_runtime_command_queue",
+      spanId: `span_${id}`,
+      traceId: "trace_runtime_command_queue",
+    },
+  } as RuntimeCommand;
+}
+
 describe("RuntimeCommandQueue", () => {
   it("dequeues commands by priority before FIFO order", () => {
     const queue = createRuntimeCommandQueue();
@@ -201,6 +231,38 @@ describe("RuntimeCommandQueue", () => {
     await drainRuntimeCommandQueue.call(runtime);
 
     expect(executionOrder).toEqual(["promoted-prompt", "notification-b"]);
+    expect(runtime.foregroundPromotionLease).toBeUndefined();
+  });
+
+  it("dequeues a leased target-continuation-loop promoted by its inputId", async () => {
+    // 回归:旧 while 续跑循环(requested /goal 的 off 路径)必须能匹配 sendQueuedNow
+    // 的晋升租约;漏掉该 mode 会让命令永不出队、lease 永不释放,前台被永久占用。
+    const resolved: unknown[] = [];
+    const runtime = {
+      activeForegroundExecution: undefined,
+      activeTurn: undefined,
+      activeTurnStartReservation: undefined,
+      foregroundPromotionLease: undefined,
+      runtimeCommandDrainActive: false,
+      runtimeCommandQueue: createRuntimeCommandQueue(),
+      sessionStore: undefined,
+    } as unknown as AgentRuntimeInternal;
+
+    expect(
+      acquireForegroundPromotionLease.call(runtime, {
+        leaseId: "lease-goal",
+        mode: "after-current",
+        promotedInputId: "lease-goal",
+      }),
+    ).toEqual({ kind: "acquired", leaseId: "lease-goal" });
+    runtime.runtimeCommandQueue.enqueue(
+      targetContinuationLoopCommand("loop-1", "next", "lease-goal", resolved),
+    );
+
+    await drainRuntimeCommandQueue.call(runtime);
+
+    expect(resolved).toEqual([null]);
+    expect(runtime.runtimeCommandQueue.size()).toBe(0);
     expect(runtime.foregroundPromotionLease).toBeUndefined();
   });
 

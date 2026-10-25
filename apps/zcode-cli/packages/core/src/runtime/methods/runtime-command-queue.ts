@@ -11,6 +11,8 @@ import { persistSubagentMessageCommand } from "./subagent-messages.js";
 import { runControlOnlyTurnCommand } from "./control-only-turn.js";
 import { createTurnCancelledError } from "../helpers/index.js";
 import { executeTargetContinuationCommand } from "./target.js";
+import { runActiveTargetContinuationLoop } from "./target-continuation-loop.js";
+import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
 import { isStaleBranchRuntimeCommand } from "./runtime-command-generation.js";
 import { noteWorkflowReminderCommandStarted } from "./dynamic-workflow-blocked-reminder.js";
 import type {
@@ -111,7 +113,11 @@ function dequeueNextRunnableBatch(this: AgentRuntimeInternal): readonly RuntimeC
 }
 
 function runtimeCommandInputId(command: RuntimeCommand): string | undefined {
-  if (command.mode === "prompt" || command.mode === "target-continuation") {
+  if (
+    command.mode === "prompt" ||
+    command.mode === "target-continuation" ||
+    command.mode === "target-continuation-loop"
+  ) {
     return command.options?.inputId;
   }
   return undefined;
@@ -170,6 +176,45 @@ export function releaseForegroundPromotionLease(
   return true;
 }
 
+/**
+ * 灰度旗关闭时的旧触发源:prompt 命令(continueActiveTargetAfterTurn)与
+ * task-notification 批次结束后,在同一个前台执行里跑忙碌续跑循环。
+ * 开旗时两处都不再触发,drain 收口后的空闲沿由 idle 驱动器统一预约。
+ */
+async function runPostCommandActiveTargetLoop(
+  this: AgentRuntimeInternal,
+  command: RuntimeCommand,
+  abortSignal: AbortSignal,
+): Promise<Awaited<ReturnType<AgentRuntimeInternal["continueActiveTargetLoop"]>> | null> {
+  if (command.mode === "prompt" && command.options?.continueActiveTargetAfterTurn === true) {
+    return await runActiveTargetContinuationLoop.call(this, {
+      abortSignal,
+      inputId: command.options.inputId,
+      traceContext: command.options.traceContext ?? command.traceContext,
+      trigger: "user-prompt",
+      verifyBeforeFirstContinue: true,
+    });
+  }
+  if (command.mode === "task-notification") {
+    try {
+      return await runActiveTargetContinuationLoop.call(this, {
+        abortSignal,
+        traceContext: command.traceContext,
+        trigger: "task-notification",
+        verifyBeforeFirstContinue: true,
+      });
+    } catch (error) {
+      this.logger?.warn("Post-command goal continuation failed", {
+        ...traceContextToLogContext(command.traceContext),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        event: "target.continuation.after_command_failed",
+        module: "core.runtime",
+      });
+    }
+  }
+  return null;
+}
+
 async function runRuntimeCommand(
   this: AgentRuntimeInternal,
   command: RuntimeCommand,
@@ -197,8 +242,34 @@ async function runRuntimeCommand(
           },
           command.startReservation,
         );
-        // goal 续跑不再由 prompt 命令尾部触发(continueActiveTargetAfterTurn 已删除,
-        // 设计 §3.6):drain 收口后的空闲沿由 idle 驱动器统一预约。
+        // 开旗:goal 续跑不再由 prompt 命令尾部触发(设计 §3.6),drain 收口后的
+        // 空闲沿由 idle 驱动器统一预约。关旗:恢复旧触发源。
+        if (!isGoalLayerEnabled(this.config)) {
+          const continuationResult = await runPostCommandActiveTargetLoop.call(
+            this,
+            command,
+            foregroundExecution.controller.signal,
+          );
+          command.resolve(continuationResult ?? result);
+        } else {
+          command.resolve(result);
+        }
+      } finally {
+        this.runtimeCommandQueue.clearCancelPending(command.id);
+      }
+      return;
+    }
+    if (command.mode === "target-continuation-loop") {
+      if (this.runtimeCommandQueue.consumeCancelPending(command.id)) {
+        command.reject(createTurnCancelledError(command.options.abortSignal?.reason));
+        return;
+      }
+      try {
+        const result = await runActiveTargetContinuationLoop.call(this, {
+          ...command.options,
+          abortSignal: foregroundExecution.controller.signal,
+          yieldBeforeFirstContinue: false,
+        });
         command.resolve(result);
       } finally {
         this.runtimeCommandQueue.clearCancelPending(command.id);
@@ -273,7 +344,11 @@ async function runRuntimeCommand(
       return;
     }
   } catch (error) {
-    if (command.mode === "prompt" || command.mode === "target-continuation") {
+    if (
+      command.mode === "prompt" ||
+      command.mode === "target-continuation" ||
+      command.mode === "target-continuation-loop"
+    ) {
       command.reject(error);
       return;
     }
@@ -340,6 +415,13 @@ async function runTaskNotificationBatch(
       skipUserPromptSubmitHooks: true,
       traceContext: firstCommand.traceContext,
     });
+    if (!isGoalLayerEnabled(this.config)) {
+      await runPostCommandActiveTargetLoop.call(
+        this,
+        firstCommand,
+        foregroundExecution.controller.signal,
+      );
+    }
     this.logger?.info?.("Background task notification batch completed", {
       ...traceContextToLogContext(firstCommand.traceContext),
       batchSize: eligibleCommands.length,
@@ -404,7 +486,11 @@ function finishForegroundExecution(
 }
 
 function runtimeCommandAbortSignal(command: RuntimeCommand): AbortSignal | undefined {
-  if (command.mode === "prompt" || command.mode === "target-continuation") {
+  if (
+    command.mode === "prompt" ||
+    command.mode === "target-continuation" ||
+    command.mode === "target-continuation-loop"
+  ) {
     return command.options?.abortSignal;
   }
   return undefined;

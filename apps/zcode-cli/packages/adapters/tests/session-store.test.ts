@@ -2784,6 +2784,7 @@ describe("SQLite session store", () => {
         sessionID,
         targetID: turnLimited.targetID,
         turnsUsedDelta: 1,
+        goalLayerEnabled: true,
       });
       expect(turnOne).toMatchObject({ status: "active", turnsUsed: 1 });
       await store.startTargetRun({
@@ -2798,6 +2799,7 @@ describe("SQLite session store", () => {
         sessionID,
         targetID: turnLimited.targetID,
         turnsUsedDelta: 1,
+        goalLayerEnabled: true,
       });
       expect(turnTwo).toMatchObject({ status: "budget_limited", turnsUsed: 2 });
 
@@ -2817,6 +2819,7 @@ describe("SQLite session store", () => {
         inputID: "input-clock-1",
         sessionID,
         targetID: wallClockLimited.targetID,
+        goalLayerEnabled: true,
       });
       expect(clockRun).toMatchObject({ status: "budget_limited", timeUsedSeconds: 6 });
 
@@ -2840,10 +2843,138 @@ describe("SQLite session store", () => {
         targetID: tokenLimited.targetID,
         tokensUsedDelta: 5,
         turnsUsedDelta: 1,
+        goalLayerEnabled: true,
       });
       expect(accounted).toMatchObject({ status: "budget_limited", tokensUsed: 5, turnsUsed: 1 });
       const finalEvents = await store.readTargetEvents({ sessionID });
       expect(finalEvents.filter((event) => event.kind === "blocked")).toHaveLength(3);
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps the legacy token-only budget when the goal layer flag is off", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-legacy-budget-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-legacy-budget");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-legacy-budget"),
+        slug: "target-legacy-budget",
+        directory: tempRoot,
+        title: "target legacy budget",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      // 关旗:旧世界没有回合/挂钟预算,结算只评估 token 维,也不落 blocked 事件。
+      const turnLimited = await store.setTarget({
+        objective: "Legacy turn limited",
+        sessionID,
+        turnBudget: 1,
+      });
+      await store.startTargetRun({
+        inputID: "legacy-turn-1",
+        sessionID,
+        startedAtMs: 1_000,
+        targetID: turnLimited.targetID,
+      });
+      const turnFinish = await store.finishTargetRun({
+        endedAtMs: 2_000,
+        inputID: "legacy-turn-1",
+        sessionID,
+        targetID: turnLimited.targetID,
+        turnsUsedDelta: 1,
+        goalLayerEnabled: false,
+      });
+      expect(turnFinish).toMatchObject({ status: "active", turnsUsed: 1 });
+
+      const clockLimited = await store.setTarget({
+        objective: "Legacy wall clock limited",
+        sessionID,
+        wallClockBudgetSeconds: 1,
+      });
+      await store.startTargetRun({
+        inputID: "legacy-clock-1",
+        sessionID,
+        startedAtMs: 10_000,
+        targetID: clockLimited.targetID,
+      });
+      const clockFinish = await store.finishTargetRun({
+        endedAtMs: 16_000,
+        inputID: "legacy-clock-1",
+        sessionID,
+        targetID: clockLimited.targetID,
+        goalLayerEnabled: false,
+      });
+      expect(clockFinish).toMatchObject({ status: "active", timeUsedSeconds: 6 });
+
+      const accounted = await store.accountTargetUsage({
+        sessionID,
+        targetID: clockLimited.targetID,
+        timeUsedSecondsDelta: 10,
+        turnsUsedDelta: 5,
+        goalLayerEnabled: false,
+      });
+      expect(accounted).toMatchObject({ status: "active" });
+
+      const tokenLimited = await store.setTarget({
+        objective: "Legacy token limited",
+        sessionID,
+        tokenBudget: 5,
+      });
+      await store.startTargetRun({
+        inputID: "legacy-token-1",
+        sessionID,
+        startedAtMs: 19_000,
+        targetID: tokenLimited.targetID,
+      });
+      const tokenFinish = await store.finishTargetRun({
+        endedAtMs: 20_000,
+        inputID: "legacy-token-1",
+        sessionID,
+        targetID: tokenLimited.targetID,
+        tokensUsedDelta: 5,
+        goalLayerEnabled: false,
+      });
+      // 旧 token 维仍照常翻 budget_limited,但不追加 blocked 事件。
+      expect(tokenFinish).toMatchObject({ status: "budget_limited", tokensUsed: 5 });
+      const events = await store.readTargetEvents({ sessionID });
+      expect(events.filter((event) => event.kind === "blocked")).toHaveLength(0);
+
+      // 旗字段缺席同样按关旗处理(fail-closed):回合同样不翻预算。
+      const implicitOff = await store.setTarget({
+        objective: "Implicit off turn limited",
+        sessionID,
+        turnBudget: 1,
+      });
+      await store.startTargetRun({
+        inputID: "implicit-off-1",
+        sessionID,
+        startedAtMs: 21_000,
+        targetID: implicitOff.targetID,
+      });
+      const implicitFinish = await store.finishTargetRun({
+        endedAtMs: 22_000,
+        inputID: "implicit-off-1",
+        sessionID,
+        targetID: implicitOff.targetID,
+        turnsUsedDelta: 1,
+      });
+      expect(implicitFinish).toMatchObject({ status: "active" });
+
+      // 显式 null 回合预算必须原样带到 fork 目标,不能被 256 缺省覆盖。
+      const unlimited = await store.setTarget({
+        objective: "Unlimited for fork",
+        sessionID,
+        turnBudget: null,
+      });
+      const forked = await store.cloneTargetForFork({ source: unlimited, sessionID });
+      expect(forked?.turnBudget).toBeNull();
     } finally {
       store.close();
       await rm(tempRoot, { force: true, recursive: true });

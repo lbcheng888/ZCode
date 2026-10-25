@@ -1230,6 +1230,7 @@ export interface SessionStorePort {
     objective: string;
     sessionID: SessionId;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
   }): Promise<SessionGoal | null>;
   updateTargetStatus(input: {
     sessionID: SessionId;
@@ -1259,6 +1260,8 @@ export interface SessionStorePort {
     reason?: string;
     tokensUsedDelta?: number;
     turnsUsedDelta?: number;
+    /** goal 灰度旗:false 时结算只评估旧 token 维。 */
+    goalLayerEnabled?: boolean;
   }): Promise<SessionGoal | null>;
   recoverInterruptedTargetRun?(input: { sessionID: SessionId }): Promise<SessionGoal | null>;
   accountTargetUsage(input: {
@@ -1267,6 +1270,8 @@ export interface SessionStorePort {
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
     turnsUsedDelta?: number;
+    /** goal 灰度旗:false 时结算只评估旧 token 维。 */
+    goalLayerEnabled?: boolean;
   }): Promise<SessionGoal | null>;
   /** target 状态机 durable 事件日志(append-only,全量后置快照),按 id 升序。 */
   readTargetEvents?(input: { sessionID: SessionId }): Promise<SessionTargetEvent[]>;

@@ -23,6 +23,7 @@ import {
   createCompactRapidRefillError,
   getDueTodoReminderTurnsSinceWrite,
   hasOpenTodoItems,
+  isGoalLayerEnabled,
   throwIfTurnAborted,
 } from "../helpers/index.js";
 import {
@@ -156,24 +157,28 @@ export async function runRegularTurnLoop(
         systemReminderAttachmentEntry("runtime_mode", runtimeModeReminderBody),
       ]);
     }
-    // todo 提醒只服务会话主 agent：按 taskType 排除子代理与 workflow 子会话。不能用
+    const goalLayerEnabled = isGoalLayerEnabled(this.config);
+    // 开旗：todo 提醒只服务会话主 agent，按 taskType 排除子代理与 workflow 子会话。不能用
     // parentSessionId 判断——fork / selection_side_chat 主会话同样带它（session-fork 的父子
-    // 事实），会误伤用户可直接交互的主会话。这是行为变化——此前 Explore 等子代理也会收到该
-    // 提醒；依据是对齐 kimi-code 仅在 MAIN_AGENT_ID 注册 todoListReminder。
+    // 事实），会误伤用户可直接交互的主会话。这是开旗时的行为变化；关旗恢复旧行为：
+    // 子代理 / workflow child 重新收到提醒。
     const todoReminderEligible =
       !outputTokenRecoveryActive &&
-      isMainAgentTaskType(this.config.taskType) &&
+      (goalLayerEnabled ? isMainAgentTaskType(this.config.taskType) : true) &&
       tools.some((tool) => tool.name === "TodoWrite");
     const dueTodoReminderTurns = todoReminderEligible
-      ? getDueTodoReminderTurnsSinceWrite(state.turnRequestState.entries)
+      ? getDueTodoReminderTurnsSinceWrite(state.turnRequestState.entries, goalLayerEnabled)
       : null;
     if (dueTodoReminderTurns !== null) {
       const currentTodos = await this.readSessionTodosForContext(state.turnTraceContext);
-      // 空清单或全部 completed 时没有可提醒的开放项：只提醒“该更新清单”，不提醒“该建清单”。
-      // 未提醒时 cadence 不重置，同一 turn 的后续 model step 会再次读到同一结论（单次有索引的
-      // SELECT）；这里刻意不缓存“无开放项”，避免为 TodoWrite 中途清表引入缓存失效状态。
-      if (hasOpenTodoItems(currentTodos)) {
-        const reminderBody = buildTodoReminderBody(currentTodos, dueTodoReminderTurns);
+      // 开旗：空清单或全部 completed 时没有可提醒的开放项，只提醒“该更新清单”，不提醒
+      // “该建清单”；关旗恢复旧行为（无开放项也提醒）。未提醒时 cadence 不重置，同一 turn
+      // 的后续 model step 会再次读到同一结论（单次有索引的 SELECT）；这里刻意不缓存
+      // “无开放项”，避免为 TodoWrite 中途清表引入缓存失效状态。
+      if (!goalLayerEnabled || hasOpenTodoItems(currentTodos)) {
+        const reminderBody = goalLayerEnabled
+          ? buildTodoReminderBody(currentTodos, dueTodoReminderTurns)
+          : buildTodoReminderBody(currentTodos);
         commitTurnRequestEntries(this, state.turnRequestState, [
           systemReminderAttachmentEntry("todo_reminder", reminderBody),
         ]);
@@ -318,6 +323,9 @@ function evaluateTurnTargetBudgetGuard(
   runtime: AgentRuntimeInternal,
   state: RegularTurnLoopState,
 ): void {
+  // 关旗时三维预算整体缺席（turn.ts 不挂 targetBudget）;这里再显式早退，
+  // 保证 target_anchor 的注入点也只在开旗时可达。
+  if (!isGoalLayerEnabled(runtime.config)) return;
   const guard = state.targetBudget;
   if (!guard) return;
   const live = liveTargetBudgetDeltas(state);

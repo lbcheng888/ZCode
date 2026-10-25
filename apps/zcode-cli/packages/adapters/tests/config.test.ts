@@ -392,6 +392,30 @@ describe("config adapters", () => {
     }
   });
 
+  it("parses ZCODE_GOAL_LAYER into features.goalLayer", () => {
+    expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "on" }).features?.goalLayer).toBe(true);
+    expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "1" }).features?.goalLayer).toBe(true);
+    expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "off" }).features?.goalLayer).toBe(false);
+    expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "0" }).features?.goalLayer).toBe(false);
+    expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "maybe" }).features).toBeUndefined();
+  });
+
+  it("defaults features.goalLayer to off and reads the file override", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-config-goal-layer-"));
+    const path = join(dir, "config.json");
+
+    try {
+      const defaults = createConfig({ env: {}, skipUserConfig: true });
+      expect(defaults.config.features.goalLayer).toBe(false);
+
+      await writeFile(path, JSON.stringify({ features: { goalLayer: true } }));
+      const overridden = createConfig({ env: {}, userConfigPath: path });
+      expect(overridden.config.features.goalLayer).toBe(true);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
   it("ignores undeclared ZCODE environment switches", () => {
     const config = parseEnvConfig({
       ZCODE_LOG_LEVEL: "debug",

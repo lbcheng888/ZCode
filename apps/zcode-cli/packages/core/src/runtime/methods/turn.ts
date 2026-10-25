@@ -43,6 +43,7 @@ import {
   resolveTurnAttachments,
   summarizeTurnAttachmentsForEvent,
   runtimeMetadataForSyntheticUserMessageSource,
+  isGoalLayerEnabled,
 } from "../helpers/index.js";
 import type { ActiveTurnSteeringState, ExecuteTurnOptions, TurnResult } from "../types.js";
 import type { ActiveTurnStartReservation } from "../types.js";
@@ -867,13 +868,20 @@ export async function executeTurnCommand(
           toolDisallowlist: options?.toolDisallowlist,
           ...(startedTarget
             ? {
-                targetBudget: {
-                  countsTurn: options?.inputSource === "goal-continuation",
-                  goal: startedTarget,
-                  turnStartedAtMs,
-                },
+                // 关旗时不挂三维预算:回合中无 veto、无 outcome 提示、无锚点。
+                ...(isGoalLayerEnabled(this.config)
+                  ? {
+                      targetBudget: {
+                        countsTurn: options?.inputSource === "goal-continuation",
+                        goal: startedTarget,
+                        turnStartedAtMs,
+                      },
+                    }
+                  : {}),
               }
-            : options?.targetBudgetGrace && targetReadForGuard
+            : options?.targetBudgetGrace &&
+                targetReadForGuard &&
+                isGoalLayerEnabled(this.config)
               ? {
                   // 宽限终局回合:从第一步起 veto 全部工具,输入本身就是终局提示,
                   // 不再追加 outcome reminder(outcomePrompted 预置)。

@@ -56,7 +56,10 @@ import { hydrateMessageHistoryFromSession } from "../src/agent/session-history-h
 import { DEFAULT_MODEL_REQUEST_MEDIA_BUDGET_BYTES } from "../src/runtime/helpers/media-budget.js";
 import { MAX_TURN_STEER_INPUT_BYTES } from "../src/runtime/helpers/steering.js";
 import { projectIdFromDirectory } from "../src/runtime/helpers/project.js";
-import { TODO_REMINDER_CONFIG } from "../src/runtime/helpers/runtime-reminders.js";
+import {
+  LEGACY_TODO_REMINDER_CONFIG,
+  TODO_REMINDER_CONFIG,
+} from "../src/runtime/helpers/runtime-reminders.js";
 import { InMemoryRuntimeTaskRegistry } from "../src/runtime-task/registry.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import { BackgroundTaskTracker } from "../src/tool/executor/background-tasks.js";
@@ -3197,7 +3200,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-outcome" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-target-outcome",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -3269,7 +3276,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "yolo", workingDirectory: "/tmp/zcode-runtime-target-veto" },
+      {
+        goalLayerEnabled: true,
+        mode: "yolo",
+        workingDirectory: "/tmp/zcode-runtime-target-veto",
+      },
       {
         eventStore,
         toolRegistry: registry,
@@ -3561,6 +3572,67 @@ describe("AgentRuntime tool loop", () => {
     });
   });
 
+  it("keeps the legacy continuation loop and omits budgets/anchors when the goal layer flag is off", async () => {
+    const sessionId = createSessionId("runtime-goal-layer-off-legacy-loop");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[][] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-layer-off",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "legacy continuation",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Legacy");
+    await sessionStore.setTarget({
+      objective: "Legacy target without the goal layer",
+      sessionID: sessionId,
+      turnBudget: 1,
+    });
+
+    // 关旗:手动续跑走旧的忙碌循环(续跑一回合后自带完成判定),回合预算不挂载,
+    // 因此没有锚点、没有预算终局提示。
+    const result = await runtime.continueActiveTargetLoop({ trigger: "manual" });
+    expect(result?.response).toBe("legacy continuation");
+    const allRequestText = requests.map((messages) => providerMessagesToText(messages)).join("\n");
+    expect(allRequestText).toContain("Continue working toward the active session goal.");
+    expect(allRequestText).not.toContain("Active session goal anchor");
+    expect(allRequestText).not.toContain("The session goal budget is exhausted.");
+    // 续跑回合 + 循环内的完成判定(旧行为),没有预算宽限终局回合。
+    expect(requests.length).toBe(2);
+
+    // 关旗:idle 驱动器完全不生效——即使进程内 armed 标志被置位、目标仍 active,
+    // 也不会从空闲沿预约下一回合。
+    await sessionStore.setTarget({
+      objective: "Second legacy target",
+      sessionID: sessionId,
+    });
+    (runtime as unknown as { goalRoundDriverArmed?: boolean }).goalRoundDriverArmed = true;
+    const requestCount = requests.length;
+    runtime.scheduleIdleGoalRound();
+    await delay(50);
+    expect(requests.length).toBe(requestCount);
+    expect(runtime.hasActiveOrQueuedTurnWork()).toBe(false);
+  });
+
   it("plain executeTurn does not run post-turn active target loop without opt-in", async () => {
     const sessionId = createSessionId("runtime-target-loop-prompt-no-opt-in");
     const eventStore = createTestSessionEventStore();
@@ -3604,6 +3676,161 @@ describe("AgentRuntime tool loop", () => {
 
     expect(result.response).toBe("plain done");
     expect(requestOrder).toEqual(["prompt"]);
+  });
+
+  it("runs the restored post-turn continuation when continueActiveTargetAfterTurn is set off-flag", async () => {
+    const sessionId = createSessionId("runtime-goal-layer-off-prompt-trigger");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-layer-off-prompt",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("finish target after prompt")) {
+              requestOrder.push("prompt");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "prompt done",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Verify whether the active session goal")) {
+              const passed = requestOrder.filter((step) => step === "verifier-fail").length === 1;
+              requestOrder.push(passed ? "verifier-pass" : "verifier-fail");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: JSON.stringify({
+                  nextAction: passed ? "" : "Keep going.",
+                  passed,
+                  reason: passed ? "Done." : "More work remains.",
+                }),
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Continue working toward the active session goal.")) {
+              requestOrder.push("continuation");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "legacy post-turn continuation",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            throw new Error(`unexpected request: ${latestText}`);
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Prompt trigger");
+    await sessionStore.setTarget({
+      objective: "Finish through the restored prompt trigger",
+      sessionID: sessionId,
+    });
+
+    // 关旗:input-facade 会设置 continueActiveTargetAfterTurn,这里直接模拟同一选项。
+    const result = await runtime.executeTurn("finish target after prompt", undefined, {
+      continueActiveTargetAfterTurn: true,
+    });
+
+    expect(result.response).toBe("legacy post-turn continuation");
+    expect(requestOrder).toEqual(["prompt", "verifier-fail", "continuation", "verifier-pass"]);
+  });
+
+  it("runs the restored task-notification continuation when the goal layer is off", async () => {
+    const sessionId = createSessionId("runtime-goal-layer-off-notification-trigger");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-layer-off-notification",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("background build finished")) {
+              requestOrder.push("notification");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "notification handled",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Verify whether the active session goal")) {
+              const passed = requestOrder.includes("continuation");
+              requestOrder.push(passed ? "verifier-pass" : "verifier-fail");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: JSON.stringify({
+                  nextAction: passed ? "" : "Keep going.",
+                  passed,
+                  reason: passed ? "Done." : "More work remains.",
+                }),
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Continue working toward the active session goal.")) {
+              requestOrder.push("continuation");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "legacy notification continuation",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            throw new Error(`unexpected request: ${latestText}`);
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Notification trigger");
+    await sessionStore.setTarget({
+      objective: "Finish after the background notification",
+      sessionID: sessionId,
+    });
+
+    runtime.enqueueBackgroundTaskNotification({
+      text: "background build finished",
+      traceContext: {
+        queryId: "notification-trigger" as never,
+        sessionId,
+        traceId: "trace-notification-trigger" as never,
+      } as never,
+    });
+
+    await waitForCondition(() => requestOrder.includes("verifier-pass"));
+    expect(requestOrder).toEqual([
+      "notification",
+      "verifier-fail",
+      "continuation",
+      "verifier-pass",
+    ]);
   });
 
   it("manual active target loop starts without first verification", async () => {
@@ -3679,7 +3906,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-inject-hydration" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-inject-hydration",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -3731,7 +3962,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-inject-stop" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-inject-stop",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -4443,7 +4678,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-defer-workflow" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-target-defer-workflow",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -4485,7 +4724,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-ladder" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-target-ladder",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -6162,6 +6405,7 @@ describe("AgentRuntime tool loop", () => {
     const runtime = createTestAgentRuntime(
       sessionId,
       {
+        goalLayerEnabled: true,
         mode: "build",
         workingDirectory: "/tmp/zcode-todo-current-turn-context",
       },
@@ -6220,7 +6464,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-todo-reminder-cadence" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-todo-reminder-cadence",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -6303,7 +6551,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-todo-reminder-no-open-item" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-todo-reminder-no-open-item",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -6357,6 +6609,7 @@ describe("AgentRuntime tool loop", () => {
       const runtime = createTestAgentRuntime(
         sessionId,
         {
+          goalLayerEnabled: true,
           mode: "build",
           parentSessionId: createSessionId(`runtime-todo-reminder-${taskType}-parent`),
           taskType,
@@ -6416,6 +6669,7 @@ describe("AgentRuntime tool loop", () => {
       const runtime = createTestAgentRuntime(
         sessionId,
         {
+          goalLayerEnabled: true,
           mode: "build",
           parentSessionId: createSessionId(`runtime-todo-reminder-main-${taskType}-parent`),
           taskType,
@@ -6465,6 +6719,53 @@ describe("AgentRuntime tool loop", () => {
     },
   );
 
+  it("keeps the legacy 10/10 todo reminder for child runtimes with a completed list when the goal layer flag is off", async () => {
+    const sessionId = createSessionId("runtime-todo-reminder-legacy-off");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[][] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        parentSessionId: createSessionId("runtime-todo-reminder-legacy-off-parent"),
+        taskType: "workflow_child",
+        workingDirectory: "/tmp/zcode-todo-reminder-legacy-off",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: `answer ${requests.length}`,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await sessionStore.updateTodos({
+      sessionID: sessionId,
+      todos: [{ content: "Already finished", priority: "low", status: "completed" }],
+    });
+
+    // 关旗:子代理/workflow child 重新收到提醒,空/全完成清单也提醒,正文不含进度。
+    for (let index = 0; index <= LEGACY_TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+      await runtime.executeTurn(`legacy turn ${index}`);
+    }
+
+    const finalRequestText = providerMessagesToText(requests.at(-1)!);
+    expect(finalRequestText).toContain("The TodoWrite tool hasn't been used recently.");
+    expect(finalRequestText).not.toContain("still in_progress");
+    expect(finalRequestText).toContain("1. [completed] Already finished");
+  });
+
   it("does not inject todo reminders when the session has no todo list", async () => {
     const sessionId = createSessionId("runtime-todo-reminder-empty-list");
     const eventStore = createTestSessionEventStore();
@@ -6473,7 +6774,11 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-todo-reminder-empty-list" },
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-todo-reminder-empty-list",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -6514,6 +6819,7 @@ describe("AgentRuntime tool loop", () => {
     const runtime = createTestAgentRuntime(
       sessionId,
       {
+        goalLayerEnabled: true,
         mode: "build",
         toolAllowlist: ["Read"],
         workingDirectory: "/tmp/zcode-todo-reminder-tool-unavailable",
@@ -6680,6 +6986,7 @@ describe("AgentRuntime tool loop", () => {
     const firstRuntime = createTestAgentRuntime(
       sessionId,
       {
+        goalLayerEnabled: true,
         mode: "build",
         workingDirectory: "/tmp/zcode-todo-reminder-resume-marker",
       },
@@ -6718,6 +7025,7 @@ describe("AgentRuntime tool loop", () => {
     const secondRuntime = createTestAgentRuntime(
       sessionId,
       {
+        goalLayerEnabled: true,
         mode: "build",
         workingDirectory: "/tmp/zcode-todo-reminder-resume-marker",
       },
@@ -15380,19 +15688,23 @@ class RecordingSessionStore implements SessionStorePort {
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
     turnsUsedDelta?: number;
+    goalLayerEnabled?: boolean;
   }): Promise<SessionGoal | null> {
     const current = this.targets.get(input.sessionID);
     if (!current || current.targetID !== input.targetID) return current ?? null;
     const tokensUsed = current.tokensUsed + Math.max(0, input.tokensUsedDelta ?? 0);
     const timeUsedSeconds = current.timeUsedSeconds + Math.max(0, input.timeUsedSecondsDelta ?? 0);
     const turnsUsed = (current.turnsUsed ?? 0) + Math.max(0, input.turnsUsedDelta ?? 0);
-    // 与 sqlite store 的三维预算迁移保持同构(设计 §4.1):任一维 100% 翻 budget_limited。
+    // 与 sqlite store 保持同构(设计 §4.1):开旗时任一维 100% 翻 budget_limited;
+    // 关旗时只评估旧 token 维。
+    const legacyBudget = input.goalLayerEnabled === false;
     const status =
       current.status === "active" &&
       ((current.tokenBudget !== null && tokensUsed >= current.tokenBudget) ||
-        (current.turnBudget != null && turnsUsed >= current.turnBudget) ||
-        (current.wallClockBudgetSeconds != null &&
-          timeUsedSeconds >= current.wallClockBudgetSeconds))
+        (!legacyBudget &&
+          ((current.turnBudget != null && turnsUsed >= current.turnBudget) ||
+            (current.wallClockBudgetSeconds != null &&
+              timeUsedSeconds >= current.wallClockBudgetSeconds))))
         ? "budget_limited"
         : current.status;
     const next = {
@@ -15572,6 +15884,8 @@ async function waitForCondition(
  * 以便精确控制驱动器从哪个空闲沿开始接管。
  */
 function armIdleGoalRoundDriver(runtime: unknown): void {
+  // 本文件覆盖 Phase 2 idle 驱动器,统一在 arming 时把灰度旗打开;off 行为另有专测。
+  (runtime as { config: { goalLayerEnabled?: boolean } }).config.goalLayerEnabled = true;
   (runtime as { goalRoundDriverArmed?: boolean }).goalRoundDriverArmed = true;
 }
 

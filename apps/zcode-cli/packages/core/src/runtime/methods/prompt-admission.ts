@@ -1,9 +1,15 @@
-import { createChildTraceContext, createQueryId, createTurnId } from "../deps.js";
+import {
+  createChildTraceContext,
+  createQueryId,
+  createTurnId,
+  traceContextToLogContext,
+} from "../deps.js";
 import type { QueryId, TurnInputIntentMetadata } from "../deps.js";
 import type { PromptRuntimeCommand } from "../command-queue.js";
 import { createRuntimeCommandId } from "../command-queue.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
+import { isGoalLayerEnabled } from "../helpers/index.js";
 import { acceptSubmissionModelSelection, captureHighspeedFallbackSelection } from "./turn-model.js";
 import type {
   ActiveTurnStartReservation,
@@ -52,7 +58,17 @@ export async function admitPrompt(
   const busy = this.hasActiveOrQueuedTurnWork() && !promotionLeaseOnly;
   // inject 目标(设计 §3.5):绝不唤醒——不 start turn、不占跑道。idle 时只落
   // next-step 收件箱,由下一个真正起跑的回合在其首个 step 边界消费。
-  const wantsInject = options?.queueDelivery === "inject";
+  // 关旗时核心不识别该车道:不落 inject 收件箱、不 steer inject,按普通 queue 准入,
+  // 并记 warn(不扩 TurnSteerRejectReason 外部契约)。
+  const injectRequested = options?.queueDelivery === "inject";
+  const wantsInject = injectRequested && isGoalLayerEnabled(this.config);
+  if (injectRequested && !wantsInject) {
+    this.logger?.warn("Inject delivery is disabled by the goal layer flag; admitting as queue", {
+      ...traceContextToLogContext(options?.traceContext ?? this.rootTraceContext),
+      event: "prompt.admission.inject_degraded",
+      module: "core.runtime",
+    });
+  }
   if (!busy && wantsInject) {
     return await this.enqueueDeferredInput({
       attachments,

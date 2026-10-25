@@ -57,6 +57,15 @@ export function parseEnvConfig(
       if (!config.toolConcurrency) config.toolConcurrency = {};
       config.toolConcurrency.maxConcurrency = normalizeNumber(value);
     }
+
+    // Feature flags
+    else if (configKey === "GOAL_LAYER") {
+      const enabled = normalizeOptionalBoolean(value);
+      if (enabled !== undefined) {
+        if (!config.features) config.features = {};
+        config.features.goalLayer = enabled;
+      }
+    }
   }
 
   return config;
@@ -86,4 +95,11 @@ function normalizeLogFormat(value: string): "text" | "json" {
     return format;
   }
   return "text";
+}
+
+function normalizeOptionalBoolean(value: string): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "on" || normalized === "true" || normalized === "1") return true;
+  if (normalized === "off" || normalized === "false" || normalized === "0") return false;
+  return undefined;
 }

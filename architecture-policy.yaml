@@ -896,3 +896,10 @@ exceptions:
     paths:
       - apps/zcode-cli/packages/core/src/runtime/methods/dynamic-workflow-activation.ts
     reason: Admitted upstream file edited only to add the goal_arm activation source so arming a goal can bring up the on-demand workflow toolface (long-horizon-goal-redesign-plan §4.3); no new file, contract or module boundary is introduced. Adopting the whole core runtime methods directory needs a separate module boundary refactor.
+  - id: goal-layer-flag-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/cli/src/goal-layer.ts
+      - apps/zcode-cli/packages/core/src/runtime/helpers/goal-layer.ts
+      - apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts
+    reason: The goal-layer gray flag needs one CLI resolver and one runtime reader helper, and flag-off restores the pre-change continuation loop that the redesign had removed (long-horizon-goal-redesign-plan §4.1-§4.3); no existing module boundary moves and adopting the whole zcode-cli runtime needs a separate refactor.

@@ -330,18 +330,17 @@ describe("v4 原生 queue 单项命令", () => {
 });
 
 describe("v4 普通 queue 自动消费 goal gate", () => {
-  // 裁定 b(2026-10-25 常驻闭环验收):排队的用户输入必须先于 idle 驱动器的下一
-  // 回合执行。旧闸门用 targetStatus ∈ {null, complete} 把普通 queue 压在整个目标
-  // 后面(验收复现:active 目标三轮驱动器回合先跑,用户消息等 complete 后才提升)。
-  // 驱动器已在空闲沿对非空用户队列让位,目标状态不再参与排队顺序(闸门签名随之
-  // 去掉 targetStatus);verifier 在途由 sessionBusy(前台执行)挡住。held
-  // (autoDrain=false)与 dispatch 占用语义不变。
-  it("空闲会话照常自动消费(目标状态不再参与排队顺序)", () => {
+  // 开旗(goalLayerEnabled):排队的用户输入必须先于 idle 驱动器的下一回合执行。
+  // 调用方传 targetStatus=null,目标状态不再参与排队顺序;verifier 在途仍由
+  // sessionBusy(前台执行)挡住。关旗:恢复旧条件 targetStatus ∈ {null, complete},
+  // 普通 queue 被压在未完成目标后面。held(autoDrain=false)与 dispatch 占用语义不变。
+  it("空闲会话照常自动消费(开旗传 null,目标状态不参与)", () => {
     expect(
       shouldAutoDrainV4QueueHead({
         autoDrain: true,
         dispatchState: "queued",
         sessionBusy: false,
+        targetStatus: null,
       }),
     ).toBe(true);
   });
@@ -352,6 +351,7 @@ describe("v4 普通 queue 自动消费 goal gate", () => {
         autoDrain: false,
         dispatchState: "queued",
         sessionBusy: false,
+        targetStatus: null,
       }),
     ).toBe(false);
   });
@@ -362,6 +362,7 @@ describe("v4 普通 queue 自动消费 goal gate", () => {
         autoDrain: true,
         dispatchState: "queued",
         sessionBusy: true,
+        targetStatus: null,
       }),
     ).toBe(false);
   });
@@ -372,8 +373,41 @@ describe("v4 普通 queue 自动消费 goal gate", () => {
         autoDrain: true,
         dispatchState,
         sessionBusy: false,
+        targetStatus: null,
       }),
     ).toBe(false);
+  });
+
+  it("关旗:active/paused/budget_limited 目标期间不提升普通 queue", () => {
+    for (const targetStatus of ["active", "paused", "budget_limited"] as const) {
+      expect(
+        shouldAutoDrainV4QueueHead({
+          autoDrain: true,
+          dispatchState: "queued",
+          sessionBusy: false,
+          targetStatus,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("关旗:目标 complete 或不存在时照常提升", () => {
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: true,
+        dispatchState: "queued",
+        sessionBusy: false,
+        targetStatus: "complete",
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: true,
+        dispatchState: "queued",
+        sessionBusy: false,
+        targetStatus: null,
+      }),
+    ).toBe(true);
   });
 });
 

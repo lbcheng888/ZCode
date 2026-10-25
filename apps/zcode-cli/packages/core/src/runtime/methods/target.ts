@@ -27,6 +27,8 @@ import { hasRunningBackgroundRuntimeTask } from "../../runtime-task/registry.js"
 import { wrapSystemReminderForSource } from "../../system-reminder/source.js";
 import { verifyActiveTargetCompletionForContinuation } from "./target-completion-verification.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
+import { enqueueActiveTargetContinuationLoop } from "./target-continuation-loop.js";
+import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
 
 export async function recordTargetChanged(
   this: AgentRuntimeInternal,
@@ -83,17 +85,21 @@ export async function continueActiveTargetIfIdle(
 
 /**
  * 手动 goal 续跑入口(/goal set/resume、v4 sendGoalCommand/resumeGoal 共用)。
- * 旧实现占用 runtime command queue 跑 while 忙碌循环(target-continuation-loop.ts,
- * 已删除);现在只做「驱动器 arm + 立即预约一个回合」(设计 §3.2/§3.6):
+ * 开旗：只做「驱动器 arm + 立即预约一个回合」(设计 §3.2/§3.6):
  * - arm:idle 驱动器从此外围边缘自动预约后续回合,直至 paused/blocked/complete;
  * - 预约-准入:本命令执行时才做候选闸门与预算边界检查;预约入队后机器即非
  *   idle,驱动器不会重复预约;
  * - 用户消息不消耗回合预算(仅 inputSource=goal-continuation 的回合计数)。
+ * 关旗：回到旧行为——占用 runtime command queue 跑 while 忙碌循环
+ * (target-continuation-loop.ts)，不 arm、不预约 idle 驱动器。
  */
 export async function continueActiveTargetLoop(
   this: AgentRuntimeInternal,
   options: ContinueActiveTargetLoopOptions,
 ): Promise<TurnResult | null> {
+  if (!isGoalLayerEnabled(this.config)) {
+    return await enqueueActiveTargetContinuationLoop.call(this, options);
+  }
   const traceContext = options.traceContext ?? this.rootTraceContext;
   // goal↔workflow 桥(设计 §3.3):goal 回合是 workflow run 的发起方。onDemand 灰度会话
   // 出生不注册十个工作流工具,模型在 goal 回合内看不见 CreateWorkflow 就无法发起 run——
@@ -133,6 +139,8 @@ export async function continueActiveTargetLoop(
  * 预约兑现则继续在下一个 idle 边缘预约,goal 循环由此在边缘间展开。
  */
 export function scheduleIdleGoalRound(this: AgentRuntimeInternal): void {
+  // 灰度旗关闭:旧世界没有 idle 驱动器,goal 回合只由手动续跑与回合收尾触发源产生。
+  if (!isGoalLayerEnabled(this.config)) return;
   // 上一次预约未兑现:消费该信号后保持静默,等待下一个外部事件(用户输入、
   // 通知、手动续跑)制造的真正边缘。否则任何非终态 null 都会变成轮询循环。
   if (this.goalRoundDriverStandingDown) {
@@ -208,7 +216,12 @@ export async function executeTargetContinuationCommand(
   // 驱动器(scheduleIdleGoalRound 的整机 idle 闸门)同受此约束;终态回填的通知轮排空后
   // 产生新的空闲沿,goal 回合在那里拿到窄结果继续裁决。旧实现只在 verifyBeforeContinue
   // 时检查,手动 resume 会在 run 在途时照跑回合,形成双重驱动。
-  if (await hasRunningBackgroundTaskForGoalContinuation.call(this)) {
+  // 开旗:任何续跑都让位给在途后台任务。关旗恢复旧行为:只有带完成判定的续跑
+  // (verifyBeforeContinue)才检查;手动续跑照跑。
+  if (
+    (isGoalLayerEnabled(this.config) || options.verifyBeforeContinue === true) &&
+    (await hasRunningBackgroundTaskForGoalContinuation.call(this))
+  ) {
     this.logger?.info("Goal continuation deferred while background tasks are running", {
       ...traceContextToLogContext(traceContext),
       event: "target.continuation.deferred_background_running",
@@ -273,7 +286,9 @@ export async function executeTargetContinuationCommand(
   // (只认 active)自然收口,不会再续跑。
   // 回合维不带 +1 预约:turnsUsed == budget 说明最后一个允许回合已完成,
   // 若 turnsUsed + 1 == budget,该回合仍属预算内,应完整执行并由结算翻 blocked。
-  const exhaustedDimension = findExhaustedTargetBudgetDimension(continuationTarget);
+  const exhaustedDimension = isGoalLayerEnabled(this.config)
+    ? findExhaustedTargetBudgetDimension(continuationTarget)
+    : undefined;
   if (exhaustedDimension && this.sessionStore) {
     const previousTarget = continuationTarget;
     const blockedTarget = await this.sessionStore.updateTargetStatus({
@@ -305,10 +320,17 @@ export async function executeTargetContinuationCommand(
     "target_continuation",
     // workflow 委派指引与判定权阶梯(设计 §3.3)只在工具面在场时进入提示:
     // CreateWorkflow 缺席的会话(fail-closed 灰度)模型无处发起 run,指引只会误导。
-    formatGoalContinuationPrompt(continuationTarget, verificationResult?.verification, {
-      workflowDelegation:
-        this.config.dynamicWorkflowEnabled !== false && this.dynamicWorkflowToolsActivated,
-    }),
+    formatGoalContinuationPrompt(
+      continuationTarget,
+      verificationResult?.verification,
+      {
+        goalLayerEnabled: isGoalLayerEnabled(this.config),
+        workflowDelegation:
+          isGoalLayerEnabled(this.config) &&
+          this.config.dynamicWorkflowEnabled !== false &&
+          this.dynamicWorkflowToolsActivated,
+      },
+    ),
   );
   const continuationTrace = createChildTraceContext(traceContext, {
     sessionId: this.sessionId,
@@ -342,7 +364,9 @@ export async function executeTargetContinuationCommand(
   // (如 token 在最后一次 ModelComplete 才越线、模型直接收尾),补发一次宽限
   // 终局回合;回合内已交付(veto 置位)或本轮就是终局回合时不重复。
   // 旧忙碌循环在循环体内做此补偿;循环删除后由单回合命令自带(设计 §3.2)。
-  await runTargetBudgetOutcomeTurnIfNeeded.call(this, options, traceContext);
+  if (isGoalLayerEnabled(this.config)) {
+    await runTargetBudgetOutcomeTurnIfNeeded.call(this, options, traceContext);
+  }
   return continuationResult;
 }
 
@@ -469,8 +493,9 @@ export async function accountTargetTurnCompletion(
 
   const tokensUsedDelta = input.usage?.totalTokens ?? 0;
   // 回合预算只计 goal 续跑回合;用户消息不消耗(设计 §3.2 预约-准入语义在
-  // Phase 1 的对应裁定,见设计文档 §4.1)。
-  const turnsUsedDelta = input.countsTurn === true ? 1 : 0;
+  // Phase 1 的对应裁定,见设计文档 §4.1)。关旗时回调旧的纯 token/挂钟记账。
+  const goalLayerEnabled = isGoalLayerEnabled(this.config);
+  const turnsUsedDelta = goalLayerEnabled && input.countsTurn === true ? 1 : 0;
   const endedAtMs = Date.now();
 
   try {
@@ -483,6 +508,7 @@ export async function accountTargetTurnCompletion(
           targetID: target.targetID,
           tokensUsedDelta,
           turnsUsedDelta,
+          goalLayerEnabled,
         })
       : await this.sessionStore.accountTargetUsage({
           sessionID: this.sessionId,
@@ -490,6 +516,7 @@ export async function accountTargetTurnCompletion(
           tokensUsedDelta,
           timeUsedSecondsDelta: Math.max(0, Math.ceil((endedAtMs - input.startedAtMs) / 1000)),
           turnsUsedDelta,
+          goalLayerEnabled,
         });
     if (accountedTarget?.targetID === target.targetID) {
       await this.recordTargetChanged({
@@ -611,6 +638,7 @@ export async function finishTargetTurnAccounting(
       sessionID: this.sessionId,
       status: input.status,
       targetID: target.targetID,
+      goalLayerEnabled: isGoalLayerEnabled(this.config),
     });
     if (finishedTarget?.targetID === target.targetID) {
       await this.recordTargetChanged({

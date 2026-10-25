@@ -6,7 +6,7 @@ import {
   updateConfig,
   setExecutionState,
 } from "./config.js";
-import { getMode, getPlanEnabled } from "./config.js";
+import { getMode, getPlanEnabled, isGoalLayerEnabled } from "./config.js";
 import { getSessionModelSelection, setSessionModelSelection } from "./config.js";
 import { getProjectId } from "./config.js";
 import { setWorkingDirectory } from "./config.js";
@@ -211,6 +211,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.getSessionShellSelection = getSessionShellSelection;
   proto.getMode = getMode;
   proto.getPlanEnabled = getPlanEnabled;
+  proto.isGoalLayerEnabled = isGoalLayerEnabled;
   proto.getSessionModelSelection = getSessionModelSelection;
   proto.setSessionModelSelection = setSessionModelSelection;
   proto.getProjectId = getProjectId;

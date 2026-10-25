@@ -748,4 +748,37 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
     });
     expect(runtimeConfig.dynamicWorkflowToolsOnDemand).toBe(expected);
   });
+
+  // goal 灰度旗 fail-closed:显式 session 值优先,否则读 features.goalLayer(缺省 false)。
+  it("resolves goalLayerEnabled with the session value taking precedence", () => {
+    const configResult = createConfigResult();
+    const base = {
+      cliStorageRoot: "/tmp/zcode-cli-storage",
+      subagentOutputRootDir: "/tmp/zcode-subagent-output",
+      workingDirectory,
+    };
+    expect(
+      resolveAppRuntimeConfig({ ...base, configResult, options: {} }).runtimeConfig.goalLayerEnabled,
+    ).toBe(false);
+
+    const enabledConfig = {
+      ...configResult,
+      config: {
+        ...configResult.config,
+        features: { ...configResult.config.features, goalLayer: true },
+      },
+    };
+    expect(
+      resolveAppRuntimeConfig({ ...base, configResult: enabledConfig, options: {} }).runtimeConfig
+        .goalLayerEnabled,
+    ).toBe(true);
+
+    expect(
+      resolveAppRuntimeConfig({
+        ...base,
+        configResult: enabledConfig,
+        options: { runtimeConfig: { goalLayerEnabled: false } },
+      }).runtimeConfig.goalLayerEnabled,
+    ).toBe(false);
+  });
 });

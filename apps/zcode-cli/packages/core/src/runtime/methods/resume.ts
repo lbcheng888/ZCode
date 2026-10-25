@@ -26,7 +26,7 @@ import type {
   TurnState,
   ToolSchedule,
 } from "../deps.js";
-import { getLatestActiveSessionMessageId } from "../helpers/index.js";
+import { getLatestActiveSessionMessageId, isGoalLayerEnabled } from "../helpers/index.js";
 import type { ResumeSessionOptions, ResumeSessionResult } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import {
@@ -444,7 +444,9 @@ export function injectTargetStateIntoMessageHistory(
   this: AgentRuntimeInternal,
   target: SessionGoal | null,
 ): void {
-  const targetState = formatGoalStateForModel(target);
+  const targetState = formatGoalStateForModel(target, {
+    goalLayerEnabled: isGoalLayerEnabled(this.config),
+  });
   if (!targetState) {
     return;
   }

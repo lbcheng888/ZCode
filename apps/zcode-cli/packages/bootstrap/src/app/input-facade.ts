@@ -129,8 +129,9 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
     return await deps.runtime.executeTurn(runtimePromptText, storedAttachments, {
       abortSignal: options?.abortSignal,
       browserAmbientContext: options?.browserAmbientContext,
-      // goal 续跑不再挂在 prompt 之后(continueActiveTargetAfterTurn 已删除,设计
-      // §3.6):drain 收口的空闲沿由 idle 驱动器统一预约,消除双触发源。
+      // 开旗:goal 续跑不挂在 prompt 之后(设计 §3.6),drain 收口的空闲沿由 idle
+      // 驱动器统一预约。关旗:恢复旧触发源 continueActiveTargetAfterTurn。
+      continueActiveTargetAfterTurn: deps.runtime.isGoalLayerEnabled?.() === true ? undefined : true,
       ...(resolvedCommandPrompt !== undefined ? { displayInput: promptInput.text } : {}),
       inputId: options?.inputId,
       ...turnAttribution,

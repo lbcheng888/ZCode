@@ -179,7 +179,7 @@ describe("AgentRuntime turn cancellation", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { systemPrompt: "You are a keepInbox cancel test agent." },
+      { goalLayerEnabled: true, systemPrompt: "You are a keepInbox cancel test agent." },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -223,7 +223,10 @@ describe("AgentRuntime turn cancellation", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { systemPrompt: "You are a default keepInbox cancel test agent." },
+      {
+        goalLayerEnabled: true,
+        systemPrompt: "You are a default keepInbox cancel test agent.",
+      },
       {
         eventStore,
         modelFactory: createTestModelFactory({

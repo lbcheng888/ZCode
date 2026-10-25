@@ -32,7 +32,11 @@ const CMD_SHELL_SELECTION = {
   source: "user-config",
 } as const;
 
-const ON_DEMAND_CONFIG = { dynamicWorkflowEnabled: true, dynamicWorkflowToolsOnDemand: true };
+const ON_DEMAND_CONFIG = {
+  dynamicWorkflowEnabled: true,
+  dynamicWorkflowToolsOnDemand: true,
+  goalLayerEnabled: true,
+};
 
 function agentDescription(runtime: AgentRuntime): string {
   return runtime.getToolRegistry().get("Agent")?.metadata.description ?? "";

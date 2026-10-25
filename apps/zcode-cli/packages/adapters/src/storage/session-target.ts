@@ -268,7 +268,7 @@ export function cloneSessionTargetForFork(
     source.tokenBudget,
     source.tokensUsed,
     source.timeUsedSeconds,
-    source.turnBudget ?? DEFAULT_TARGET_TURN_BUDGET,
+    source.turnBudget === undefined ? DEFAULT_TARGET_TURN_BUDGET : source.turnBudget,
     source.turnsUsed ?? 0,
     source.wallClockBudgetSeconds ?? null,
     source.time.created,
@@ -292,7 +292,12 @@ export function cloneSessionTargetForFork(
 
 export function createSessionTarget(
   db: DatabaseSync,
-  input: { objective: string; sessionID: SessionId; tokenBudget?: number | null },
+  input: {
+    objective: string;
+    sessionID: SessionId;
+    tokenBudget?: number | null;
+    turnBudget?: number | null;
+  },
 ): SessionGoal | null {
   const now = Date.now();
   const targetID = createStorageTargetId();
@@ -307,7 +312,7 @@ export function createSessionTarget(
     targetID,
     input.objective,
     input.tokenBudget ?? null,
-    DEFAULT_TARGET_TURN_BUDGET,
+    input.turnBudget === undefined ? DEFAULT_TARGET_TURN_BUDGET : input.turnBudget,
     null,
     now,
     now,
@@ -433,6 +438,8 @@ export function finishSessionTargetRun(
     reason?: string;
     tokensUsedDelta?: number;
     turnsUsedDelta?: number;
+    /** goal 灰度旗:false 时结算只评估旧 token 维,不翻回合/挂钟预算。 */
+    goalLayerEnabled?: boolean;
   },
 ): SessionGoal | null {
   const current = readSessionTarget(db, { sessionID: input.sessionID });
@@ -449,6 +456,7 @@ export function finishSessionTargetRun(
   const tokenDelta = Math.max(0, input.tokensUsedDelta ?? 0);
   const turnDelta = Math.max(0, input.turnsUsedDelta ?? 0);
   const timeDelta = elapsedSecondsBetween(current.activeRunStartedAtMs, endedAt);
+  const legacyBudget = input.goalLayerEnabled !== true;
   const result = db
     .prepare(
       `
@@ -459,11 +467,15 @@ export function finishSessionTargetRun(
         time_used_seconds = time_used_seconds + ?,
         status = case
           when ? is not null then ?
-          when status = 'active' and (
+          when status = 'active' and ${
+            legacyBudget
+              ? "(token_budget is not null and tokens_used + ? >= token_budget)"
+              : `(
             (token_budget is not null and tokens_used + ? >= token_budget)
             or (turn_budget is not null and turns_used + ? >= turn_budget)
             or (wall_clock_budget_seconds is not null and time_used_seconds + ? >= wall_clock_budget_seconds)
-          ) then 'budget_limited'
+          )`
+          } then 'budget_limited'
           else status
         end,
         active_input_id = null,
@@ -483,8 +495,7 @@ export function finishSessionTargetRun(
       input.status ?? null,
       input.status ?? null,
       tokenDelta,
-      turnDelta,
-      timeDelta,
+      ...(legacyBudget ? [] : [turnDelta, timeDelta]),
       endedAt,
       input.sessionID,
       input.targetID,
@@ -509,7 +520,7 @@ export function finishSessionTargetRun(
         targetID: target.targetID,
       });
     }
-  } else {
+  } else if (!legacyBudget) {
     appendBlockedEventOnBudgetFlip(db, { current, sessionID: input.sessionID, target });
   }
   return target;
@@ -578,6 +589,8 @@ export function accountSessionTargetUsage(
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
     turnsUsedDelta?: number;
+    /** goal 灰度旗:false 时结算只评估旧 token 维,不翻回合/挂钟预算。 */
+    goalLayerEnabled?: boolean;
   },
 ): SessionGoal | null {
   const now = Date.now();
@@ -592,6 +605,7 @@ export function accountSessionTargetUsage(
     return current;
   }
 
+  const legacyBudget = input.goalLayerEnabled !== true;
   const result = db
     .prepare(
       `
@@ -601,11 +615,15 @@ export function accountSessionTargetUsage(
         turns_used = turns_used + ?,
         time_used_seconds = time_used_seconds + ?,
         status = case
-          when status = 'active' and (
+          when status = 'active' and ${
+            legacyBudget
+              ? "(token_budget is not null and tokens_used + ? >= token_budget)"
+              : `(
             (token_budget is not null and tokens_used + ? >= token_budget)
             or (turn_budget is not null and turns_used + ? >= turn_budget)
             or (wall_clock_budget_seconds is not null and time_used_seconds + ? >= wall_clock_budget_seconds)
-          ) then 'budget_limited'
+          )`
+          } then 'budget_limited'
           else status
         end,
         time_updated = ?
@@ -617,8 +635,7 @@ export function accountSessionTargetUsage(
       turnDelta,
       timeDelta,
       tokenDelta,
-      turnDelta,
-      timeDelta,
+      ...(legacyBudget ? [] : [turnDelta, timeDelta]),
       now,
       input.sessionID,
       input.targetID,
@@ -626,7 +643,9 @@ export function accountSessionTargetUsage(
   if (result.changes === 0) return readSessionTarget(db, { sessionID: input.sessionID });
   touchSessionForTarget(db, input.sessionID, now);
   const target = mustReadTarget(db, input.sessionID);
-  appendBlockedEventOnBudgetFlip(db, { current, sessionID: input.sessionID, target });
+  if (!legacyBudget) {
+    appendBlockedEventOnBudgetFlip(db, { current, sessionID: input.sessionID, target });
+  }
   return target;
 }
 

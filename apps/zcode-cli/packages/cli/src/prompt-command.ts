@@ -33,6 +33,7 @@ import {
   resolveWorkflowModeRuntimeConfig,
   WORKFLOW_DISABLED_NOTICE,
 } from "./workflow-mode.js";
+import { resolveGoalLayerRuntimeConfig, type CliGoalLayerMode } from "./goal-layer.js";
 import type { DynamicWorkflowMode } from "@zcode/shared";
 import type { CommandCenterApp, SlashCommand } from "./command-center.js";
 import type {
@@ -81,6 +82,7 @@ export const runPrompt = async (
   toolsearchMode: ToolSearchMode = "off",
   presentationSurface: PresentationSurface = "terminal",
   workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
+  goalLayer?: CliGoalLayerMode,
 ): Promise<number> => {
   if (prompt.trim().length === 0) {
     ctx.stderr.write(`${EMPTY_PROMPT_ERROR}\n`);
@@ -268,6 +270,7 @@ export const runPrompt = async (
         toolSearch: { mode: toolsearchMode },
         ...(forceMcs ? { midConversationSystem: { mode: "force" as const } } : {}),
         ...resolveWorkflowModeRuntimeConfig(workflowMode),
+        ...resolveGoalLayerRuntimeConfig(goalLayer),
         memory: { extractionEnabled: options.memoryBench === true },
         modelStreaming: "on",
         presentationSurface,

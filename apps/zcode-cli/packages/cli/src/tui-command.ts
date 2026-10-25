@@ -14,6 +14,7 @@ import { resolveWorkspaceGitBranch } from "./tui-workspace-git.js";
 import { createCliModeState, currentCliMode } from "./tui-command-state.js";
 import type { CliPermissionMode, CliResumeRequest, RunDependencies } from "./cli-types.js";
 import { DEFAULT_CLI_WORKFLOW_MODE } from "./workflow-mode.js";
+import type { CliGoalLayerMode } from "./goal-layer.js";
 
 export const runTuiCommand = async (
   ctx: RunContext,
@@ -26,6 +27,7 @@ export const runTuiCommand = async (
   forceMcs = false,
   toolsearchMode: ToolSearchMode = "off",
   workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
+  goalLayer?: CliGoalLayerMode,
 ): Promise<number> => {
   try {
     const modeState = createCliModeState(mode);
@@ -52,6 +54,7 @@ export const runTuiCommand = async (
       options.browserUse,
       options.browserExecutable,
       workflowMode,
+      goalLayer,
     );
     // 缺陷根因（关停竞态，与 prompt-command 同型）：这里原样透传 deps.shutdownCleanupTimeoutMs
     // （缺省 undefined）时，shutdown.ts 落到自己的 2s 缺省，而 promptHandler.close 内部按

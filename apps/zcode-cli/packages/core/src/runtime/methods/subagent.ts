@@ -309,6 +309,9 @@ export function createDefaultSubagentPort(
             // 父 registry 可见的工具名）本来就够，但**自定义 agent profile 显式写
             // `allowedTools: ["CreateWorkflow"]` 时会跳过那次交集**，只剩这一道能挡住。
             dynamicWorkflowEnabled: this.config.dynamicWorkflowEnabled,
+            // goal 灰度旗结构性继承:父会话开旗时子代理的回合仍走同一套 core 行为,
+            // 关旗时保持 fail-closed(缺席=关)。
+            goalLayerEnabled: this.config.goalLayerEnabled,
             // launch.md「On demand: activation」Children 段：子代理继承父会话**此刻**的工具面——
             // 父未激活则子也按需（子会话里没有 `/workflow` 入口，实际等于没有工作流工具）；
             // 父已激活则子出生即注册。

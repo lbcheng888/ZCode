@@ -226,6 +226,13 @@ export interface AgentRuntimeConfig {
    * Host 下发的 mode 为 onDemand 时写 true。激活状态归 runtime（dynamicWorkflowToolsActivated）。
    */
   dynamicWorkflowToolsOnDemand?: boolean;
+  /**
+   * long-horizon goal 灰度旗。**缺席即关闭**（与 dynamicWorkflowEnabled 的极性刻意相反）：
+   * 只有显式 true 才启用 idle 回合驱动器、三维目标预算、target_anchor、inject 车道、
+   * 目标状态 auto-drain 闸门与 5/5 todo 提醒；缺席/false 时逐项恢复旧行为。
+   * 独立 CLI 按 --goal-layer 显式写入；协议服务端读 features.goalLayer。
+   */
+  goalLayerEnabled?: boolean;
 
   // Context Builder config
   systemPrompt?: string;
@@ -488,6 +495,11 @@ export interface ExecuteTurnOptionsBase {
     tabCount: number;
     currentUrl?: string;
   };
+  /**
+   * 灰度旗关闭时的旧触发源：prompt 回合结束后在同一前台执行里续跑 active 目标。
+   * 开旗时该触发源被 idle 驱动器取代，调用方不得设置。
+   */
+  continueActiveTargetAfterTurn?: boolean;
   displayInput?: string;
   /**
    * `input` 从此下标起是调用方追加的引擎文本（dwf ask 尾注 / nudge）。只进 TurnStarted 与用户
@@ -555,7 +567,7 @@ export type PromptAdmissionReceipt =
  * idle 驱动器统一接管 goal 续跑触发后(设计 §3.6),手动入口只剩 /goal 语义的
  * "arm + 立即预约";user-prompt / task-notification 双触发源已随忙碌循环删除。
  */
-export type ActiveTargetLoopTrigger = "manual";
+export type ActiveTargetLoopTrigger = "manual" | "user-prompt" | "task-notification";
 
 export interface ContinueActiveTargetLoopOptions {
   abortSignal?: AbortSignal;

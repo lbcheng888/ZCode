@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSessionId } from "@zcode/contracts";
 import {
+  LEGACY_TODO_REMINDER_CONFIG,
   RUNTIME_MODE_REMINDER_CONFIG,
   TODO_REMINDER_CONFIG,
   buildDateChangeReminderBody,
@@ -160,9 +161,21 @@ describe("runtime request reminders", () => {
       })),
     ];
 
-    expect(getDueTodoReminderTurnsSinceWrite(entries)).toBe(
+    expect(getDueTodoReminderTurnsSinceWrite(entries, true)).toBe(
       TODO_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
     );
+  });
+
+  it("falls back to the legacy 10/10 cadence when the goal layer is off", () => {
+    const assistantTurns = Array.from({ length: 10 }, (_, index) => ({
+      message: { role: "assistant" as const, content: `assistant turn ${index}` },
+    }));
+
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns.slice(0, 9))).toBeNull();
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns)).toBe(
+      LEGACY_TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE,
+    );
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns.slice(0, 5), true)).toBe(5);
   });
 
   it("holds todo reminders until both thresholds are reached within 5 steps", () => {
@@ -170,8 +183,8 @@ describe("runtime request reminders", () => {
       message: { role: "assistant" as const, content: `assistant turn ${index}` },
     }));
 
-    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns.slice(0, 4))).toBeNull();
-    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns)).toBe(5);
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns.slice(0, 4), true)).toBeNull();
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns, true)).toBe(5);
 
     const recentReminder = [
       {
@@ -180,7 +193,15 @@ describe("runtime request reminders", () => {
       },
       ...assistantTurns.slice(0, 4),
     ];
-    expect(getDueTodoReminderTurnsSinceWrite(recentReminder)).toBeNull();
+    expect(getDueTodoReminderTurnsSinceWrite(recentReminder, true)).toBeNull();
+  });
+
+  it("renders the legacy reminder body without progress when no step count is passed", () => {
+    const body = buildTodoReminderBody([{ content: "queued", priority: "high", status: "pending" }]);
+    expect(body).toContain("The TodoWrite tool hasn't been used recently.");
+    expect(body).not.toContain("done");
+    expect(body).not.toContain("still in_progress");
+    expect(body).toContain("Here are the existing contents of your todo list:");
   });
 
   it("keeps reminders only for todo lists with open items", () => {

@@ -35,6 +35,7 @@ import {
   normalizeWorkflowModeOption,
   WORKFLOW_MODE_SCOPE_ERROR,
 } from "./workflow-mode.js";
+import { GOAL_LAYER_SCOPE_ERROR, normalizeGoalLayerOption } from "./goal-layer.js";
 import type {
   CliPermissionMode,
   CliResumeRequest,
@@ -382,6 +383,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
 
   let mode: CliPermissionMode | undefined;
   let workflowModeOption: ReturnType<typeof normalizeWorkflowModeOption>;
+  let goalLayerOption: ReturnType<typeof normalizeGoalLayerOption>;
   let browserUse: GlobalOptions["browserUse"];
   let presentationSurface: PresentationSurface;
   try {
@@ -389,6 +391,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
     workflowModeOption = normalizeWorkflowModeOption(
       parsed.values["workflow-mode"] as string | undefined,
     );
+    goalLayerOption = normalizeGoalLayerOption(parsed.values["goal-layer"] as string | undefined);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.stderr.write(`${message}\n`);
@@ -522,6 +525,21 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
   }
   const workflowMode = workflowModeOption ?? DEFAULT_CLI_WORKFLOW_MODE;
 
+  // 灰度旗与 --workflow-mode 同作用域：只有会建会话的入口（--prompt / --target / tui）接受。
+  if (
+    goalLayerOption !== undefined &&
+    !isForceMcsSupportedInvocation({
+      positionals: parsed.positionals,
+      prompt: parsed.values.prompt as string | undefined,
+      targetRequest,
+    })
+  ) {
+    ctx.stderr.write(`${GOAL_LAYER_SCOPE_ERROR}\n`);
+    return 1;
+  }
+  // 未传旗时不写 goalLayerEnabled:由 bootstrap 回落 features.goalLayer(默认 false)。
+  const goalLayer = goalLayerOption;
+
   if (
     (forceMcs || parsed.values["toolsearch-mode"] !== undefined) &&
     !isForceMcsSupportedInvocation({
@@ -577,6 +595,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       toolsearchMode,
       presentationSurface,
       workflowMode,
+      goalLayer,
     );
   }
 
@@ -595,6 +614,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       toolsearchMode,
       presentationSurface,
       workflowMode,
+      goalLayer,
     );
   }
 
@@ -651,6 +671,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
         forceMcs,
         toolsearchMode,
         workflowMode,
+        goalLayer,
       );
     default:
       ctx.stderr.write(`Unknown command: ${commandName(parsed.positionals)}\n\n`);

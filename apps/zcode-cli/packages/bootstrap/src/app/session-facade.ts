@@ -223,7 +223,13 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
             sessionID: deps.sessionId,
             status: input.status,
             tokenBudget: input.tokenBudget,
-            turnBudget: input.turnBudget,
+            // 关旗时旧世界没有回合预算:显式 null 阻止 setSessionTarget 的 256 缺省。
+            turnBudget:
+              input.turnBudget === undefined
+                ? deps.runtime.isGoalLayerEnabled?.() === true
+                  ? undefined
+                  : null
+                : input.turnBudget,
             wallClockBudgetSeconds: input.wallClockBudgetSeconds,
           })
         : action === "status_updated"

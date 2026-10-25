@@ -848,6 +848,8 @@ describe("session persistence", () => {
           admittedDelivery: "startNow",
         },
       });
+      // goal 灰度旗默认 off:旧世界没有回合预算,persist 层显式 null 而不是 256。
+      expect(target.turnBudget).toBeNull();
       const session = await store.getSession(app.sessionId);
       const messages = await store.messages({ sessionID: app.sessionId });
       const events = await eventStore.getEvents(app.sessionId);

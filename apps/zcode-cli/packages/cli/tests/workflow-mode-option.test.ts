@@ -7,6 +7,7 @@ import { createCommandCenter, listSlashCommandSuggestions } from "../src/command
 import type { CommandCenterApp, CommandCenterDeps } from "../src/command-center.js";
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
 import { WORKFLOW_DISABLED_NOTICE, WORKFLOW_MODE_SCOPE_ERROR } from "../src/workflow-mode.js";
+import { GOAL_LAYER_SCOPE_ERROR } from "../src/goal-layer.js";
 
 /**
  * 独立 CLI 的 `--workflow-mode`（docs/dynamic-workflow/launch.md「The standalone CLI:
@@ -48,6 +49,7 @@ const fakeProjection = {
 type RuntimeConfigSeen = {
   dynamicWorkflowEnabled?: boolean;
   dynamicWorkflowToolsOnDemand?: boolean;
+  goalLayerEnabled?: boolean;
 };
 
 /** 记录每次建 app 时的两个工作流字段；app 本身只够跑通一次 prompt / TUI 启动。 */
@@ -60,6 +62,7 @@ function createRecordingDeps(): { deps: RunDependencies; seen: RuntimeConfigSeen
       seen.push({
         dynamicWorkflowEnabled: config.dynamicWorkflowEnabled,
         dynamicWorkflowToolsOnDemand: config.dynamicWorkflowToolsOnDemand,
+        goalLayerEnabled: config.goalLayerEnabled,
       });
       return {
         getLocale: () => "en-US",
@@ -86,9 +89,22 @@ function createRecordingDeps(): { deps: RunDependencies; seen: RuntimeConfigSeen
   return { deps, seen };
 }
 
-const DISABLED_PAIR = { dynamicWorkflowEnabled: false, dynamicWorkflowToolsOnDemand: false };
-const ON_DEMAND_PAIR = { dynamicWorkflowEnabled: true, dynamicWorkflowToolsOnDemand: true };
-const ALWAYS_ON_PAIR = { dynamicWorkflowEnabled: true, dynamicWorkflowToolsOnDemand: false };
+// 未传 --goal-layer 时不写该字段(由 features.goalLayer 兜底,默认 false)。
+const DISABLED_PAIR = {
+  dynamicWorkflowEnabled: false,
+  dynamicWorkflowToolsOnDemand: false,
+  goalLayerEnabled: undefined,
+};
+const ON_DEMAND_PAIR = {
+  dynamicWorkflowEnabled: true,
+  dynamicWorkflowToolsOnDemand: true,
+  goalLayerEnabled: undefined,
+};
+const ALWAYS_ON_PAIR = {
+  dynamicWorkflowEnabled: true,
+  dynamicWorkflowToolsOnDemand: false,
+  goalLayerEnabled: undefined,
+};
 
 // ── DWG-14：取值与 runtime 字段 ────────────────────────────────────────────
 
@@ -170,6 +186,65 @@ test("an unknown --workflow-mode value fails before any app is created", async (
     ctx.stderr.output(),
     /Unsupported --workflow-mode value: sometimes\. Supported modes: disabled, onDemand, alwaysOn\./,
   );
+  assert.deepEqual(seen, []);
+});
+
+// ── goal-layer 灰度旗（默认 off，与 dynamicWorkflowEnabled 极性相反）─────────
+
+test("TUI with --goal-layer on writes goalLayerEnabled true", async () => {
+  const { deps, seen } = createRecordingDeps();
+  const ctx = createContext(["--goal-layer", "on"]);
+  const exitCode = await run(ctx, {
+    ...deps,
+    runTui: async (options) => {
+      await options.loadStartupOptions?.();
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.ok(seen.length > 0);
+  for (const config of seen) {
+    assert.deepEqual(config, {
+      dynamicWorkflowEnabled: false,
+      dynamicWorkflowToolsOnDemand: false,
+      goalLayerEnabled: true,
+    });
+  }
+});
+
+test("--goal-layer off writes an explicit false that overrides config", async () => {
+  const { deps, seen } = createRecordingDeps();
+  const ctx = createContext(["--goal-layer", "off"]);
+  const exitCode = await run(ctx, {
+    ...deps,
+    runTui: async (options) => {
+      await options.loadStartupOptions?.();
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.ok(seen.length > 0);
+  for (const config of seen) {
+    assert.equal(config.goalLayerEnabled, false);
+  }
+});
+
+test("an unknown --goal-layer value fails before any app is created", async () => {
+  const { deps, seen } = createRecordingDeps();
+  const ctx = createContext(["--prompt", "hello", "--goal-layer", "sometimes"]);
+  assert.equal(await run(ctx, deps), 1);
+  assert.match(
+    ctx.stderr.output(),
+    /Unsupported --goal-layer value: sometimes\. Supported values: on, off\./,
+  );
+  assert.deepEqual(seen, []);
+});
+
+test("--goal-layer is rejected outside session entrypoints", async () => {
+  const { deps, seen } = createRecordingDeps();
+  const ctx = createContext(["app-server", "--goal-layer", "on"]);
+  assert.equal(await run(ctx, deps), 1);
+  assert.equal(ctx.stderr.output(), `${GOAL_LAYER_SCOPE_ERROR}\n`);
   assert.deepEqual(seen, []);
 });
 

@@ -35,6 +35,7 @@ import { acceptSubmissionModelSelection, recordPublishedModelSelection } from ".
 import { createRuntimeModel } from "./runtime-model.js";
 import {
   buildUserContentFromTurn,
+  isGoalLayerEnabled,
   measureUtf8Bytes,
   MAX_TURN_STEER_INPUT_BYTES,
   previewInput,
@@ -58,6 +59,22 @@ function hasSteerInput(request: Pick<TurnSteerInput, "attachments" | "input" | "
     Boolean(request.attachments?.length) ||
     Boolean(request.intent?.conversationQuotes?.length)
   );
+}
+
+/**
+ * 关旗时 inject 车道不存在:不扩 TurnSteerRejectReason 外部契约,降级为普通 queue 并
+ * 记 warn。v4 wire 本就只发 queue/guide,只有嵌入方/旧会话事件会走到这里。
+ */
+function degradeInjectDelivery(
+  runtime: AgentRuntimeInternal,
+  traceContext: TraceContext | undefined,
+): "queue" {
+  runtime.logger?.warn("Inject delivery is disabled by the goal layer flag; falling back to queue", {
+    ...traceContextToLogContext(traceContext ?? runtime.rootTraceContext),
+    event: "turn.steer.inject_degraded",
+    module: "core.runtime",
+  });
+  return "queue";
 }
 
 export async function steerTurn(
@@ -122,7 +139,11 @@ export async function steerTurn(
   const queryId = request.queryId ?? (request.inputId as QueryId | undefined) ?? createQueryId();
   const commandKind = request.commandKind;
   const source: TurnSteerSource | undefined = request.source;
-  const delivery = request.delivery;
+  // 关旗时核心不识别 inject 车道:降级 queue 并 warn(不扩外部拒收契约)。
+  const delivery =
+    request.delivery === "inject" && !isGoalLayerEnabled(this.config)
+      ? degradeInjectDelivery(this, request.traceContext)
+      : request.delivery;
   const toolDisallowlist = request.toolDisallowlist;
   const queuePosition = activeTurn.pendingInputs.length;
   const intent = request.intent
@@ -130,9 +151,7 @@ export async function steerTurn(
         ...request.intent,
         // 持久 intent 域不含 inject(仅 startNow/queue/guide);车道权威在 delivery 字段。
         admittedDelivery:
-          request.delivery === "inject"
-            ? ("guide" as const)
-            : (request.delivery ?? request.intent.admittedDelivery),
+          delivery === "inject" ? ("guide" as const) : (delivery ?? request.intent.admittedDelivery),
         queuePosition,
       }
     : undefined;
@@ -256,7 +275,10 @@ export async function enqueueDeferredInput(
   const queryId = request.queryId ?? (request.inputId as QueryId | undefined) ?? createQueryId();
   const commandKind = request.commandKind;
   const source: TurnSteerSource | undefined = request.source;
-  const delivery = request.delivery ?? "queue";
+  const delivery =
+    request.delivery === "inject" && !isGoalLayerEnabled(this.config)
+      ? degradeInjectDelivery(this, request.traceContext)
+      : (request.delivery ?? "queue");
   const toolDisallowlist = request.toolDisallowlist;
   const pendingInputId =
     request.pendingInputId ??
@@ -1361,6 +1383,8 @@ export async function hydrateDeferredInjectInputsForTurnStart(
   events: SessionEvent[],
   traceContext: TraceContext,
 ): Promise<number> {
+  // 关旗:没有 inject 车道,回合起点也不从投影水化 inject 收件箱。
+  if (!isGoalLayerEnabled(this.config)) return 0;
   if (this.permissionFullAccessPending || this.activeTurn !== activeTurn) return 0;
   if (activeTurn.pendingInputs.length > 0) return 0;
   const projection = await this.rebuildProjection();

@@ -6,6 +6,7 @@ import {
   formatTargetAnchorPrompt,
   formatTargetBudgetOutcomePrompt,
   formatGoalContinuationPrompt,
+  formatGoalStateForModel,
   goalRoundLabel,
   DEFAULT_TARGET_TURN_BUDGET,
   type SessionGoal,
@@ -76,7 +77,9 @@ describe("goal target budget evaluation", () => {
     expect(anchor).toContain("token budget is at 76%");
     expect(anchor).toContain("Converge now");
 
-    const continuation = formatGoalContinuationPrompt(nearLimit);
+    const continuation = formatGoalContinuationPrompt(nearLimit, null, {
+      goalLayerEnabled: true,
+    });
     expect(continuation).toContain("Converge now");
     expect(continuation).toContain("Goal turns used");
 
@@ -146,7 +149,7 @@ describe("goal round prompt (Phase 2 idle driver)", () => {
   it("labels the reserved round from turnsUsed and includes max rounds when bounded", () => {
     const goal = budgetGoal({ turnBudget: 8, turnsUsed: 2 });
     expect(goalRoundLabel(goal)).toBe("round 3 of at most 8");
-    const prompt = formatGoalContinuationPrompt(goal);
+    const prompt = formatGoalContinuationPrompt(goal, null, { goalLayerEnabled: true });
     expect(prompt).toContain('<goal_round round="3" max_rounds="8">');
     expect(prompt).toContain("This is goal round 3 of at most 8.");
   });
@@ -154,13 +157,15 @@ describe("goal round prompt (Phase 2 idle driver)", () => {
   it("omits max_rounds when the turn budget is unbounded", () => {
     const goal = budgetGoal({ turnBudget: null, turnsUsed: 0 });
     expect(goalRoundLabel(goal)).toBe("round 1");
-    const prompt = formatGoalContinuationPrompt(goal);
+    const prompt = formatGoalContinuationPrompt(goal, null, { goalLayerEnabled: true });
     expect(prompt).toContain('<goal_round round="1">');
     expect(prompt).not.toContain("max_rounds=");
   });
 
   it("requires one bounded slice of work per round", () => {
-    const prompt = formatGoalContinuationPrompt(budgetGoal({ turnBudget: 256, turnsUsed: 41 }));
+    const prompt = formatGoalContinuationPrompt(budgetGoal({ turnBudget: 256, turnsUsed: 41 }), null, {
+      goalLayerEnabled: true,
+    });
     expect(prompt).toContain("Work in one bounded slice this round");
     expect(prompt).toContain("Do not try to complete the entire objective in a single round.");
     expect(prompt).toContain('<goal_round round="42" max_rounds="256">');
@@ -168,7 +173,9 @@ describe("goal round prompt (Phase 2 idle driver)", () => {
 
   // Phase 3 workflow 桥(设计 §3.3):判定权阶梯与委派指引只在工具面在场时进入续跑提示。
   it("omits the workflow delegation ladder when the bridge is unavailable", () => {
-    const prompt = formatGoalContinuationPrompt(budgetGoal({ turnBudget: 256, turnsUsed: 0 }));
+    const prompt = formatGoalContinuationPrompt(budgetGoal({ turnBudget: 256, turnsUsed: 0 }), null, {
+      goalLayerEnabled: true,
+    });
     expect(prompt).not.toContain("Workflow delegation");
     expect(prompt).not.toContain("Adjudication ladder");
   });
@@ -177,7 +184,7 @@ describe("goal round prompt (Phase 2 idle driver)", () => {
     const prompt = formatGoalContinuationPrompt(
       budgetGoal({ turnBudget: 256, turnsUsed: 0 }),
       null,
-      { workflowDelegation: true },
+      { goalLayerEnabled: true, workflowDelegation: true },
     );
     expect(prompt).toContain(
       "launch it as a dynamic workflow run with CreateWorkflow instead of grinding through it inline",
@@ -196,5 +203,45 @@ describe("goal round prompt (Phase 2 idle driver)", () => {
       prompt.indexOf("</goal_round>") + "</goal_round>".length,
     );
     expect(goalRoundBlock).not.toContain("Workflow delegation");
+  });
+
+  it("falls back to the legacy continuation prompt when the goal layer is off", () => {
+    const goal = budgetGoal({
+      tokenBudget: 100,
+      tokensUsed: 76,
+      turnBudget: 8,
+      turnsUsed: 3,
+      wallClockBudgetSeconds: 60,
+      timeUsedSeconds: 30,
+    });
+    const prompt = formatGoalContinuationPrompt(goal);
+    expect(prompt).toContain("- Time spent pursuing goal: 30 seconds");
+    expect(prompt).toContain("- Tokens remaining: 24");
+    expect(prompt).toContain("- Token budget: 100");
+    expect(prompt).not.toContain("<goal_round");
+    expect(prompt).not.toContain("Goal turns used");
+    expect(prompt).not.toContain("Wall-clock budget");
+    expect(prompt).not.toContain("Converge now");
+    expect(prompt).not.toContain("Work in one bounded slice this round");
+  });
+
+  it("omits turn and wall-clock budget lines from the restored goal state when off", () => {
+    const goal = budgetGoal({
+      turnBudget: 8,
+      turnsUsed: 3,
+      wallClockBudgetSeconds: 60,
+      timeUsedSeconds: 30,
+    });
+    const legacy = formatGoalStateForModel(goal);
+    expect(legacy).toContain("Token budget: none");
+    expect(legacy).toContain("Time used: 30 seconds");
+    expect(legacy).not.toContain("Goal turns used");
+    expect(legacy).not.toContain("Wall-clock budget");
+    expect(legacy).not.toContain("Turn budget");
+
+    const current = formatGoalStateForModel(goal, { goalLayerEnabled: true });
+    expect(current).toContain("Goal turns used: 3");
+    expect(current).toContain("Turn budget: 8");
+    expect(current).toContain("Wall-clock budget: 60 seconds");
   });
 });

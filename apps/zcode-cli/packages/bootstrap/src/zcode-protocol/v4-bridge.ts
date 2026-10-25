@@ -18,6 +18,7 @@ import {
   type ZCodeWorkspaceRef,
 } from "@zcode/shared";
 import { createExternalTurnFaultError } from "@zcode/core";
+import type { GoalStatus } from "@zcode/contracts";
 import {
   V4_NOTIFICATIONS,
   conversationInputIntentSchema,
@@ -706,11 +707,30 @@ export function createConversationV4Gateway(
       scheduleAutoDrainRetry(record);
       return;
     }
+    // 开旗：目标状态不参与排队顺序（驱动器在空闲沿让位），这里传 null 即旧条件的
+    // 放行分支。关旗：恢复旧行为，读真实目标状态；读失败时按“未知且未完成”继续 hold，
+    // 避免 goal 终态尚未可证时普通 queue 偷跑。
+    let targetStatus: GoalStatus | null = null;
+    if (record.app.runtime.isGoalLayerEnabled?.() !== true) {
+      if (head.autoDrain && head.dispatchState === "queued" && !record.activeAbortController) {
+        try {
+          targetStatus = (await record.app.readTarget())?.status ?? null;
+        } catch (error) {
+          context.logger?.warn("v4 auto-drain held because target state could not be read", {
+            error: error instanceof Error ? error.message : String(error),
+            queueItemId: head.queueItemId,
+            sessionId: record.app.sessionId,
+          });
+          return;
+        }
+      }
+    }
     if (
       !shouldAutoDrainV4QueueHead({
         autoDrain: head.autoDrain,
         dispatchState: head.dispatchState,
         sessionBusy: Boolean(record.activeAbortController) || coreForegroundBusy,
+        targetStatus,
       })
     ) {
       return;
@@ -1627,6 +1647,8 @@ export function createConversationV4Gateway(
     onTurnSettled: (sessionId) => {
       const record = context.sessions.get(sessionId);
       if (!record) return;
+      // 关旗：不注册该重评源（旧世界唯一重评源是 TargetChanged(complete)）。
+      if (record.app.runtime.isGoalLayerEnabled?.() !== true) return;
       // 裁定 b（2026-10-25）：排队的用户输入先于驱动器的下一回合。idle 驱动器的
       // goal 回合是 core 发起的 model-only turn，不经过 v4 命令层，回合收口没有
       // afterLegacyStateMutation 来重评 auto-drain——旧世界唯一重评源是

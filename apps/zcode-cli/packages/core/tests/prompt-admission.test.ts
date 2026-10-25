@@ -14,12 +14,17 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
-function createRuntime(sessionKey: string, generateText: (input: unknown) => Promise<unknown>) {
+function createRuntime(
+  sessionKey: string,
+  generateText: (input: unknown) => Promise<unknown>,
+  config: Record<string, unknown> = {},
+) {
   return new AgentRuntime(
     createSessionId(sessionKey),
     {
       mode: "build",
       modelSelection: { providerId: "test-provider", modelId: "test-model" },
+      ...config,
     },
     {
       eventStore: createTestSessionEventStore(),
@@ -64,14 +69,18 @@ describe("AgentRuntime prompt admission", () => {
 
   it("admits inject input to the next-step inbox without starting a turn while idle", async () => {
     let modelCalls = 0;
-    const runtime = createRuntime("prompt-admission-inject-idle", async () => {
-      modelCalls += 1;
-      return {
-        finishReason: "stop",
-        text: "done",
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-      };
-    });
+    const runtime = createRuntime(
+      "prompt-admission-inject-idle",
+      async () => {
+        modelCalls += 1;
+        return {
+          finishReason: "stop",
+          text: "done",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        };
+      },
+      { goalLayerEnabled: true },
+    );
 
     // inject 目标(设计 §3.5):绝不唤醒——idle 时也不 start turn,只落 next-step 收件箱。
     const admission = await runtime.admitPrompt("ambient context", undefined, {
@@ -86,6 +95,53 @@ describe("AgentRuntime prompt admission", () => {
       (item) => item.pendingInputId === (admission as { pendingInputId?: string }).pendingInputId,
     );
     expect(queued?.delivery).toBe("inject");
+  });
+
+  it("does not recognize the inject lane when the goal layer flag is off", async () => {
+    const runtime = createRuntime("prompt-admission-inject-off", async () => ({
+      finishReason: "stop",
+      text: "done",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    }));
+
+    const admission = await runtime.admitPrompt("ambient context", undefined, {
+      ...admissionOptions("inject-off"),
+      queueDelivery: "inject",
+    });
+
+    // 关旗:不落 inject 收件箱、不 steer inject;按普通 queue 准入(idle 即起一轮)。
+    expect(admission.kind).toBe("started");
+    if (admission.kind !== "started") throw new Error("inject request was not admitted");
+    await admission.completion;
+    const projection = await runtime.getProjection();
+    expect(projection.pendingSteerInputs.some((item) => item.delivery === "inject")).toBe(false);
+  });
+
+  it("degrades a direct inject steer to queue when the goal layer flag is off", async () => {
+    const modelGate = deferred<unknown>();
+    const modelStarted = deferred<void>();
+    const runtime = createRuntime("prompt-admission-inject-steer-off", async () => {
+      modelStarted.resolve();
+      await modelGate.promise;
+      return {
+        finishReason: "stop",
+        text: "done",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      };
+    });
+
+    const first = await runtime.admitPrompt("first", undefined, admissionOptions("first"));
+    if (first.kind !== "started") throw new Error("first prompt was not admitted");
+    await modelStarted.promise;
+
+    await runtime.steerTurn({ delivery: "inject", input: "ambient steer" });
+    const projection = await runtime.getProjection();
+    expect(projection.pendingSteerInputs.map((item) => [item.input, item.delivery])).toEqual([
+      ["ambient steer", "queue"],
+    ]);
+
+    modelGate.resolve(undefined);
+    await first.completion;
   });
 
   it("reserves before the first turn reaches TurnStarted, so the second prompt is queued", async () => {

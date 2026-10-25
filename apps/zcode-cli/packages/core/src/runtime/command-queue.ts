@@ -2,6 +2,7 @@ import type { TraceContext, TurnState } from "./deps.js";
 import type { BackgroundResultOriginMeta, WorkflowLaunchMeta } from "@zcode/contracts";
 import type {
   ActiveTurnStartReservation,
+  ContinueActiveTargetLoopOptions,
   ExecuteTurnOptions,
   TurnResult,
 } from "./types.js";
@@ -10,6 +11,7 @@ export type RuntimeCommandPriority = "now" | "next" | "later";
 export type RuntimeCommandMode =
   | "prompt"
   | "target-continuation"
+  | "target-continuation-loop"
   | "task-notification"
   | "subagent-message"
   | "control-only-turn";
@@ -50,6 +52,15 @@ export interface TargetContinuationRuntimeCommandOptions {
 export interface TargetContinuationRuntimeCommand extends RuntimeCommandBase {
   readonly mode: "target-continuation";
   readonly options: TargetContinuationRuntimeCommandOptions;
+  readonly reject: (error: unknown) => void;
+  readonly resolve: (result: TurnResult | null) => void;
+}
+
+export interface TargetContinuationLoopRuntimeCommand extends RuntimeCommandBase {
+  readonly mode: "target-continuation-loop";
+  readonly options: ContinueActiveTargetLoopOptions & {
+    readonly traceContext: TraceContext;
+  };
   readonly reject: (error: unknown) => void;
   readonly resolve: (result: TurnResult | null) => void;
 }
@@ -101,6 +112,7 @@ export interface ControlOnlyTurnRuntimeCommand extends RuntimeCommandBase {
 export type RuntimeCommand =
   | PromptRuntimeCommand
   | TargetContinuationRuntimeCommand
+  | TargetContinuationLoopRuntimeCommand
   | TaskNotificationRuntimeCommand
   | SubagentMessageRuntimeCommand
   | ControlOnlyTurnRuntimeCommand;

@@ -37,6 +37,7 @@ const featuresSchema = z.object({
   memory: z.boolean().optional(),
   skill: z.boolean().optional(),
   mcp: z.boolean().optional(),
+  goalLayer: z.boolean().optional(),
 });
 
 const memorySchema = z.object({

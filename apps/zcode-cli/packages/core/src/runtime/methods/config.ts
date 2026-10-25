@@ -93,6 +93,10 @@ export function getPlanEnabled(this: AgentRuntimeInternal): boolean {
   return resolveExecutionState(this.config).planEnabled;
 }
 
+export function isGoalLayerEnabled(this: AgentRuntimeInternal): boolean {
+  return this.config.goalLayerEnabled === true;
+}
+
 export function getSessionModelSelection(this: AgentRuntimeInternal): ModelSelection | undefined {
   return this.sessionModelSelection && cloneModelSelection(this.sessionModelSelection);
 }

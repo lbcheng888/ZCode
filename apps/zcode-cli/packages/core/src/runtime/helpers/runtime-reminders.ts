@@ -85,6 +85,12 @@ export const TODO_REMINDER_CONFIG = Object.freeze({
   TURNS_BETWEEN_REMINDERS: 5,
 });
 
+/** goal 灰度旗关闭时的旧 cadence（c5868c10^）：10/10。 */
+export const LEGACY_TODO_REMINDER_CONFIG = Object.freeze({
+  TURNS_SINCE_WRITE: 10,
+  TURNS_BETWEEN_REMINDERS: 10,
+});
+
 export interface TodoReminderTurnCounts {
   turnsSinceLastTodoWrite: number;
   turnsSinceLastReminder: number;
@@ -172,10 +178,12 @@ export function getTodoReminderTurnCounts(
  */
 export function getDueTodoReminderTurnsSinceWrite(
   entries: readonly RuntimeMessageEntry[],
+  goalLayerEnabled = false,
 ): number | null {
+  const config = goalLayerEnabled ? TODO_REMINDER_CONFIG : LEGACY_TODO_REMINDER_CONFIG;
   const counts = getTodoReminderTurnCounts(entries);
-  return counts.turnsSinceLastTodoWrite >= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE &&
-    counts.turnsSinceLastReminder >= TODO_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS
+  return counts.turnsSinceLastTodoWrite >= config.TURNS_SINCE_WRITE &&
+    counts.turnsSinceLastReminder >= config.TURNS_BETWEEN_REMINDERS
     ? counts.turnsSinceLastTodoWrite
     : null;
 }
@@ -191,8 +199,19 @@ export function hasOpenTodoItems(todos: readonly TodoItem[]): boolean {
 
 export function buildTodoReminderBody(
   todos: readonly TodoItem[],
-  turnsSinceLastWrite: number,
+  turnsSinceLastWrite?: number,
 ): string {
+  // 关旗（未传步数）时恢复旧正文：只有「很久没更新」的提示 + 清单，不含进度播报。
+  if (turnsSinceLastWrite === undefined) {
+    const legacyLines = [
+      "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. This is just a gentle reminder - ignore if not applicable.",
+    ];
+    if (todos.length > 0) {
+      const currentTodos = `[${formatTodoListForReminder(todos).join("\n")}]`;
+      legacyLines.push("", "Here are the existing contents of your todo list:", "", currentTodos);
+    }
+    return legacyLines.join("\n");
+  }
   const completedCount = todos.filter((todo) => todo.status === "completed").length;
   const inProgress = todos
     .filter((todo) => todo.status === "in_progress")

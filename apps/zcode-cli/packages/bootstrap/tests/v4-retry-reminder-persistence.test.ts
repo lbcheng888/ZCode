@@ -68,6 +68,9 @@ it.each([
           titleGeneration: { enabled: false },
           workspacePath: root,
           toolAllowlist: ["ToolSearch", "Read", "WebFetch", "TodoWrite"],
+          // 该用例断言的是新提醒纪律(5/5 + open>0 + 新正文),必须显式开旗:
+          // 旗默认关,关闭态按设计回到 10/10 与旧正文。
+          goalLayerEnabled: true,
         },
         {
           sessionStore: store,
