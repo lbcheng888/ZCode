@@ -135,8 +135,19 @@ function formatTargetChanged(title: string, target: CommandCenterTarget): string
       : target.tokenBudget.toString();
     lines.push(`Usage: ${target.tokensUsed ?? 0} tokens / ${budget}`);
   }
+  if (target.turnsUsed !== undefined || target.turnBudget !== undefined) {
+    // 回合预算缺省 256(三维预算之一,设计 §4.1);null 才表示不限。
+    const turnBudget = target.turnBudget === null || target.turnBudget === undefined
+      ? "none"
+      : target.turnBudget.toString();
+    lines.push(`Turns: ${target.turnsUsed ?? 0} / ${turnBudget}`);
+  }
   if (target.timeUsedSeconds !== undefined) {
-    lines.push(`Time: ${target.timeUsedSeconds} seconds`);
+    const wallClockBudget =
+      target.wallClockBudgetSeconds === null || target.wallClockBudgetSeconds === undefined
+        ? "none"
+        : `${target.wallClockBudgetSeconds} seconds`;
+    lines.push(`Time: ${target.timeUsedSeconds} seconds / ${wallClockBudget}`);
   }
   return lines.join("\n");
 }

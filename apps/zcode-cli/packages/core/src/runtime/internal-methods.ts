@@ -62,6 +62,8 @@ import type {
   StopActiveForegroundExecutionOptions,
   StopActiveForegroundExecutionResult,
   TurnResult,
+  TurnStoppingListener,
+  TurnStoppingListenerContext,
 } from "./types.js";
 
 export interface AgentRuntimeCoreMethods {
@@ -186,6 +188,12 @@ export interface AgentRuntimeCoreMethods {
     reason: "turn_cancelled" | "turn_failed" | "session_resumed";
     traceContext: TraceContext;
   }): Promise<void>;
+  /** 回合起点消费投影 next-step 收件箱中的 deferred inject 项(设计 §3.5)。 */
+  hydrateDeferredInjectInputsForTurnStart(
+    activeTurn: ActiveTurnSteeringState,
+    events: SessionEvent[],
+    traceContext: TraceContext,
+  ): Promise<number>;
   removePendingInputById(options: {
     pendingInputId: string;
     reason: "user_removed" | "promoted";
@@ -343,10 +351,33 @@ export interface AgentRuntimeCoreMethods {
     inputId?: string;
     intent?: TurnInputIntentMetadata;
     verifyBeforeContinue?: boolean;
+    /** idle 驱动器预约标记:完成路径据此同步落 standing-down 信号(时序敏感)。 */
+    idleDriver?: boolean;
   }): Promise<TurnResult | null>;
   continueActiveTargetLoop(options: ContinueActiveTargetLoopOptions): Promise<TurnResult | null>;
+  /**
+   * 激活工作流工具面(onDemand 灰度;设计 §3.3 goal↔workflow 桥的 arm 侧挂点)。
+   * 已激活(含非 onDemand 出生即激活)时 no-op 返回 false。
+   */
+  activateDynamicWorkflowTools(input: {
+    source: "command" | "run_control" | "resume_entry" | "resume_history" | "goal_arm";
+    traceContext?: TraceContext;
+  }): Promise<boolean>;
+  /**
+   * idle 驱动器空闲沿挂点(drainRuntimeCommandQueue 空闲沿调用;设计 §3.2)。
+   * 真实 runtime 恒在场;可选只为让手写的局部 runtime 桩不必带它。
+   */
+  scheduleIdleGoalRound?(): void;
+  /**
+   * 注册 turn-stopping 异议监听者(设计 §3.5);返回注销函数。
+   * 进程内串行链,在回合收尾前运行;监听者反对时需自行经 steer/inject 补充输入。
+   */
+  registerTurnStoppingListener(listener: TurnStoppingListener): () => void;
+  /** turn-stopping 异议链:任一监听者反对即返回 true(收件箱重读由 loop 侧负责)。 */
+  runTurnStoppingListeners(context: TurnStoppingListenerContext): Promise<boolean>;
   targetContinuationCandidate(traceContext: TraceContext): Promise<SessionGoal | null>;
   accountTargetTurnCompletion(input: {
+    countsTurn?: boolean;
     inputID: string;
     startedAtMs: number;
     startedTarget: SessionGoal | null;
@@ -370,6 +401,7 @@ export interface AgentRuntimeCoreMethods {
     endedAtMs: number;
     startedTarget: SessionGoal | null;
     status?: "paused";
+    reason?: string;
     traceContext: TraceContext;
   }): Promise<SessionGoal | null>;
   pauseActiveTargetForCancellation(traceContext: TraceContext): Promise<void>;

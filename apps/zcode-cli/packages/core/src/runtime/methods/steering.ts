@@ -128,7 +128,11 @@ export async function steerTurn(
   const intent = request.intent
     ? {
         ...request.intent,
-        admittedDelivery: request.delivery ?? request.intent.admittedDelivery,
+        // 持久 intent 域不含 inject(仅 startNow/queue/guide);车道权威在 delivery 字段。
+        admittedDelivery:
+          request.delivery === "inject"
+            ? ("guide" as const)
+            : (request.delivery ?? request.intent.admittedDelivery),
         queuePosition,
       }
     : undefined;
@@ -263,7 +267,8 @@ export async function enqueueDeferredInput(
   const intent = request.intent
     ? {
         ...request.intent,
-        admittedDelivery: delivery,
+        // 持久 intent 域不含 inject;车道权威在 delivery 字段(TurnSteerQueued.delivery)。
+        admittedDelivery: delivery === "inject" ? ("guide" as const) : delivery,
         queuePosition: queueLength - 1,
       }
     : undefined;
@@ -469,20 +474,27 @@ export function hasPendingInput(
   return this.activeTurn === activeTurn && activeTurn.pendingInputs.length > 0;
 }
 
+/** next-step 车道(guide/inject)在 step 边界行内消费;queue/startNow 属 next-turn 车道。 */
+function isNextStepDelivery(delivery: string | undefined): boolean {
+  return delivery === "guide" || delivery === "inject";
+}
+
 function pendingInputDelivery(pendingInput: PendingTurnInput | undefined): "guide" | "queue" {
   const delivery = pendingInput?.delivery ?? pendingInput?.intent?.admittedDelivery;
-  return delivery === "guide" ? "guide" : "queue";
+  return delivery === "guide" || delivery === "inject" ? "guide" : "queue";
 }
 
 function firstInlineGuideIndex(activeTurn: ActiveTurnSteeringState): number {
-  // pendingInputs 同时承载 future queue 与 current-turn guide，只检查
-  // 数组队首，导致先入队的普通消息把后续显式 guide 永久挡住。delivery 才是消费车道；
-  // 这里只在 guide 子序列内保持 admission FIFO，普通 queue 留在原位等待外层提升。
+  // pendingInputs 同时承载 future queue 与 current-turn 的 next-step 车道(guide/inject),
+  // 只检查数组队首会导致先入队的普通消息把后续显式 next-step 项永久挡住。delivery
+  // 才是消费车道;这里只在 next-step 子序列内保持 admission FIFO,普通 queue 留在
+  // 原位等待外层提升。inject 与 guide 同边界消费,但不参与 turn 收尾时的改投(见
+  // fallbackPendingGuidesToQueue)。
   return activeTurn.pendingInputs.findIndex(
     (pendingInput) =>
       pendingInput.commandKind !== "sendGoalCommand" &&
       pendingInput.commandKind !== "compact" &&
-      pendingInputDelivery(pendingInput) === "guide",
+      isNextStepDelivery(pendingInput.delivery ?? pendingInput.intent?.admittedDelivery),
   );
 }
 
@@ -499,7 +511,8 @@ export function hasInlineGuidePendingInput(
     !this.pendingInputReservations.has(pendingInput?.id ?? "") &&
     pendingInput?.commandKind !== "sendGoalCommand" &&
     pendingInput?.commandKind !== "compact" &&
-    pendingInputDelivery(pendingInput) === "guide"
+    pendingInput !== undefined &&
+    isNextStepDelivery(pendingInput.delivery ?? pendingInput.intent?.admittedDelivery)
   );
 }
 
@@ -519,6 +532,10 @@ export async function fallbackPendingGuidesToQueue(
   if (this.activeTurn !== options.activeTurn) return 0;
   let changed = 0;
   for (const pendingInput of options.activeTurn.pendingInputs) {
+    // 只有显式 guide 改投 queue;inject(设计 §3.5)留在 next-step 车道——turn 结束
+    // 后其内存态自然消亡,事件投影中的原项仍在(TurnSteerQueued 已落、未 drain/
+    // discard),由下一个起跑的回合经回合起点水化继续消费,不改投 next-turn。
+    if (pendingInput.delivery === "inject") continue;
     if (pendingInputDelivery(pendingInput) !== "guide") continue;
     const intent = pendingInput.intent
       ? {
@@ -1225,7 +1242,7 @@ async function drainPendingInputUnlocked(
     pendingInputId: string;
     messageId: MessageId;
     text: string;
-    delivery?: "guide" | "queue";
+    delivery?: PendingTurnInput["delivery"];
     intent?: NonNullable<PendingTurnInput["intent"]>;
     toolDisallowlist?: readonly string[];
   }> = [];
@@ -1267,7 +1284,9 @@ async function drainPendingInputUnlocked(
       resolvedAttachments,
       drainTraceContext,
       {
-        steerDelivery: delivery,
+        // 持久 metadata 域只有 guide/queue 两种切分语义(冷恢复按「独立轮/内联」还原);
+        // inject 与 guide 同为内联消费,映射到 guide,车道权威在事件投影的 delivery。
+        steerDelivery: delivery === "inject" ? "guide" : delivery,
         inputPresentation,
         sessionInputId: pendingInput.id,
         sourceCommandId:
@@ -1327,6 +1346,51 @@ async function drainPendingInputUnlocked(
     runtimeEntries,
     ...(toolDisallowlist.length > 0 ? { toolDisallowlist } : {}),
   };
+}
+
+/**
+ * 回合起点的 inject 水化(设计 §3.5):idle 期间提交的 inject 输入停留在事件投影的
+ * next-step 收件箱;本回合是"下一个真正起跑的回合",其首个 model step 就是它们的
+ * "下一 step 边界"。这里把投影项重建为 active turn 的 next-step pending 输入并立即
+ * 经同一 drainPendingInput 路径消费(用户消息在本轮自身输入之前,保持提交 FIFO),
+ * 消费产物(user role 消息 + TurnSteerDrained)与行内车道完全同构。
+ */
+export async function hydrateDeferredInjectInputsForTurnStart(
+  this: AgentRuntimeInternal,
+  activeTurn: ActiveTurnSteeringState,
+  events: SessionEvent[],
+  traceContext: TraceContext,
+): Promise<number> {
+  if (this.permissionFullAccessPending || this.activeTurn !== activeTurn) return 0;
+  if (activeTurn.pendingInputs.length > 0) return 0;
+  const projection = await this.rebuildProjection();
+  const deferredInjects = projection.pendingSteerInputs.filter((item) => item.delivery === "inject");
+  if (deferredInjects.length === 0) return 0;
+  for (const item of deferredInjects) {
+    if (this.pendingInputReservations.has(item.pendingInputId)) continue;
+    activeTurn.pendingInputs.push({
+      id: item.pendingInputId,
+      input: item.input,
+      queuedAt: item.queuedAt,
+      traceId: item.traceId,
+      queryId: (item.intent?.queueItemId as QueryId | undefined) ?? createQueryId(),
+      ...(item.commandKind ? { commandKind: item.commandKind } : {}),
+      ...(item.inputPresentation ? { inputPresentation: item.inputPresentation } : {}),
+      delivery: "inject",
+      ...(item.intent ? { intent: item.intent } : {}),
+      ...(item.toolDisallowlist ? { toolDisallowlist: item.toolDisallowlist } : {}),
+      turnId: activeTurn.turnId,
+    });
+  }
+  let drained = 0;
+  while (
+    !this.permissionFullAccessPending &&
+    this.activeTurn === activeTurn &&
+    (await this.drainPendingInput({ activeTurn, events, traceContext })) !== undefined
+  ) {
+    drained += 1;
+  }
+  return drained;
 }
 
 export async function discardPendingInput(

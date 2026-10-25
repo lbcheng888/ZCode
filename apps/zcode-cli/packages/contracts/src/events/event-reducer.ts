@@ -353,6 +353,9 @@ export class EventReducer {
         inputPresentation: payload.inputPresentation ?? existing?.inputPresentation,
         intent: payload.intent ?? existing?.intent,
         toolDisallowlist: payload.toolDisallowlist ?? existing?.toolDisallowlist,
+        // 双列表投影(设计 §3.5):车道随事件入投影;held 编辑以同 id 重发 queued
+        // 事件不带 delivery,必须保留既有车道,否则重放会把 next-step 项错并入 next-turn。
+        delivery: payload.delivery ?? existing?.delivery ?? "queue",
         // editQueueItem 会以同 id 重发 queued 事件；编辑不是重新 admission，
         // 必须保留原排队时间和数组位置，否则 runtime 冷重建会把它移到队尾。
         queuedAt: existing?.queuedAt ?? e.timestamp,
@@ -377,6 +380,9 @@ export class EventReducer {
           item.pendingInputId === payload.pendingInputId
             ? {
                 ...item,
+                // 车道改投(fallback guide→queue)必须直接落到投影项,intent 缺失的
+                // 项(无 intent 入队)才退回从 intent 推导,保证冷热投影不分叉。
+                delivery: payload.admittedDelivery,
                 intent:
                   payload.intent ??
                   (item.intent

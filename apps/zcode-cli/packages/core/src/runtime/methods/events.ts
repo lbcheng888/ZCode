@@ -339,7 +339,7 @@ async function persistDurableSessionEvent(
       pendingInputId: string;
       input: string;
       commandKind?: string;
-      delivery?: "guide" | "queue";
+      delivery?: "guide" | "queue" | "inject";
       intent?: TurnInputIntentMetadata;
     };
     const conversationInputIntent = buildPersistedConversationInputIntent(
@@ -352,7 +352,9 @@ async function persistDurableSessionEvent(
         id: payload.pendingInputId,
         sessionID: event.sessionId,
         kind: payload.intent?.kind ?? payload.commandKind ?? "sendText",
-        delivery: payload.delivery ?? "queue",
+        // 账本列受 SQLite CHECK(startNow/guide/queue)约束,且账本只做重启清扫/结算
+        // 记账(两条 next-step 车道在账本语义里同构);车道权威在事件投影的 delivery。
+        delivery: payload.delivery === "inject" ? "guide" : (payload.delivery ?? "queue"),
         payload: {
           text: payload.input,
           ...(payload.intent ? { intent: payload.intent } : {}),

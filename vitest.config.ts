@@ -139,6 +139,10 @@ export default defineConfig({
         },
       },
       "packages/zcode-cua/vitest.config.ts",
+      // CLI 工作区是独立 pnpm workspace(自带 vitest 与配置),但其运行时包单测此前完全不在根
+      // UT 套件与 affected 选择范围内;按 zcode-cua 先例以 project 引用接入。该配置排除了
+      // node:test 文件与插件集成测试,只收集运行时包的 vitest 单测。
+      "apps/zcode-cli/vitest.config.ts",
     ],
     coverage: {
       provider: "v8",

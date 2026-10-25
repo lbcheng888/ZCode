@@ -4,6 +4,7 @@ import { emptyTokenUsageInfo, toTokenUsageInfo } from "../helpers/index.js";
 import type { RuntimeModelTextResult } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { drainInlineGuideForNextRequest } from "./turn-guide-drain.js";
+import { MAX_TURN_STOPPING_OBJECTIONS } from "./hooks.js";
 import { recordModelHistoryRound, type RegularTurnLoopState } from "./turn-loop-state.js";
 import {
   appendTurnRequestEntries,
@@ -197,6 +198,24 @@ export async function finishModelStepWithoutToolCalls(
     // 保持同一 active turn 继续下一次 provider request，不改投 future queue。
     state.turnMachine = new TurnMachineImpl(state.turnMachine.aggregateResults());
     return "continue";
+  }
+  // turn-stopping 异议钩子(设计 §3.5):收件箱已空、Stop hook 之前,给进程内
+  // 监听者最后一个反对收尾的机会。反对者应已经 steer/inject 补充输入;重读收件箱
+  // 消费到内容才真正续跑,补充失败(收件箱仍空)时异议无效,继续走 Stop hook 链。
+  if (
+    state.turnStoppingObjectionCount < MAX_TURN_STOPPING_OBJECTIONS &&
+    (await this.runTurnStoppingListeners({
+      response: state.modelResponse,
+      toolCallCount: state.toolCallCount,
+      traceContext: state.turnTraceContext,
+      turnId: state.turnId,
+    }))
+  ) {
+    state.turnStoppingObjectionCount += 1;
+    if (await drainInlineGuideForNextRequest(this, state)) {
+      state.turnMachine = new TurnMachineImpl(state.turnMachine.aggregateResults());
+      return "continue";
+    }
   }
   const stopHookResult = await this.runStopHooks(
     state.modelResponse,

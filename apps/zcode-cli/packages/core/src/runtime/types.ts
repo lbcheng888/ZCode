@@ -488,7 +488,6 @@ export interface ExecuteTurnOptionsBase {
     tabCount: number;
     currentUrl?: string;
   };
-  continueActiveTargetAfterTurn?: boolean;
   displayInput?: string;
   /**
    * `input` 从此下标起是调用方追加的引擎文本（dwf ask 尾注 / nudge）。只进 TurnStarted 与用户
@@ -515,6 +514,11 @@ export interface ExecuteTurnOptionsBase {
   targetId?: string;
   /** 仅当前 turn 对 provider 隐藏的工具；不修改 session runtime 的持久工具面。 */
   toolDisallowlist?: readonly string[];
+  /**
+   * 目标预算宽限终局回合:本轮从第一步起即 veto 全部工具,逼模型写面向用户的终局总结
+   * (long-horizon-goal-redesign-plan §3.2/§4.1)。
+   */
+  targetBudgetGrace?: boolean;
   traceContext?: TraceContext;
   /** 当前 Submission 的 Selection 只用于本次执行，并可绑定逐请求依赖。 */
   modelExecution?: ModelExecutionContext;
@@ -531,11 +535,11 @@ export type PromptAdmissionOptions = ExecuteTurnOptions & {
   commandKind?: "sendText" | "sendGoalCommand" | "compact";
   delivery?: "auto" | "start_turn" | "steer_active_turn";
   expectedTurnId?: TurnId;
-  /** busy 时的产品队列语义；附件或不可 steer 时由 Core 回退 queue。 */
-  queueDelivery?: "guide" | "queue";
-  /** 强制进入 FIFO；用于携带只能在未来独立 turn 安装的临时运行模型。 */
+  /** busy 时的产品队列语义;附件或不可 steer 时由 Core 回退 queue。 */
+  queueDelivery?: "guide" | "queue" | "inject";
+  /** 强制进入 FIFO;用于携带只能在未来独立 turn 安装的临时运行模型。 */
   requireQueue?: boolean;
-  /** queue promotion 等内部调用要求 admission 必须 idle，否则直接拒绝。 */
+  /** queue promotion 等内部调用要求 admission 必须 idle,否则直接拒绝。 */
   requireIdle?: boolean;
 };
 
@@ -547,7 +551,11 @@ export type PromptAdmissionReceipt =
     }
   | TurnSteerResult;
 
-export type ActiveTargetLoopTrigger = "manual" | "user-prompt" | "task-notification";
+/**
+ * idle 驱动器统一接管 goal 续跑触发后(设计 §3.6),手动入口只剩 /goal 语义的
+ * "arm + 立即预约";user-prompt / task-notification 双触发源已随忙碌循环删除。
+ */
+export type ActiveTargetLoopTrigger = "manual";
 
 export interface ContinueActiveTargetLoopOptions {
   abortSignal?: AbortSignal;
@@ -558,17 +566,59 @@ export interface ContinueActiveTargetLoopOptions {
   verifyBeforeFirstContinue?: boolean;
 }
 
+/**
+ * turn-stopping 异议钩子(设计 §3.5):回合收尾前的进程内串行监听链。
+ * 监听者反对收尾时自行经 steer/inject 车道补充输入,loop 随后重读收件箱并
+ * 续跑当前回合;与外部 Stop hook 的差异:无配置面、无 additionalContexts 门槛、
+ * 单独的异议计数上限。
+ */
+export interface TurnStoppingListenerContext {
+  response: string;
+  toolCallCount: number;
+  traceContext: TraceContext;
+  turnId: TurnId;
+}
+
+export interface TurnStoppingListenerVerdict {
+  /** true = 反对收尾:loop 重读收件箱并继续当前回合;false = 同意收尾。 */
+  continue: boolean;
+  reason?: string;
+}
+
+export type TurnStoppingListener = (
+  context: TurnStoppingListenerContext,
+) => Promise<TurnStoppingListenerVerdict> | TurnStoppingListenerVerdict;
+
+/**
+ * cancel 类型化(设计 §3.5):user=用户手动 Stop/抢占;parent=上游执行域取消;
+ * hook=钩子链取消;disposed=运行时关闭。首因生效——同一执行只记录第一次取消的
+ * cause,后续 stop 调用不再改写。
+ */
+export type TurnCancellationCause = "user" | "parent" | "hook" | "disposed";
+
+export interface TurnCancellationRecord {
+  cause: TurnCancellationCause;
+  /** false = 取消时显式丢弃积压(收件箱去向显式化);缺省 true 保留(held)。 */
+  keepInbox: boolean;
+}
+
 export interface ActiveForegroundExecutionState {
   controller: AbortController;
   disposeParentAbort: () => void;
   foregroundExecutionId: string;
   preserveQueueAutoDrainOnCancel: boolean;
+  /** 取消类型化记录(设计 §3.5):abort 时落一次,首因生效。 */
+  cancellation?: TurnCancellationRecord;
 }
 
 export interface StopActiveForegroundExecutionOptions {
   expectedForegroundExecutionId?: string;
   preserveQueueAutoDrainOnCancel?: boolean;
   reason?: string;
+  /** 取消发起方;缺省 user。首因生效:已 aborted 的执行不再改写。 */
+  cause?: TurnCancellationCause;
+  /** false = 取消时丢弃收件箱积压;缺省 true 保留(held,现状语义)。 */
+  keepInbox?: boolean;
 }
 
 export type StopActiveForegroundExecutionResult =

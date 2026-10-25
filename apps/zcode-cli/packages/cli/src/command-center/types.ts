@@ -125,6 +125,9 @@ export type CommandCenterTarget = {
   tokenBudget?: number | null;
   tokensUsed?: number;
   timeUsedSeconds?: number;
+  turnBudget?: number | null;
+  turnsUsed?: number;
+  wallClockBudgetSeconds?: number | null;
   time: {
     created: number;
     updated: number;

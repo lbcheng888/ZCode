@@ -7,6 +7,7 @@ import {
   createPartId,
   createProjectId,
   createSessionId,
+  type Logger,
   type MessageWithParts,
   type ModelRequest,
   type SessionEntryInfo,
@@ -61,6 +62,78 @@ describe("onDemand：出生不注册，激活后到位（DWG-09）", () => {
 
     // 第二次是 no-op。
     await expect(runtime.activateDynamicWorkflowTools({ source: "command" })).resolves.toBe(false);
+  });
+
+  // Phase 3 goal↔workflow 桥(long-horizon-goal-redesign-plan §3.3):goal 回合是 workflow run
+  // 的发起方,onDemand 会话出生看不见 CreateWorkflow;arm(goal set/resume)即激活工具面。
+  it("arming a goal activates the on-demand toolface (goal_arm bridge)", async () => {
+    const runtime = new AgentRuntime(createSessionId("dwf-goal-arm-activate"), ON_DEMAND_CONFIG, {
+      eventStore: createTestSessionEventStore(),
+      toolRegistry: createToolRegistry(),
+    });
+    expect(runtime.getToolRegistry().has(CREATE_WORKFLOW_TOOL_NAME)).toBe(false);
+
+    // 无 target 时预约兑现为 null(候选闸门),但激活发生在 arm 一侧,与预约结果解耦。
+    await expect(runtime.continueActiveTargetLoop({ trigger: "manual" })).resolves.toBeNull();
+    expect(runtime.getToolRegistry().has(CREATE_WORKFLOW_TOOL_NAME)).toBe(true);
+    expect(toolNames(runtime)).toContain(GET_WORKFLOW_RUN_TOOL_NAME);
+  });
+
+  // goal-arm-bridge 缺陷回归:验收二进制里曾没有桥,模型答「CreateWorkflow not visible」。
+  // 通过判据必须是硬信号——激活 entry 落盘 + tools_activated 日志,而不是模型嘴上回答
+  // (alwaysOn 对照不经桥、出生即激活,永远绿,证明不了二进制含桥)。
+  it("goal arm persists the activation entry with source goal_arm and logs tools_activated", async () => {
+    const infos: Array<{ message: string; context: Record<string, unknown> }> = [];
+    const warns: Array<{ message: string; context: Record<string, unknown> }> = [];
+    const logger: Logger = {
+      debug: () => {},
+      info: (message, context) => infos.push({ message, context: context ?? {} }),
+      warn: (message, context) => warns.push({ message, context: context ?? {} }),
+      error: () => {},
+      child: () => logger,
+    };
+    const { runtime, saveSessionEntry } = await resumeOnDemandRuntime({
+      messages: [],
+      logger,
+    });
+    expect(runtime.getToolRegistry().has(CREATE_WORKFLOW_TOOL_NAME)).toBe(false);
+
+    await runtime.continueActiveTargetLoop({ trigger: "manual" });
+
+    const written = saveSessionEntry.mock.calls
+      .map(([entry]) => entry as SessionEntryInfo)
+      .filter((entry) => entry.type === SESSION_ENTRY_DYNAMIC_WORKFLOW_ACTIVATION);
+    expect(written).toHaveLength(1);
+    expect(written[0]!.data).toEqual({
+      activated: true,
+      source: "goal_arm",
+    });
+    const activatedLog = infos.find(({ context }) => context.event === "dynamic_workflow.tools_activated");
+    expect(activatedLog?.context.source).toBe("goal_arm");
+    expect(runtime.getToolRegistry().has(CREATE_WORKFLOW_TOOL_NAME)).toBe(true);
+    expect(
+      warns.filter(({ context }) => context.event === "target.workflow_bridge.activation_failed"),
+    ).toHaveLength(0);
+  });
+
+  // 设计 §4.3 裁定 1:桥失败只记 target.workflow_bridge.activation_failed,不阻断 goal 续跑。
+  it("a failed bridge activation logs activation_failed without failing the arm", async () => {
+    const warns: Array<{ message: string; context: Record<string, unknown> }> = [];
+    const logger: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn: (message, context) => warns.push({ message, context: context ?? {} }),
+      error: () => {},
+      child: () => logger,
+    };
+    const { runtime } = await resumeOnDemandRuntime({ messages: [], logger });
+    vi.spyOn(runtime, "activateDynamicWorkflowTools").mockRejectedValue(new Error("bridge boom"));
+
+    await expect(runtime.continueActiveTargetLoop({ trigger: "manual" })).resolves.toBeNull();
+    const bridgeFailure = warns.find(
+      ({ context }) => context.event === "target.workflow_bridge.activation_failed",
+    );
+    expect(bridgeFailure?.context.errorMessage).toBe("bridge boom");
   });
 
   it("激活后分支刷新（shell 快照初始化）不再把工具剃掉，也不会把未激活会话的工具加回来", async () => {
@@ -224,6 +297,7 @@ async function resumeOnDemandRuntime(input: {
   entries?: SessionEntryInfo[];
   config?: Record<string, unknown>;
   failActivationWrite?: boolean;
+  logger?: Logger;
 }) {
   const sessionId = createSessionId(`dwf-on-demand-resume-${Math.random().toString(36).slice(2)}`);
   const saveSessionEntry = vi.fn(async (entry: SessionEntryInfo) => {
@@ -250,6 +324,7 @@ async function resumeOnDemandRuntime(input: {
       eventStore: createTestSessionEventStore(),
       sessionStore: store,
       toolRegistry: createToolRegistry(),
+      ...(input.logger ? { logger: input.logger } : {}),
     },
   );
   await runtime.resumeFromStore();

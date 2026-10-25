@@ -175,6 +175,9 @@ export async function executeTurnCommand(
   const turnStartedAtMs = Date.now();
   const targetRunInputID = options?.inputId ?? String(turnId);
   const events: SessionEvent[] = [];
+  // 终局交付标记按回合重置:宽限回合从第一步就视为已交付(其输入即终局提示),
+  // 正常回合清零,由 loop 内 veto 路径按需置位;target-continuation loop 逐回合消费。
+  this.targetBudgetOutcomeDeliveredInTurn = options?.targetBudgetGrace === true;
   let turnMachine = TurnMachineImpl.create(this.sessionId, this.turnNumber, input, traceId, turnId);
   this.currentTurnFileChanges = new Map();
   if (!startReservation) this.reserveTurnStart(turnId, turnTraceContext, "regular");
@@ -478,6 +481,9 @@ export async function executeTurnCommand(
         ? null
         : await this.readSessionTargetForContext(turnTraceContext);
       completeTurnPhase("target_read", phaseStartedAt);
+      // 宽限终局回合(budget 已翻 budget_limited)仍需要目标快照来驱动工具 veto,
+      // 因此保留读到的原始对象;正常计量仍只认 active。
+      const targetReadForGuard = startedTarget;
       if (startedTarget?.status !== "active") {
         startedTarget = null;
       }
@@ -522,6 +528,16 @@ export async function executeTurnCommand(
       await this.appendEvent(turnStartedEvent, turnTraceContext);
       completeTurnPhase("turn_started_event", phaseStartedAt);
       events.push(turnStartedEvent);
+      // inject 契约(设计 §3.5):idle 期间提交的 inject 停在投影 next-step 收件箱;
+      // 本回合是"下一个真正起跑的回合",首个 model step 之前消费它们(早于本轮
+      // 自身输入落史,保持提交 FIFO)。不唤醒语义由 admission 侧保证(绝不 start turn)。
+      if (activeTurn) {
+        await this.hydrateDeferredInjectInputsForTurnStart(
+          activeTurn,
+          events,
+          turnTraceContext,
+        );
+      }
       phaseStartedAt = startTurnPhase("target_accounting");
       startedTarget = await this.startTargetTurnAccounting({
         inputID: targetRunInputID,
@@ -590,6 +606,7 @@ export async function executeTurnCommand(
           this.turnNumber++;
           const projection = await this.rebuildProjection();
           await this.accountTargetTurnCompletion({
+            countsTurn: options?.inputSource === "goal-continuation",
             inputID: targetRunInputID,
             startedAtMs: turnStartedAtMs,
             startedTarget,
@@ -837,6 +854,7 @@ export async function executeTurnCommand(
           repeatedToolCallSignature: undefined,
           repeatedToolCallStreakCount: 0,
           stopHookContinuationCount: 0,
+          turnStoppingObjectionCount: 0,
           streamRecoveryRetryCount: 0,
           tokenCount: 0,
           toolCallCount: 0,
@@ -847,6 +865,27 @@ export async function executeTurnCommand(
             outputTokenContinuationCount: 0,
           },
           toolDisallowlist: options?.toolDisallowlist,
+          ...(startedTarget
+            ? {
+                targetBudget: {
+                  countsTurn: options?.inputSource === "goal-continuation",
+                  goal: startedTarget,
+                  turnStartedAtMs,
+                },
+              }
+            : options?.targetBudgetGrace && targetReadForGuard
+              ? {
+                  // 宽限终局回合:从第一步起 veto 全部工具,输入本身就是终局提示,
+                  // 不再追加 outcome reminder(outcomePrompted 预置)。
+                  targetBudget: {
+                    countsTurn: false,
+                    exhausted: true,
+                    goal: targetReadForGuard,
+                    outcomePrompted: true,
+                    turnStartedAtMs,
+                  },
+                }
+              : {}),
           traceId,
           turnAbortSignal,
           turnId,
@@ -871,6 +910,7 @@ export async function executeTurnCommand(
         // goal usage/active-run 先结算，再固定 exact goal/verifier boundary；只有两者都
         // 已持久化，TurnComplete 才能让 projection/UI 开放最终 assistant fork。
         await this.accountTargetTurnCompletion({
+          countsTurn: options?.inputSource === "goal-continuation",
           inputID: targetRunInputID,
           startedAtMs: turnStartedAtMs,
           startedTarget,
@@ -993,6 +1033,8 @@ export async function executeTurnCommand(
         const finishedTarget = await this.finishTargetTurnAccounting({
           endedAtMs: Date.now(),
           inputID: targetRunInputID,
+          reason:
+            coreError.type === CoreErrorType.TurnCancelled ? "turn-cancelled" : undefined,
           startedTarget,
           status: coreError.type === CoreErrorType.TurnCancelled ? "paused" : undefined,
           traceContext: turnTraceContext,
@@ -1001,8 +1043,28 @@ export async function executeTurnCommand(
           startedTarget = finishedTarget;
         }
         if (coreError.type === CoreErrorType.TurnCancelled) {
+          // cancel 类型化(设计 §3.5):首因 cause 随 foreground execution 落档
+          // (stopActiveForegroundExecution),此处只读不改写;keepInbox=false 时
+          // 显式丢弃收件箱积压(next-turn 与 next-step 一并清账),缺省保留(held)。
+          const cancellation = this.activeForegroundExecution?.cancellation;
+          this.logger?.info("Turn cancelled", {
+            ...traceContextToLogContext(turnTraceContext),
+            cancelCause: cancellation?.cause ?? "user",
+            event: "turn.cancelled",
+            keepInbox: cancellation?.keepInbox ?? true,
+            module: "core.runtime",
+            status: "completed",
+            turnId,
+          });
           await this.pauseActiveTargetForCancellation(turnTraceContext);
-          if (activeTurn) {
+          if (activeTurn && cancellation?.keepInbox === false) {
+            await this.discardPendingInput({
+              activeTurn,
+              events,
+              reason: "turn_cancelled",
+              traceContext: turnTraceContext,
+            });
+          } else if (activeTurn) {
             await this.fallbackPendingGuidesToQueue({
               activeTurn,
               events,

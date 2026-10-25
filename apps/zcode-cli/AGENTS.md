@@ -10,6 +10,7 @@
 - 功能文档更新到最终行为，复用已有 spec；bugfix 用回归证据留痕，非显然根因和防回归约束在修复点留中文注释。
 - agent 友好的项目，留好日志或者接口，让 agent 能完全接手操作
 - 长程任务优先：核心 agent loop 默认面向可持续运行的复杂任务设计，不用 tool call 次数做硬停止。资源与安全边界应由 token/context limit 自动 compact、用户取消、权限拒绝、工具超时、输出截断、provider retry 上限等明确条件承担。
+- CLI bundle 的验收与发布构建一律在 `apps/zcode-cli` 根执行 `pnpm run build`（turbo 按 `^build` 先重建依赖包）；禁止只进 `packages/cli` 打包——`packages/cli/scripts/build.mjs` 经兄弟包 package.json exports 直接消费它们的预构建 dist，不会替它们重编译，src 改动未被编译时旧 dist 会被原样打进 bundle（goal-arm-bridge 缺陷的根因：桥只在 src 里，验收二进制里没有）。该脚本已内置 workspace dist 新鲜度守卫拦截这种错位；守卫报错时按提示走根构建重建，不要用 `ZCODE_SKIP_WORKSPACE_FRESHNESS_CHECK=1` 绕过发布/验收构建。
 - 单个源文件默认上限为 800 行。已确认的存量超限文件由根 `.oxlintrc.json` 精确登记为行数告警；不要为满足行数机械拆分，职责分离确有收益时再重构。其他检查仍严格执行。
 - 字符串、数字等常量应提取为命名变量或常量，不要在业务逻辑中直接散落字面量，便于一处修改、统一维护。
 - 修改数据库结构时必须同步 CLI 负责人，仔细设计 migration

@@ -47,6 +47,7 @@ import type {
   ProviderRuntimeHeadersPort,
   MainTurnCacheHitAggregate,
   RuntimeTurnFileChangeMap,
+  TurnStoppingListener,
 } from "./types.js";
 import type { RuntimeCommandQueue } from "./command-queue.js";
 import type { RuntimeTaskRegistry } from "../runtime-task/registry.js";
@@ -172,4 +173,20 @@ export interface AgentRuntimeInternal
   sessionStartHookRan: boolean;
   sessionTitleGenerationAttempted: boolean;
   agentTelemetry: RuntimeTelemetryFacade;
+  /**
+   * 刚结束的回合内是否已向模型交付过预算终局提示(工具已 veto)。
+   * target-continuation 命令在每回合后消费并清零,避免终局回合二次触发;
+   * 进程内事实,不持久(armed/disarmed 同类,设计 §3.1)。
+   */
+  targetBudgetOutcomeDeliveredInTurn?: boolean;
+  /**
+   * idle 驱动器(设计 §3.2)进程内事实:armed 由手动续跑入口(/goal set/resume、
+   * v4 sendGoalCommand/resumeGoal 经 continueActiveTargetLoop)置位;paused/
+   * blocked/complete 的候选闸门在预约时兜底。standing-down=上一次预约未兑现,
+   * 驱动器让位到下一个外部边缘,防止非终态 null 变成轮询循环。
+   */
+  goalRoundDriverArmed?: boolean;
+  goalRoundDriverStandingDown?: boolean;
+  /** turn-stopping 异议钩子监听链(设计 §3.5);进程内注册,不持久。 */
+  turnStoppingListeners: TurnStoppingListener[];
 }

@@ -82,6 +82,11 @@ describe("session facade shutdown", () => {
         beginShutdown: vi.fn(() => {
           calls.push("shutdown");
         }),
+        stopActiveForegroundExecution: vi.fn(() => {
+          calls.push("turn_stop");
+          return { kind: "idle" };
+        }),
+        hasActiveOrQueuedTurnWork: vi.fn(() => false),
         closeBrowserSession: async () => {
           calls.push("browser");
         },
@@ -101,7 +106,7 @@ describe("session facade shutdown", () => {
 
     const closing = facade.close?.();
     await nextTask();
-    expect(calls).toEqual(["shutdown", "drain:start"]);
+    expect(calls).toEqual(["shutdown", "turn_stop", "drain:start"]);
 
     drainGate.resolve();
     await closing;
@@ -109,6 +114,7 @@ describe("session facade shutdown", () => {
     expect(drainMemoryExtractions).toHaveBeenCalledTimes(1);
     expect(calls).toEqual([
       "shutdown",
+      "turn_stop",
       "drain:start",
       "drain",
       "dwf",
@@ -161,6 +167,11 @@ describe("session facade shutdown", () => {
         beginShutdown: () => {
           calls.push("shutdown");
         },
+        stopActiveForegroundExecution: vi.fn(() => {
+          calls.push("turn_stop");
+          return { kind: "idle" };
+        }),
+        hasActiveOrQueuedTurnWork: vi.fn(() => false),
         closeBrowserSession: async () => {
           calls.push("browser");
         },
@@ -183,6 +194,7 @@ describe("session facade shutdown", () => {
 
     expect(calls).toEqual([
       "shutdown",
+      "turn_stop",
       "drain",
       "dwf",
       "shutdown",
@@ -192,6 +204,194 @@ describe("session facade shutdown", () => {
       "store",
     ]);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  // 关停竞态回归锁（缺陷：SIGINT 记账丢失）：db.close 只允许发生在回合记账收口之后。
+  // hasActiveOrQueuedTurnWork 在取消回合的 catch 记账（finishTargetTurnAccounting 等
+  // SQLite 写）完成前保持为真，因此「store.close 时谓词必为假」就是修复引入的
+  // happens-before 边本身。
+  it("drains in-flight turn accounting before the session store closes", async () => {
+    const calls: string[] = [];
+    let turnWorkSettled = false;
+    const stopActiveForegroundExecution = vi.fn(() => ({ kind: "idle" }));
+    const hasActiveOrQueuedTurnWork = vi.fn(() => !turnWorkSettled);
+    const facade = createSessionFacade({
+      configResult: {
+        config: DefaultRuntimeConfig,
+        configPort: {} as never,
+        sources: {} as never,
+      },
+      configuredMcpServers: {},
+      executionPort: {} as never,
+      logger: {} as never,
+      loggerFactory: {} as never,
+      ownsExecutionPort: false,
+      ownsMcpPort: false,
+      ownsSessionStore: true,
+      prepareResume: async () => {},
+      prepareUserExecutionBoundary: async () => {},
+      projectID: createProjectId("session-facade-turn-drain"),
+      resolveUiLocale: () => "en-US",
+      runtime: {
+        beginShutdown: () => {
+          calls.push("shutdown");
+        },
+        stopActiveForegroundExecution,
+        hasActiveOrQueuedTurnWork,
+        closeBrowserSession: async () => {
+          calls.push("browser");
+        },
+        drainMemoryExtractions: async () => {
+          calls.push("drain");
+        },
+      } as unknown as AgentRuntime,
+      sessionId: createSessionId("session-facade-turn-drain"),
+      sessionStore: {
+        close() {
+          expect(hasActiveOrQueuedTurnWork()).toBe(false);
+          calls.push("store");
+        },
+      } as never,
+      traceContext: {} as never,
+      untrustedProjectMcpServers: new Set(),
+      workingDirectory: "/workspace",
+    });
+
+    const closing = facade.close?.();
+    await nextTask();
+    // 记账仍在途：任何资源/store 都不能开始关。
+    expect(calls).toEqual(["shutdown"]);
+
+    // 模拟取消回合的记账链在若干 poll 周期后才收口。
+    setTimeout(() => {
+      turnWorkSettled = true;
+    }, 120);
+    await closing;
+
+    // 取消类型化与协议路径（runtime-resources.ts）对齐：user + 缺省 keepInbox=true。
+    expect(stopActiveForegroundExecution).toHaveBeenCalledWith({
+      cause: "user",
+      reason: "Session closing",
+    });
+    expect(calls).toEqual(["shutdown", "drain", "shutdown", "browser", "store"]);
+  });
+
+  // 挂死回合（provider 不响应 abort）：排空超时后行为与修复前一致（继续关库），
+  // 但静默丢失变成可观测 warn；残留行由 interrupted-run 恢复兜底收敛。
+  it("warns and still closes the store when turn accounting never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const warn = vi.fn();
+      const facade = createSessionFacade({
+        configResult: {
+          config: DefaultRuntimeConfig,
+          configPort: {} as never,
+          sources: {} as never,
+        },
+        configuredMcpServers: {},
+        executionPort: {} as never,
+        logger: { warn } as never,
+        loggerFactory: {} as never,
+        ownsExecutionPort: false,
+        ownsMcpPort: false,
+        ownsSessionStore: true,
+        prepareResume: async () => {},
+        prepareUserExecutionBoundary: async () => {},
+        projectID: createProjectId("session-facade-turn-drain-timeout"),
+        resolveUiLocale: () => "en-US",
+        runtime: {
+          beginShutdown: () => {
+            calls.push("shutdown");
+          },
+          stopActiveForegroundExecution: vi.fn(() => ({ kind: "idle" })),
+          hasActiveOrQueuedTurnWork: vi.fn(() => true),
+          closeBrowserSession: async () => {
+            calls.push("browser");
+          },
+          drainMemoryExtractions: async () => {
+            calls.push("drain");
+          },
+        } as unknown as AgentRuntime,
+        sessionId: createSessionId("session-facade-turn-drain-timeout"),
+        sessionStore: {
+          close() {
+            calls.push("store");
+          },
+        } as never,
+        traceContext: {} as never,
+        untrustedProjectMcpServers: new Set(),
+        workingDirectory: "/workspace",
+      });
+
+      const closing = facade.close?.();
+      await vi.advanceTimersByTimeAsync(2_100);
+      await closing;
+
+      expect(calls).toEqual(["shutdown", "drain", "shutdown", "browser", "store"]);
+      expect(warn).toHaveBeenCalledWith(
+        "Session close timed out waiting for in-flight turn accounting",
+        expect.objectContaining({ event: "session.close.turn_drain.timed_out" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // stop 抛错不能吃掉关闭链：最坏情况回到修复前的竞态，但资源与 store 必须照常关。
+  it("continues closing when stopping the foreground execution throws", async () => {
+    const calls: string[] = [];
+    const warn = vi.fn();
+    const facade = createSessionFacade({
+      configResult: {
+        config: DefaultRuntimeConfig,
+        configPort: {} as never,
+        sources: {} as never,
+      },
+      configuredMcpServers: {},
+      executionPort: {} as never,
+      logger: { warn } as never,
+      loggerFactory: {} as never,
+      ownsExecutionPort: false,
+      ownsMcpPort: false,
+      ownsSessionStore: true,
+      prepareResume: async () => {},
+      prepareUserExecutionBoundary: async () => {},
+      projectID: createProjectId("session-facade-turn-stop-throws"),
+      resolveUiLocale: () => "en-US",
+      runtime: {
+        beginShutdown: () => {
+          calls.push("shutdown");
+        },
+        stopActiveForegroundExecution: vi.fn(() => {
+          throw new Error("abort listener exploded");
+        }),
+        hasActiveOrQueuedTurnWork: vi.fn(() => false),
+        closeBrowserSession: async () => {
+          calls.push("browser");
+        },
+        drainMemoryExtractions: async () => {
+          calls.push("drain");
+        },
+      } as unknown as AgentRuntime,
+      sessionId: createSessionId("session-facade-turn-stop-throws"),
+      sessionStore: {
+        close() {
+          calls.push("store");
+        },
+      } as never,
+      traceContext: {} as never,
+      untrustedProjectMcpServers: new Set(),
+      workingDirectory: "/workspace",
+    });
+
+    await facade.close?.();
+
+    expect(calls).toEqual(["shutdown", "drain", "shutdown", "browser", "store"]);
+    expect(warn).toHaveBeenCalledWith(
+      "Failed to stop active foreground execution before closing",
+      expect.objectContaining({ event: "session.close.turn_stop.failed" }),
+    );
   });
 });
 

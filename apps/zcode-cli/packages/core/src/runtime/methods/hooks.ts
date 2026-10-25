@@ -1,13 +1,16 @@
-import { HookEventName } from "../deps.js";
+import { HookEventName, traceContextToLogContext } from "../deps.js";
 import type { HookRunResult, Model, TraceContext, TurnState } from "../deps.js";
 import type { HookEventName as HookEventNameType } from "@zcode/contracts";
 import type { AgentRuntimeInternal } from "../internal.js";
+import type { TurnStoppingListener, TurnStoppingListenerContext } from "../types.js";
 import {
   systemReminderAttachmentEntry,
   type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
 
 const MAX_STOP_HOOK_CONTINUATIONS = 3;
+/** turn-stopping 异议链的单独上限(与 Stop hook 的续跑上限独立计数)。 */
+export const MAX_TURN_STOPPING_OBJECTIONS = 3;
 
 const EMPTY_HOOK_RESULT: HookRunResult = {
   additionalContexts: [],
@@ -126,6 +129,58 @@ export function shouldContinueAfterStopHooks(
     result.additionalContexts.length > 0 &&
     continuationCount < MAX_STOP_HOOK_CONTINUATIONS
   );
+}
+
+export function registerTurnStoppingListener(
+  this: AgentRuntimeInternal,
+  listener: TurnStoppingListener,
+): () => void {
+  this.turnStoppingListeners.push(listener);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    const index = this.turnStoppingListeners.indexOf(listener);
+    if (index >= 0) this.turnStoppingListeners.splice(index, 1);
+  };
+}
+
+/**
+ * turn-stopping 异议链(设计 §3.5):回合收尾前串行运行,首个反对者生效。
+ * 监听者自身异常按「同意收尾」处理——异议链路故障不应把已完成的回合卡死,
+ * 只记日志留痕。反对者应已在调用内经 steer/inject 车道补充输入,loop 随后
+ * 重读收件箱决定是否真正续跑。
+ */
+export async function runTurnStoppingListeners(
+  this: AgentRuntimeInternal,
+  context: TurnStoppingListenerContext,
+): Promise<boolean> {
+  for (const listener of [...this.turnStoppingListeners]) {
+    try {
+      const verdict = await listener(context);
+      if (verdict?.continue === true) {
+        this.logger?.info("Turn stopping objection raised", {
+          ...traceContextToLogContext(context.traceContext),
+          event: "turn.stopping.objection_raised",
+          module: "core.runtime",
+          status: "waiting",
+          ...(verdict.reason ? { reason: verdict.reason } : {}),
+          turnId: context.turnId,
+        });
+        return true;
+      }
+    } catch (error) {
+      this.logger?.warn("Turn stopping listener failed", {
+        ...traceContextToLogContext(context.traceContext),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        event: "turn.stopping.listener_failed",
+        module: "core.runtime",
+        status: "failed",
+        turnId: context.turnId,
+      });
+    }
+  }
+  return false;
 }
 
 function formatLifecycleHookAdditionalContextBody(

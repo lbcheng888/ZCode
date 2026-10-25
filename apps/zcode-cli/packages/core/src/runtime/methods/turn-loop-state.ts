@@ -8,6 +8,7 @@ import type {
   ModelSelection,
   OutputStylePromptConfig,
   SessionEvent,
+  SessionGoal,
   TraceContext,
   TraceId,
   TurnId,
@@ -78,6 +79,21 @@ export interface TurnRequestState {
   outputTokenContinuationCount: number;
 }
 
+/**
+ * 回合内目标预算护栏(long-horizon-goal-redesign-plan §4.1):
+ * goal 为回合开始时的快照;live 增量(tokenCount / 挂钟)由 loop 每步评估。
+ */
+export interface TurnTargetBudgetState {
+  goal: SessionGoal;
+  turnStartedAtMs: number;
+  /** 仅 inputSource='goal-continuation' 的回合消耗回合预算(用户消息不消耗)。 */
+  countsTurn: boolean;
+  /** 任一维 100% 后翻 true,本回合剩余模型请求不再暴露工具。 */
+  exhausted?: boolean;
+  /** 终局提示已注入,避免重复。 */
+  outcomePrompted?: boolean;
+}
+
 export interface RegularTurnLoopState {
   offPeakExecutionId?: string;
   activeTurn?: ActiveTurnSteeringState;
@@ -120,6 +136,8 @@ export interface RegularTurnLoopState {
   repeatedToolCallStreakCount: number;
   pendingStreamRecoveryRequest?: PendingStreamRecoveryRequest;
   stopHookContinuationCount: number;
+  /** turn-stopping 异议链已续跑次数(设计 §3.5);与 Stop hook 续跑计数独立。 */
+  turnStoppingObjectionCount: number;
   /** 最终成功 product turn 的 raw transcript 起点；只有确认不再 continue 时才赋值。 */
   stableProductStartMessageId?: MessageId;
   /** 最终成功 assistant boundary；与 stableProductStartMessageId 成对出现。 */
@@ -129,6 +147,8 @@ export interface RegularTurnLoopState {
   toolCallCount: number;
   /** 当前 Turn 的 provider-local history；Turn 结束后直接释放。 */
   turnRequestState: TurnRequestState;
+  /** 当前 turn 的目标预算护栏;active target 缺席时为空。 */
+  targetBudget?: TurnTargetBudgetState;
   /** 当前 turn 不向 provider 暴露的工具名；registry 仍保留，供执行边界做纵深校验。 */
   toolDisallowlist?: readonly string[];
   traceId: TraceId;

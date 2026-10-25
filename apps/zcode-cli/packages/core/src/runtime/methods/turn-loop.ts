@@ -7,6 +7,9 @@ import {
   CompactPhase,
   CompactReason,
   createMessageId,
+  findExhaustedTargetBudgetDimension,
+  formatTargetAnchorPrompt,
+  formatTargetBudgetOutcomeReminder,
   traceContextToLogContext,
   TurnMachineImpl,
 } from "../deps.js";
@@ -53,6 +56,7 @@ export async function runRegularTurnLoop(
   while (true) {
     throwIfTurnAborted(state.turnAbortSignal);
     refreshOffPeakTurnAfterTakeover(this, state);
+    evaluateTurnTargetBudgetGuard(this, state);
     const outputTokenRecoveryActive = state.turnRequestState.outputTokenContinuationCount > 0;
     // guide 只允许由完整 tool result batch 设置这个一次性诊断；普通 queue 不在
     // model roundtrip 起点消费，避免把未来 turn 错并入当前 product turn。
@@ -274,4 +278,65 @@ export async function runRegularTurnLoop(
       break;
     }
   }
+}
+
+function liveTargetBudgetDeltas(state: RegularTurnLoopState) {
+  const guard = state.targetBudget;
+  if (!guard) return {};
+  // 回合维不参与回合中 veto:预算内最后一个回合应完整执行,由回合结束结算翻
+  // blocked 后再补终局;token/挂钟按 live 投影连续评估。
+  return {
+    tokensUsedDelta: state.tokenCount,
+    timeUsedSecondsDelta: Math.max(
+      0,
+      Math.ceil((Date.now() - guard.turnStartedAtMs) / 1000),
+    ),
+  };
+}
+
+/**
+ * 回合内三维预算护栏(long-horizon-goal-redesign-plan §3.2/§4.1):
+ * - 每步用 live 投影(本轮 tokenCount + 挂钟增量 + 回合预留)评估,任一维 100% 即翻
+ *   exhausted,本回合剩余请求不再暴露工具(getTurnTools),并注入一次终局提示;
+ * - 回合首步(active 且未耗尽)注入目标锚点:objective + 三维用量 + 75% 收敛指引。
+ */
+function evaluateTurnTargetBudgetGuard(
+  runtime: AgentRuntimeInternal,
+  state: RegularTurnLoopState,
+): void {
+  const guard = state.targetBudget;
+  if (!guard) return;
+  const live = liveTargetBudgetDeltas(state);
+  const exhausted = findExhaustedTargetBudgetDimension(guard.goal, live);
+  if (!exhausted) {
+    if (state.modelStepCount === 0) {
+      // 只进 turn-local request history(appendTurnRequestEntries),不写 canonical
+      // messageHistory:锚点是逐回合重注的临时指引,进 canonical 会被辅助请求
+      // (verifier 等)读到并随回合线性累积。
+      appendTurnRequestEntries(state.turnRequestState, [
+        systemReminderAttachmentEntry("target_anchor", formatTargetAnchorPrompt(guard.goal, live)),
+      ]);
+    }
+    return;
+  }
+  guard.exhausted = true;
+  if (guard.outcomePrompted) return;
+  guard.outcomePrompted = true;
+  appendTurnRequestEntries(state.turnRequestState, [
+    systemReminderAttachmentEntry(
+      "target_budget_outcome",
+      formatTargetBudgetOutcomeReminder(exhausted),
+    ),
+  ]);
+  runtime.targetBudgetOutcomeDeliveredInTurn = true;
+  runtime.logger?.info("Goal budget exhausted mid-turn; tool calls vetoed", {
+    ...traceContextToLogContext(state.turnTraceContext),
+    dimension: exhausted.dimension,
+    event: "target.budget.exhausted_mid_turn",
+    module: "core.runtime",
+    status: "completed",
+    targetId: guard.goal.targetID,
+    used: exhausted.used,
+    budget: exhausted.budget,
+  });
 }

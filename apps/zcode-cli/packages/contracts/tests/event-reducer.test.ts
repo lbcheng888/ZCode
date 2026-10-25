@@ -16,6 +16,10 @@ import type {
   TraceId,
 } from "../src/interfaces/shared.js";
 import type { SessionGoal, GoalStatus } from "../src/tools/target.js";
+import {
+  nextStepPendingInputs,
+  nextTurnPendingInputs,
+} from "../src/interfaces/session.port.js";
 
 // -----------------------------------------------
 // Event Reducer Tests
@@ -606,6 +610,96 @@ describe("EventReducer", () => {
 
       const projection = reducer.reduce(events);
       expect(projection.pendingPermissions).toHaveLength(0);
+    });
+
+
+    it("should split the dual-list inbox projection by delivery lane", () => {
+      const steerEvent = (pendingInputId: string, delivery?: string, input = pendingInputId) =>
+        createSessionEvent(
+          SessionEventType.TurnSteerQueued,
+          sessionId,
+          {
+            pendingInputId,
+            input,
+            inputPreview: input,
+            inputSize: input.length,
+            queueLength: 1,
+            ...(delivery ? { delivery } : {}),
+            targetTurnId: "turn_1" as any,
+          },
+          { traceId: "trace_1" as TraceId, turnId: "turn_1" as any },
+        );
+      const events: SessionEvent[] = [
+        createSessionEvent(SessionEventType.SessionCreated, sessionId, {
+          mode: "build",
+          contextWindow: 200000,
+        }),
+        steerEvent("pending_queue_default"),
+        steerEvent("pending_queue_explicit", "queue"),
+        steerEvent("pending_guide", "guide"),
+        steerEvent("pending_inject", "inject"),
+      ];
+
+      const projection = reducer.reduce(events);
+      // 双列表投影(设计 §3.5):queue→next-turn(缺省),guide/inject→next-step;
+      // 重放可完整重建两条有序表。
+      expect(projection.pendingSteerInputs.map((item) => [item.pendingInputId, item.delivery])).toEqual([
+        ["pending_queue_default", "queue"],
+        ["pending_queue_explicit", "queue"],
+        ["pending_guide", "guide"],
+        ["pending_inject", "inject"],
+      ]);
+      expect(nextTurnPendingInputs(projection).map((item) => item.pendingInputId)).toEqual([
+        "pending_queue_default",
+        "pending_queue_explicit",
+      ]);
+      expect(nextStepPendingInputs(projection).map((item) => item.pendingInputId)).toEqual([
+        "pending_guide",
+        "pending_inject",
+      ]);
+    });
+
+    it("should keep the delivery lane when a held edit re-queues without delivery", () => {
+      const events: SessionEvent[] = [
+        createSessionEvent(SessionEventType.SessionCreated, sessionId, {
+          mode: "build",
+          contextWindow: 200000,
+        }),
+        createSessionEvent(
+          SessionEventType.TurnSteerQueued,
+          sessionId,
+          {
+            pendingInputId: "pending_inject_edit",
+            input: "original inject text",
+            inputPreview: "original inject text",
+            inputSize: 19,
+            delivery: "inject",
+            queueLength: 1,
+            targetTurnId: "turn_1" as any,
+          },
+          { traceId: "trace_1" as TraceId, turnId: "turn_1" as any },
+        ),
+        createSessionEvent(
+          SessionEventType.TurnSteerQueued,
+          sessionId,
+          {
+            pendingInputId: "pending_inject_edit",
+            input: "edited inject text",
+            inputPreview: "edited inject text",
+            inputSize: 17,
+            queueLength: 1,
+            targetTurnId: "turn_1" as any,
+          },
+          { traceId: "trace_1" as TraceId, turnId: "turn_1" as any },
+        ),
+      ];
+
+      const projection = reducer.reduce(events);
+      expect(projection.pendingSteerInputs[0]).toMatchObject({
+        delivery: "inject",
+        input: "edited inject text",
+      });
+      expect(nextStepPendingInputs(projection)).toHaveLength(1);
     });
 
     it("should track pending steer inputs until drained or discarded", () => {

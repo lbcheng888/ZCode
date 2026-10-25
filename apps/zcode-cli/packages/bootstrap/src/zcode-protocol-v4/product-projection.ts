@@ -3669,15 +3669,20 @@ export class ProductProjection {
     const existing = existingIndex >= 0 ? this.snapshot.queue.items[existingIndex] : undefined;
     // queued 事件的 admittedDelivery 只能是 queue/guide。若读到早期或损坏事件里的
     // startNow，必须以实际 queue delivery 为准，不能让投影声称输入已立即启动。
+    // inject(设计 §3.5)是 runtime 侧第三车道,v4 wire 面仍只有 queue/guide;它与
+    // guide 同属 next-step(消费不切轮),投影映射到 guide,车道权威在事件日志 delivery。
     const admittedDelivery: "queue" | "guide" =
       payload.intent?.admittedDelivery === "queue" || payload.intent?.admittedDelivery === "guide"
         ? payload.intent.admittedDelivery
-        : (payload.delivery ??
-          (existing?.delivery.admitted === "queue" || existing?.delivery.admitted === "guide"
-            ? existing.delivery.admitted
-            : this.snapshot.config.followupMode === "guide"
-              ? "guide"
-              : "queue"));
+        : payload.delivery === "inject"
+          ? "guide"
+          : payload.delivery === "guide" || payload.delivery === "queue"
+            ? payload.delivery
+            : (existing?.delivery.admitted === "queue" || existing?.delivery.admitted === "guide"
+              ? existing.delivery.admitted
+              : this.snapshot.config.followupMode === "guide"
+                ? "guide"
+                : "queue");
     const requestedDelivery =
       payload.intent?.requestedDelivery ?? existing?.delivery.requested ?? admittedDelivery;
     const fallbackReasonCode =

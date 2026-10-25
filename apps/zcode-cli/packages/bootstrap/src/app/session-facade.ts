@@ -102,6 +102,8 @@ type SessionFacade = Pick<
 >;
 
 const DEFAULT_SESSION_RESOURCE_CLOSE_TIMEOUT_MS = 6_000;
+const SESSION_CLOSE_TURN_DRAIN_INTERVAL_MS = 50;
+const SESSION_CLOSE_TURN_DRAIN_TIMEOUT_MS = 2_000;
 
 interface SessionResourceCloseInput {
   beginShutdown: () => void;
@@ -193,6 +195,8 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       displayText?: string;
       status?: GoalStatus;
       tokenBudget?: number | null;
+      turnBudget?: number | null;
+      wallClockBudgetSeconds?: number | null;
       intent?: TurnInputIntentMetadata;
     },
   ) => {
@@ -219,6 +223,8 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
             sessionID: deps.sessionId,
             status: input.status,
             tokenBudget: input.tokenBudget,
+            turnBudget: input.turnBudget,
+            wallClockBudgetSeconds: input.wallClockBudgetSeconds,
           })
         : action === "status_updated"
           ? await deps.sessionStore.updateTargetStatus({
@@ -290,6 +296,16 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       closePromise ??= (async () => {
         // 关闭入口先阻止新调度并取消在飞 Memory Extraction，再等待取消链路收口。
         deps.runtime.beginShutdown();
+        // 缺陷根因（关停竞态）：SIGINT 的关停链（closeSessionStore → db.close）与被取消
+        // 回合的记账链（finishTargetTurnAccounting → finishTargetRun 还要写 paused|turn-cancelled
+        // 迁移与事件，session-target.ts 注释明文"事件只能在此落"）之间此前没有任何
+        // happens-before 边，谁先落纯看调度；记账输了只剩 interrupted-run 恢复兜底。
+        // 修复：关库前排空在途 turn 工作——先停前台执行（cause=user、keepInbox 缺省 true，
+        // 与协议路径 runtime-resources.ts 的 stop 对齐；首因语义保证已 aborted 的执行不被改写），
+        // 再有界轮询 hasActiveOrQueuedTurnWork。该谓词覆盖整个取消收口窗口：activeTurn /
+        // activeForegroundExecution 都在回合体（含 catch 记账）完成后才经 finish 清除，
+        // 因此谓词为假时记账的 SQLite 写必然已全部先于 db.close()。
+        await drainActiveTurnWorkBeforeStoreClose(deps.runtime, deps.logger);
         await deps.runtime.drainMemoryExtractions(60_000);
         // 引擎归本 App 所有，所以关闭要主动停下它。
         // 位置是两个约束夹出来的：在 beginShutdown **之后**，结算带出的终态通知才会被丢掉
@@ -761,6 +777,54 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       };
     },
   };
+}
+
+/**
+ * 关库前的有界 turn 排空（关停竞态修复，见 close() 内注释）。
+ *
+ * 轮询而非事件等待：谓词的五个分量（lease / activeForegroundExecution /
+ * drainActive / 队列 pending / activeTurn / startReservation）没有一个公共完成事件，
+ * 而既有先例（headless-workflow.ts 的 waitForHeadlessWorkflowSettle）已论证轮询无竞窗。
+ * timer 必须 unref（照 project-memory-extraction.ts / shutdown.ts 的既有模式），
+ * 否则排空会拖住进程自然退出。超时不阻断关闭：行为与修复前一致（继续关库），但把
+ * 静默丢失变成可观测 warn；残留行由 readTargetWithInterruptedRunRecovery 兜底收敛。
+ */
+async function drainActiveTurnWorkBeforeStoreClose(
+  runtime: AgentRuntime,
+  logger: Logger,
+): Promise<void> {
+  try {
+    runtime.stopActiveForegroundExecution({
+      cause: "user",
+      reason: "Session closing",
+    });
+  } catch (error) {
+    // stop 失败不能吃掉关闭链：最坏情况就是修复前的竞态结果，继续排空与关库。
+    logger.warn?.("Failed to stop active foreground execution before closing", {
+      error: error instanceof Error ? error.message : String(error),
+      event: "session.close.turn_stop.failed",
+      module: "bootstrap.app",
+    });
+  }
+  const deadline = Date.now() + SESSION_CLOSE_TURN_DRAIN_TIMEOUT_MS;
+  while (runtime.hasActiveOrQueuedTurnWork()) {
+    if (Date.now() >= deadline) {
+      logger.warn?.("Session close timed out waiting for in-flight turn accounting", {
+        event: "session.close.turn_drain.timed_out",
+        module: "bootstrap.app",
+        timeoutMs: SESSION_CLOSE_TURN_DRAIN_TIMEOUT_MS,
+      });
+      return;
+    }
+    await sleepWithUnrefTimer(SESSION_CLOSE_TURN_DRAIN_INTERVAL_MS);
+  }
+}
+
+function sleepWithUnrefTimer(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 export async function closeSessionResources(input: SessionResourceCloseInput): Promise<void> {

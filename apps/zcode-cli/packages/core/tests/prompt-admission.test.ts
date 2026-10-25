@@ -61,6 +61,33 @@ describe("AgentRuntime prompt admission", () => {
     expect(modelCalls).toBe(0);
   });
 
+
+  it("admits inject input to the next-step inbox without starting a turn while idle", async () => {
+    let modelCalls = 0;
+    const runtime = createRuntime("prompt-admission-inject-idle", async () => {
+      modelCalls += 1;
+      return {
+        finishReason: "stop",
+        text: "done",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      };
+    });
+
+    // inject 目标(设计 §3.5):绝不唤醒——idle 时也不 start turn,只落 next-step 收件箱。
+    const admission = await runtime.admitPrompt("ambient context", undefined, {
+      ...admissionOptions("inject-idle"),
+      queueDelivery: "inject",
+    });
+
+    expect(admission.kind).toBe("queued");
+    expect(modelCalls).toBe(0);
+    const projection = await runtime.getProjection();
+    const queued = projection.pendingSteerInputs.find(
+      (item) => item.pendingInputId === (admission as { pendingInputId?: string }).pendingInputId,
+    );
+    expect(queued?.delivery).toBe("inject");
+  });
+
   it("reserves before the first turn reaches TurnStarted, so the second prompt is queued", async () => {
     const modelGate = deferred<unknown>();
     let modelCalls = 0;

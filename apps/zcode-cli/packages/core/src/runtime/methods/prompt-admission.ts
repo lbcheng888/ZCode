@@ -50,6 +50,22 @@ export async function admitPrompt(
     this.activeTurn === undefined &&
     this.activeTurnStartReservation === undefined;
   const busy = this.hasActiveOrQueuedTurnWork() && !promotionLeaseOnly;
+  // inject 目标(设计 §3.5):绝不唤醒——不 start turn、不占跑道。idle 时只落
+  // next-step 收件箱,由下一个真正起跑的回合在其首个 step 边界消费。
+  const wantsInject = options?.queueDelivery === "inject";
+  if (!busy && wantsInject) {
+    return await this.enqueueDeferredInput({
+      attachments,
+      commandKind: options?.commandKind,
+      delivery: "inject",
+      input,
+      inputId: options?.inputId,
+      intent: options?.intent,
+      queryId: options?.queryId,
+      toolDisallowlist: options?.toolDisallowlist,
+      traceContext: options?.traceContext,
+    });
+  }
   if (busy) {
     if (options?.requireIdle === true || options?.modelExecution !== undefined) {
       return {
@@ -63,12 +79,17 @@ export async function admitPrompt(
     const canSteer =
       attachments === undefined &&
       activeTurn?.steerable === true &&
-      (options?.queueDelivery === "guide" ||
+      (wantsInject ||
+        options?.queueDelivery === "guide" ||
         options?.delivery === "auto" ||
         options?.delivery === "steer_active_turn") &&
       options?.queueDelivery !== "queue";
     if (canSteer) {
-      const delivery = options?.queueDelivery === "guide" ? "guide" : undefined;
+      const delivery = wantsInject
+        ? ("inject" as const)
+        : options?.queueDelivery === "guide"
+          ? ("guide" as const)
+          : undefined;
       return await this.steerTurn({
         commandKind: options?.commandKind,
         delivery,
@@ -84,8 +105,11 @@ export async function admitPrompt(
       });
     }
 
-    const delivery =
-      options?.queueDelivery === "guide" && attachments === undefined ? "guide" : "queue";
+    const delivery = wantsInject
+      ? ("inject" as const)
+      : options?.queueDelivery === "guide" && attachments === undefined
+        ? ("guide" as const)
+        : ("queue" as const);
     return await this.enqueueDeferredInput({
       attachments,
       commandKind: options?.commandKind,
@@ -161,7 +185,14 @@ export async function admitPrompt(
 
 function admissionIntent(
   intent: TurnInputIntentMetadata | undefined,
-  admittedDelivery: "guide" | "queue",
+  admittedDelivery: "guide" | "queue" | "inject",
 ): TurnInputIntentMetadata | undefined {
-  return intent ? { ...intent, admittedDelivery } : undefined;
+  if (!intent) return undefined;
+  return {
+    ...intent,
+    // intent.admittedDelivery 是持久化元数据域(仅 startNow/queue/guide,消费方含
+    // transcript hydration/wire 投影);inject 车道的权威在 pendingInput.delivery /
+    // TurnSteerQueued.delivery,这里映射到同属 next-step 的 guide,不扩持久枚举。
+    admittedDelivery: admittedDelivery === "inject" ? "guide" : admittedDelivery,
+  };
 }

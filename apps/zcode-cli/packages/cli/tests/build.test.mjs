@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { build } from "esbuild";
 import {
+  assertWorkspaceBuildsFresh,
   assertZodBundleIdentity,
   createZodDedupePlugin,
+  findStaleWorkspaceBuilds,
   readRootPackageVersion,
   resolveBuildAliases,
   resolveBuildOptions,
@@ -277,4 +279,143 @@ test("request security subpath bundles through its edition entry", async () => {
       path.endsWith("shared/src/request-security-edition/index.ts"),
     ),
   );
+});
+
+// goal-arm-bridge 缺陷回归：CLI bundle 经兄弟包 exports 消费其预构建 dist，只进
+// packages/cli 跑 build 不会替它们重编译——桥改了 src、dist 还是旧版时，验收二进制
+// 里就没有桥。守卫必须在打包前拒绝“src 比 dist 新”的依赖。
+const BRIDGE_SOURCE_MS = new Date("2026-10-25T09:32:50.000Z");
+const STALE_OUTPUT_MS = new Date("2026-10-25T08:48:59.000Z");
+const FRESH_OUTPUT_MS = new Date("2026-10-25T12:47:00.000Z");
+
+async function writeFreshnessFixture({ coreOutputMs, withCoreDist = true }) {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-freshness-"));
+  const cliDirectory = join(directory, "apps", "zcode-cli", "packages", "cli");
+  const rootDirectory = join(directory, "apps", "zcode-cli");
+  await mkdir(cliDirectory, { recursive: true });
+  await writeFile(
+    join(cliDirectory, "package.json"),
+    JSON.stringify({
+      dependencies: {
+        "@zcode/assets": "workspace:*",
+        "@zcode/core": "workspace:*",
+        "@zcode/tui": "workspace:*",
+      },
+    }),
+  );
+
+  const coreRoot = join(rootDirectory, "packages", "core");
+  await mkdir(join(coreRoot, "src"), { recursive: true });
+  await writeFile(join(coreRoot, "package.json"), JSON.stringify({ name: "@zcode/core" }));
+  const coreSource = join(coreRoot, "src", "runtime.ts");
+  await writeFile(coreSource, "export {};");
+  await utimes(coreSource, BRIDGE_SOURCE_MS, BRIDGE_SOURCE_MS);
+  if (withCoreDist) {
+    await mkdir(join(coreRoot, "dist"), { recursive: true });
+    const coreOutput = join(coreRoot, "dist", "index.js");
+    await writeFile(coreOutput, "export {};");
+    await utimes(coreOutput, coreOutputMs, coreOutputMs);
+  }
+
+  // external 包（@zcode/tui）与无 src 的纯资产包不参与新鲜度比较。
+  const tuiRoot = join(rootDirectory, "packages", "tui");
+  await mkdir(join(tuiRoot, "src"), { recursive: true });
+  await writeFile(join(tuiRoot, "package.json"), JSON.stringify({ name: "@zcode/tui" }));
+  const tuiSource = join(tuiRoot, "src", "index.ts");
+  await writeFile(tuiSource, "export {};");
+  await utimes(tuiSource, BRIDGE_SOURCE_MS, BRIDGE_SOURCE_MS);
+  const assetsRoot = join(rootDirectory, "packages", "assets");
+  await mkdir(assetsRoot, { recursive: true });
+  await writeFile(join(assetsRoot, "package.json"), JSON.stringify({ name: "@zcode/assets" }));
+
+  return { directory, cliDirectory, rootDirectory };
+}
+
+test("freshness gate reports a sibling whose src is newer than its dist (goal-arm bridge root cause)", async () => {
+  const { directory, cliDirectory, rootDirectory } = await writeFreshnessFixture({
+    coreOutputMs: STALE_OUTPUT_MS,
+  });
+  try {
+    const stale = await findStaleWorkspaceBuilds({ cliDirectory, rootDirectory });
+    assert.deepEqual(
+      stale.map((entry) => ({ name: entry.name, reason: entry.reason })),
+      [{ name: "@zcode/core", reason: "source-newer" }],
+    );
+    await assert.rejects(
+      assertWorkspaceBuildsFresh({ cliDirectory, rootDirectory }),
+      (error) => {
+        assert.match(error.message, /@zcode\/core/);
+        assert.match(error.message, /pnpm --dir apps\/zcode-cli build/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("freshness gate passes when sibling dist is newer than src, and can be bypassed via env", async () => {
+  const { directory, cliDirectory, rootDirectory } = await writeFreshnessFixture({
+    coreOutputMs: FRESH_OUTPUT_MS,
+  });
+  try {
+    assert.deepEqual(await findStaleWorkspaceBuilds({ cliDirectory, rootDirectory }), []);
+    assert.deepEqual(
+      await assertWorkspaceBuildsFresh({ cliDirectory, rootDirectory, env: {} }),
+      [],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+
+  const staleFixture = await writeFreshnessFixture({ coreOutputMs: STALE_OUTPUT_MS });
+  try {
+    assert.deepEqual(
+      await assertWorkspaceBuildsFresh({
+        cliDirectory: staleFixture.cliDirectory,
+        rootDirectory: staleFixture.rootDirectory,
+        env: { ZCODE_SKIP_WORKSPACE_FRESHNESS_CHECK: "1" },
+      }),
+      [],
+    );
+  } finally {
+    await rm(staleFixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("freshness gate reports a sibling with src but no dist, including repo-root packages", async () => {
+  const { directory, cliDirectory, rootDirectory } = await writeFreshnessFixture({
+    coreOutputMs: FRESH_OUTPUT_MS,
+    withCoreDist: false,
+  });
+  try {
+    // @zcode/shared lives at the repository root packages/ directory, not under zcode-cli.
+    const sharedRoot = join(directory, "packages", "shared");
+    await mkdir(join(sharedRoot, "src"), { recursive: true });
+    await mkdir(join(sharedRoot, "dist"), { recursive: true });
+    await writeFile(join(sharedRoot, "package.json"), JSON.stringify({ name: "@zcode/shared" }));
+    const sharedSource = join(sharedRoot, "src", "index.ts");
+    await writeFile(sharedSource, "export {};");
+    await utimes(sharedSource, BRIDGE_SOURCE_MS, BRIDGE_SOURCE_MS);
+    const sharedOutput = join(sharedRoot, "dist", "index.js");
+    await writeFile(sharedOutput, "export {};");
+    await utimes(sharedOutput, STALE_OUTPUT_MS, STALE_OUTPUT_MS);
+    await writeFile(
+      join(cliDirectory, "package.json"),
+      JSON.stringify({ dependencies: { "@zcode/core": "workspace:*", "@zcode/shared": "workspace:*" } }),
+    );
+
+    const stale = await findStaleWorkspaceBuilds({ cliDirectory, rootDirectory });
+    assert.deepEqual(
+      stale.map((entry) => ({ name: entry.name, reason: entry.reason })).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
+      [
+        { name: "@zcode/core", reason: "missing-dist" },
+        { name: "@zcode/shared", reason: "source-newer" },
+      ],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

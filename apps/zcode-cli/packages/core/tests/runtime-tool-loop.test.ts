@@ -1358,7 +1358,7 @@ describe("AgentRuntime tool loop", () => {
         eventStore,
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
-            const latestMessage = withoutAgentListingMessages(request.messages).at(-1);
+            const latestMessage = latestTurnInputMessages(request).at(-1);
             modelInputs.push(providerContentToText(latestMessage?.content));
             if (modelInputs.length === 1) {
               firstModelStarted.resolve();
@@ -1405,7 +1405,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             mainInputs.push(
-              providerContentToText(withoutAgentListingMessages(request.messages).at(-1)?.content),
+              providerContentToText(latestTurnInputMessages(request).at(-1)?.content),
             );
             mainModelStarted.resolve();
             await mainModelCanFinish.promise;
@@ -1431,7 +1431,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             childInputs.push(
-              providerContentToText(withoutAgentListingMessages(request.messages).at(-1)?.content),
+              providerContentToText(latestTurnInputMessages(request).at(-1)?.content),
             );
             return {
               finishReason: "stop",
@@ -3188,6 +3188,146 @@ describe("AgentRuntime tool loop", () => {
     });
   });
 
+  it("runs the last budgeted goal turn fully, then a vetoed outcome turn after the flip", async () => {
+    const sessionId = createSessionId("runtime-target-turn-budget-outcome");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: Array<{ tools: Array<{ name: string }>; messages: unknown[] }> = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-outcome" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push({
+              messages: withoutAgentListingMessages(request.messages),
+              tools: request.tools ?? [],
+            });
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "turn text",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.recordExternalUserPrompt("Ship target");
+    await sessionStore.setTarget({
+      objective: "Ship target",
+      sessionID: sessionId,
+      turnBudget: 1,
+    });
+
+    const result = await runtime.continueActiveTargetLoop({
+      inputId: "client-target-run",
+      trigger: "manual",
+    });
+
+    // 预算内的最后一个回合必须完整执行(可携带工具),blocked 翻转发生在其结算;
+    // 随后补发的宽限终局回合不再暴露任何工具,输入即终局 outcome prompt。
+    expect(requests.length).toBe(2);
+    expect(requests[0].tools.length).toBeGreaterThan(0);
+    expect(requests[1].tools.length).toBe(0);
+    const outcomeInput = requests[1].messages
+      .map((message) => providerContentToText((message as { content?: unknown }).content))
+      .find((content) => content.includes("The session goal budget is exhausted."));
+    expect(outcomeInput).toBeDefined();
+    expect(outcomeInput).toContain("budget-exhausted");
+    expect(result?.response).toBe("turn text");
+
+    const stored = await sessionStore.readTarget({ sessionID: sessionId });
+    expect(stored).toMatchObject({ status: "budget_limited", turnsUsed: 1 });
+  });
+
+  it("injects the goal anchor and vetoes tools once the token budget is exhausted mid-turn", async () => {
+    const sessionId = createSessionId("runtime-target-mid-turn-budget-veto");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const registry = createToolRegistry();
+    registry.register({
+      inputSchema: {},
+      metadata: {
+        concurrentSafe: true,
+        destructive: false,
+        name: "ReadMarker",
+        needsApproval: false,
+        readOnly: true,
+        riskLevel: "low",
+        sideEffectScope: "none",
+      },
+      handler: async () => "marker-ok",
+    });
+    const requests: Array<{ tools: Array<{ name: string }>; messages: unknown[] }> = [];
+    let modelCallCount = 0;
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "yolo", workingDirectory: "/tmp/zcode-runtime-target-veto" },
+      {
+        eventStore,
+        toolRegistry: registry,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            modelCallCount += 1;
+            requests.push({
+              messages: withoutAgentListingMessages(request.messages),
+              tools: request.tools ?? [],
+            });
+            // 第一步带工具调用使回合继续;其 usage(12)已耗尽预算(10),
+            // 第二步必须看到工具被 veto 并收到终局提示。
+            if (modelCallCount === 1) {
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [{ id: "tool-veto-marker", name: "ReadMarker", input: {} }],
+                usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
+              };
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "final summary",
+              usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.recordExternalUserPrompt("Ship target");
+    await sessionStore.setTarget({
+      objective: "Ship target",
+      sessionID: sessionId,
+      tokenBudget: 10,
+    });
+
+    await runtime.executeTurn("keep shipping");
+
+    expect(modelCallCount).toBe(2);
+    const firstRequestText = requests[0].messages
+      .map((message) => providerContentToText((message as { content?: unknown }).content))
+      .join("\n");
+    expect(firstRequestText).toContain("Active session goal anchor");
+    expect(firstRequestText).toContain("<untrusted_objective>");
+    expect(requests[0].tools.length).toBeGreaterThan(0);
+    expect(requests[1].tools.length).toBe(0);
+    const secondRequestText = requests[1].messages
+      .map((message) => providerContentToText((message as { content?: unknown }).content))
+      .join("\n");
+    expect(secondRequestText).toContain("Goal budget exhausted mid-turn.");
+
+    const stored = await sessionStore.readTarget({ sessionID: sessionId });
+    expect(stored).toMatchObject({ status: "budget_limited", tokensUsed: 24 });
+  });
+
   it("runs the runtime-owned active target loop until verification stops it", async () => {
     const sessionId = createSessionId("runtime-target-loop-runtime-owned");
     const eventStore = createTestSessionEventStore();
@@ -3203,7 +3343,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("Verify whether the active session goal")) {
               verifierCount += 1;
@@ -3259,11 +3399,14 @@ describe("AgentRuntime tool loop", () => {
       verifyBeforeFirstContinue: true,
     });
 
+    // Phase 2:手动入口只预约一个回合;后续回合由 idle 驱动器在空闲沿接管
+    // (verify-fail → continuation → verifier-pass),驱动轮次是异步边缘触发。
     expect(result?.response).toBe("continued target");
+    await waitForCondition(() => requestOrder.at(-1) === "verifier-pass");
     expect(requestOrder).toEqual(["verifier-fail", "continuation", "verifier-pass"]);
   });
 
-  it("prompt command can run post-turn active target loop when requested", async () => {
+  it("idle driver continues the armed goal after a prompt turn drains", async () => {
     const sessionId = createSessionId("runtime-target-loop-prompt-opt-in");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -3278,7 +3421,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("finish target")) {
               requestOrder.push("prompt");
@@ -3338,15 +3481,17 @@ describe("AgentRuntime tool loop", () => {
       sessionID: sessionId,
     });
 
-    const result = await runtime.executeTurn("finish target", undefined, {
-      continueActiveTargetAfterTurn: true,
-    });
+    // Phase 2:continueActiveTargetAfterTurn 双触发源已删除;armed 目标在 prompt
+    // 回合排空后的空闲沿由 idle 驱动器预约下一回合(设计 §3.2/§3.6)。
+    armIdleGoalRoundDriver(runtime);
+    const result = await runtime.executeTurn("finish target");
 
-    expect(result.response).toBe("continued target");
+    expect(result.response).toBe("prompt done");
+    await waitForCondition(() => requestOrder.at(-1) === "verifier-pass");
     expect(requestOrder).toEqual(["prompt", "verifier-fail", "continuation", "verifier-pass"]);
   });
 
-  it("prompt post-turn active target loop propagates continuation errors", async () => {
+  it("idle driver rounds contain their failures without failing the prompt turn", async () => {
     const sessionId = createSessionId("runtime-target-loop-prompt-error");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -3360,7 +3505,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("finish with continuation error")) {
               requestOrder.push("prompt");
@@ -3401,16 +3546,18 @@ describe("AgentRuntime tool loop", () => {
       sessionID: sessionId,
     });
 
-    const thrown = await runtime
-      .executeTurn("finish with continuation error", undefined, {
-        continueActiveTargetAfterTurn: true,
-      })
-      .catch((error: unknown) => error);
+    // Phase 2:驱动器轮次脱离用户 turn 生命周期,失败被驱动器收口(logged +
+    // standing-down),不再向 prompt 调用方传播;目标保持 active 交下一边缘处理。
+    armIdleGoalRoundDriver(runtime);
+    const result = await runtime.executeTurn("finish with continuation error");
 
-    expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as Error).message).toContain("Turn execution failed");
-    expect((thrown as { cause?: Error }).cause?.message).toContain("continuation failed");
+    expect(result.response).toBe("prompt done");
+    await waitForCondition(() => requestOrder.includes("continuation-error"));
+    await delay(20);
     expect(requestOrder).toEqual(["prompt", "verifier-fail", "continuation-error"]);
+    await expect(sessionStore.readTarget({ sessionID: sessionId })).resolves.toMatchObject({
+      status: "active",
+    });
   });
 
   it("plain executeTurn does not run post-turn active target loop without opt-in", async () => {
@@ -3427,7 +3574,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("plain prompt")) {
               requestOrder.push("prompt");
@@ -3475,7 +3622,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("Verify whether the active session goal")) {
               requestOrder.push("verifier-pass");
@@ -3517,8 +3664,272 @@ describe("AgentRuntime tool loop", () => {
       verifyBeforeFirstContinue: false,
     });
 
+    // 手动入口首轮不验证;随后驱动器轮次带验证,直到 verifier 通过停转。
     expect(result?.response).toBe("manual continuation");
+    await waitForCondition(() => requestOrder.length === 2);
     expect(requestOrder).toEqual(["continuation", "verifier-pass"]);
+  });
+
+  it("consumes deferred inject inputs at the next turn's first model step", async () => {
+    const sessionId = createSessionId("runtime-inject-turn-start-hydration");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const capturedRequests: unknown[][] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-inject-hydration" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            capturedRequests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "turn done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("inject hydration");
+    // inject(设计 §3.5):idle 提交,不唤醒;停在 next-step 收件箱。
+    const queued = await runtime.enqueueDeferredInput({
+      input: "ambient heartbeat payload",
+      delivery: "inject",
+    });
+    expect(queued.kind).toBe("queued");
+    expect((await runtime.getProjection()).pendingSteerInputs).toHaveLength(1);
+
+    await runtime.executeTurn("real user prompt");
+
+    // 下一个起跑的回合在其首个 step 边界消费 inject,且提交顺序在本轮自身输入之前。
+    expect(capturedRequests.length).toBe(1);
+    const firstRequestText = capturedRequests[0]
+      .map((message) => providerContentToText((message as { content?: unknown }).content))
+      .join("\n");
+    expect(firstRequestText).toContain("ambient heartbeat payload");
+    expect(firstRequestText).toContain("real user prompt");
+    expect(firstRequestText.indexOf("ambient heartbeat payload")).toBeLessThan(
+      firstRequestText.indexOf("real user prompt"),
+    );
+    expect((await runtime.getProjection()).pendingSteerInputs).toHaveLength(0);
+  });
+
+  it("keeps an unconsumed inject in the next-step inbox when the turn stops", async () => {
+    const sessionId = createSessionId("runtime-inject-survives-turn-stop");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+    const firstRequestStarted = deferred();
+    const firstRequestMayFinish = deferred();
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-inject-stop" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("steered during flight")) {
+              requestOrder.push("steer-consumed");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "handled steer",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            requestOrder.push("first");
+            firstRequestStarted.resolve();
+            await firstRequestMayFinish.promise;
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "first done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("inject stop");
+
+    // 回合在途注入一条 guide 与一条 inject,随后取消回合:guide 被改投 queue,
+    // inject 必须留在 next-step 车道等待下一回合(设计 §3.5)。
+    const abortController = new AbortController();
+    const turn = runtime.executeTurn("kick off", undefined, {
+      abortSignal: abortController.signal,
+    });
+    await firstRequestStarted.promise;
+    await runtime.steerTurn({ input: "steered during flight", delivery: "guide" });
+    await runtime.steerTurn({ input: "later inject", delivery: "inject" });
+    abortController.abort(new Error("test inject lane survival"));
+    firstRequestMayFinish.resolve();
+    await expect(turn).rejects.toThrow();
+
+    const projection = await runtime.getProjection();
+    expect(projection.pendingSteerInputs.map((item) => [item.input, item.delivery])).toEqual([
+      ["steered during flight", "queue"],
+      ["later inject", "inject"],
+    ]);
+  });
+
+  it("turn-stopping objection keeps the turn alive and re-reads the inbox", async () => {
+    const sessionId = createSessionId("runtime-turn-stopping-objection");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const capturedRequests: unknown[][] = [];
+    let listenerCalls = 0;
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-turn-stopping" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            capturedRequests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "partial answer",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    const dispose = runtime.registerTurnStoppingListener(async (context) => {
+      listenerCalls += 1;
+      expect(context.response).toBe("partial answer");
+      if (listenerCalls === 1) {
+        await runtime.steerTurn({ input: "wait, one more thing", delivery: "guide" });
+        return { continue: true, reason: "listener has more to say" };
+      }
+      return { continue: false };
+    });
+
+    try {
+      await runtime.executeTurn("start work");
+    } finally {
+      dispose();
+    }
+
+    // 异议成立:loop 重读收件箱(消费 guide)并续跑;第二次无异议,回合正常收尾。
+    expect(listenerCalls).toBe(2);
+    expect(capturedRequests.length).toBe(2);
+    const secondRequestText = capturedRequests[1]
+      .map((message) => providerContentToText((message as { content?: unknown }).content))
+      .join("\n");
+    expect(secondRequestText).toContain("wait, one more thing");
+  });
+
+  it("caps turn-stopping objections at three continuations per turn", async () => {
+    const sessionId = createSessionId("runtime-turn-stopping-cap");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    let modelCalls = 0;
+    let listenerCalls = 0;
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-turn-stopping-cap" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText() {
+            modelCalls += 1;
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "partial answer",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    const dispose = runtime.registerTurnStoppingListener(async () => {
+      listenerCalls += 1;
+      await runtime.steerTurn({ input: `nudge ${listenerCalls}`, delivery: "guide" });
+      return { continue: true };
+    });
+
+    try {
+      await runtime.executeTurn("start work");
+    } finally {
+      dispose();
+    }
+
+    // 初始请求 + 3 次异议续跑 = 4;第 4 次收尾时异议计数已达上限,不再询问监听者。
+    expect(modelCalls).toBe(4);
+    expect(listenerCalls).toBe(3);
+  });
+
+  it("idle driver stays silent while the queue is held", async () => {
+    const sessionId = createSessionId("runtime-target-driver-held-queue");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-driver-held" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("held queue prompt")) {
+              requestOrder.push("prompt");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "prompt done",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            requestOrder.push("goal-round");
+            throw new Error("held queue must suppress the idle driver");
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Held queue");
+    await sessionStore.setTarget({
+      objective: "Do not drive while held",
+      sessionID: sessionId,
+    });
+    armIdleGoalRoundDriver(runtime);
+    // held 队列(autoDrain=false)代表用户显式暂停收件箱;驱动器必须让位。
+    (runtime as unknown as { queueAutoDrain: boolean }).queueAutoDrain = false;
+
+    await runtime.executeTurn("held queue prompt");
+    await delay(20);
+
+    expect(requestOrder).toEqual(["prompt"]);
+    expect(
+      (runtime as unknown as { goalRoundDriverStandingDown?: boolean })
+        .goalRoundDriverStandingDown,
+    ).toBeFalsy();
   });
 
   it("manual active target loop queues behind an active prompt turn", async () => {
@@ -3540,7 +3951,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("blocking prompt")) {
               requestOrder.push("prompt");
@@ -3619,7 +4030,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("blocking prompt")) {
               requestOrder.push("prompt");
@@ -3867,25 +4278,12 @@ describe("AgentRuntime tool loop", () => {
     );
   });
 
-  it("continues active goals without verification while background tasks are running", async () => {
-    const sessionId = createSessionId("runtime-target-continues-with-running-background");
+  it("continues active goals without verification when no background tasks run", async () => {
+    const sessionId = createSessionId("runtime-target-continues-without-background");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
     const requests: any[] = [];
     const observations: TestModelExecutionObservation[] = [];
-
-    await eventStore.append(
-      createSessionEvent(SessionEventType.BackgroundTaskStarted, sessionId, {
-        cancellable: true,
-        command: "npm run test",
-        startedAt: new Date(0),
-        status: "running",
-        taskId: "bg_goal_continue",
-        terminalId: "bg_goal_continue",
-        toolCallId: "tool_bg_goal_continue",
-        toolName: "Bash",
-      }),
-    );
 
     const runtime = createTestAgentRuntime(
       sessionId,
@@ -3924,6 +4322,104 @@ describe("AgentRuntime tool loop", () => {
     const requestText = providerMessagesToText(requests[0].messages);
     expect(requestText).toContain("Continue working toward the active session goal.");
     expect(requestText).not.toContain("Verify whether the active session goal");
+  });
+
+  it("defers manual goal continuation while a workflow run is in flight (goal-workflow interlock)", async () => {
+    const sessionId = createSessionId("runtime-target-defers-with-running-workflow");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const runtimeTaskRegistry = new InMemoryRuntimeTaskRegistry();
+    const requests: any[] = [];
+
+    runtimeTaskRegistry.register({
+      agentId: "wf_goal_inflight",
+      agentType: "local_dynamic_workflow",
+      description: "fan-out verification run",
+      isBackgrounded: true,
+      startedAt: new Date(0),
+      status: "running",
+      taskId: "wf_goal_inflight",
+      taskType: "local_dynamic_workflow",
+      type: "local_dynamic_workflow",
+    });
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-defer-workflow" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(request);
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "unexpected request while the workflow run is in flight",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        runtimeTaskRegistry,
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Wait for the run");
+    await sessionStore.setTarget({
+      objective: "Adjudicate the workflow result when it returns",
+      sessionID: sessionId,
+    });
+
+    // Phase 3 goal↔workflow 互锁(设计 §3.3「workflow 在途时目标 disarm,消除双重驱动」):
+    // 后台任务检查不再被 verifyBeforeContinue 门住——手动续跑语义(verify=false)同样让位,
+    // run 终态的回填通知轮排空后才在空闲沿续跑。
+    await expect(
+      runtime.continueActiveTargetIfIdle({ verifyBeforeContinue: false }),
+    ).resolves.toBeNull();
+    expect(requests).toEqual([]);
+  });
+
+  it("carries the workflow delegation ladder in goal continuation prompts when the toolface is active", async () => {
+    const sessionId = createSessionId("runtime-target-continuation-delegation-ladder");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-ladder" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(request);
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "continued target",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Delegate verification");
+    await sessionStore.setTarget({
+      objective: "Fan out machine-checkable verification",
+      sessionID: sessionId,
+    });
+
+    // 默认 config 非 onDemand,工作流工具面出生即在场——判定权阶梯与委派指引(设计 §3.3)
+    // 随续跑提示进入 provider 请求;goal_round 标签本身仍只承载轮次元数据。
+    await expect(
+      runtime.continueActiveTargetIfIdle({ verifyBeforeContinue: false }),
+    ).resolves.toMatchObject({ response: "continued target" });
+    expect(requests).toHaveLength(1);
+    const requestText = providerMessagesToText(requests[0].messages);
+    expect(requestText).toContain("Adjudication ladder, strongest evidence first");
+    expect(requestText).toContain("dynamic workflow run with CreateWorkflow");
   });
 
   it("queues active target continuation while a prompt command is entering the turn", async () => {
@@ -4030,7 +4526,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             const isVerifier = latestText.includes("Verify whether the active session goal");
             if (isVerifier) {
@@ -4138,6 +4634,9 @@ describe("AgentRuntime tool loop", () => {
     await expect(pendingContinuation).resolves.toMatchObject({
       response: "continued target",
     });
+    // Phase 2:task-notification 不再内联触发续跑;目标 armed 后,通知批次排空
+    // 产生的空闲沿由 idle 驱动器接管(设计 §3.3/§3.4 回填唤醒)。
+    armIdleGoalRoundDriver(runtime);
     await waitForCondition(() => requestOrder.includes("notification"));
     notificationMayFinish.resolve();
     await waitForCondition(() => requestOrder.at(-1) === "verifier-pass");
@@ -4170,7 +4669,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("<task-id>bg-notification-1</task-id>")) {
               expect(latestText).toContain("<task-id>bg-notification-2</task-id>");
@@ -4230,6 +4729,7 @@ describe("AgentRuntime tool loop", () => {
       objective: "Use both background notifications before verification",
       sessionID: sessionId,
     });
+    armIdleGoalRoundDriver(runtime);
 
     const runtimeQueueControl = runtime as unknown as {
       drainRuntimeCommandQueue(): Promise<void>;
@@ -4247,6 +4747,8 @@ describe("AgentRuntime tool loop", () => {
     runtimeQueueControl.runtimeCommandDrainActive = false;
 
     await runtimeQueueControl.drainRuntimeCommandQueue();
+    // 通知批次在 drain 内联完成;goal 续跑由其后的空闲沿异步驱动。
+    await waitForCondition(() => requestOrder.at(-1) === "verifier-pass");
 
     expect(requestOrder).toEqual([
       "notification-batch",
@@ -4273,7 +4775,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("<task-id>bg-notification-clear</task-id>")) {
               requestOrder.push("notification");
@@ -4330,7 +4832,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("<task-id>bg-notification-loop</task-id>")) {
               requestOrder.push("notification");
@@ -4386,6 +4888,7 @@ describe("AgentRuntime tool loop", () => {
       objective: "Finish after background notification",
       sessionID: sessionId,
     });
+    armIdleGoalRoundDriver(runtime);
 
     runtime.enqueueBackgroundTaskNotification({
       text: "<task-notification><task-id>bg-notification-loop</task-id><status>completed</status></task-notification>",
@@ -4422,7 +4925,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("<task-id>bg-notification-yield</task-id>")) {
               requestOrder.push("notification");
@@ -4492,6 +4995,7 @@ describe("AgentRuntime tool loop", () => {
       objective: "Yield queued commands after notification",
       sessionID: sessionId,
     });
+    armIdleGoalRoundDriver(runtime);
 
     runtime.enqueueBackgroundTaskNotification({
       text: "<task-notification><task-id>bg-notification-yield</task-id><status>completed</status></task-notification>",
@@ -4510,6 +5014,15 @@ describe("AgentRuntime tool loop", () => {
     });
 
     expect(requestOrder).toEqual(["notification", "verifier-fail", "continuation", "prompt"]);
+    // 排队命令排空后的空闲沿才轮到驱动器下一回合(用户输入优先语义)。
+    await waitForCondition(() => requestOrder.at(-1) === "verifier-pass");
+    expect(requestOrder).toEqual([
+      "notification",
+      "verifier-fail",
+      "continuation",
+      "prompt",
+      "verifier-pass",
+    ]);
   });
 
   it("task notification trigger does not continue active target when verification is disabled", async () => {
@@ -4530,7 +5043,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("<task-id>bg-notification-disabled</task-id>")) {
               requestOrder.push("notification");
@@ -4585,7 +5098,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             requests.push(
-              providerContentToText(withoutAgentListingMessages(request.messages).at(-1)?.content),
+              providerContentToText(latestTurnInputMessages(request).at(-1)?.content),
             );
             return {
               finishReason: "stop",
@@ -4652,7 +5165,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             requestOrder.push(
               latestText.includes("<task-notification>")
@@ -4691,7 +5204,7 @@ describe("AgentRuntime tool loop", () => {
     expect(requestOrder).toEqual(["notification"]);
   });
 
-  it("post-turn active target loop yields when a prompt is already queued", async () => {
+  it("idle driver reserves the next goal round only after queued prompts drain", async () => {
     const sessionId = createSessionId("runtime-target-prompt-post-turn-yields");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -4707,7 +5220,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("first prompt")) {
               requestOrder.push("first-prompt");
@@ -4747,9 +5260,10 @@ describe("AgentRuntime tool loop", () => {
       sessionID: sessionId,
     });
 
-    const firstTurn = runtime.executeTurn("first prompt", undefined, {
-      continueActiveTargetAfterTurn: true,
-    });
+    // Phase 2:armed 目标的续跑预约只发生在空闲沿;排队中的 runtime 命令
+    // (第二个 prompt)必然先于驱动器回合——idle 的定义即队列排空。
+    armIdleGoalRoundDriver(runtime);
+    const firstTurn = runtime.executeTurn("first prompt");
     await firstPromptStarted.promise;
     const secondTurn = runtime.executeTurn("second prompt");
     await delay(20);
@@ -4760,6 +5274,9 @@ describe("AgentRuntime tool loop", () => {
     await expect(firstTurn).resolves.toMatchObject({ response: "first done" });
     await expect(secondTurn).resolves.toMatchObject({ response: "second done" });
     expect(requestOrder).toEqual(["first-prompt", "second-prompt"]);
+    // 两个 prompt 排空后的空闲沿,驱动器才尝试预约下一回合(verifier 在其后)。
+    await waitForCondition(() => requestOrder.includes("verifier"));
+    expect(requestOrder).toEqual(["first-prompt", "second-prompt", "verifier"]);
   });
 
   it("keeps target continuation history and appends goal state change reminders on following user turns", async () => {
@@ -6636,9 +7153,7 @@ describe("AgentRuntime tool loop", () => {
       status: "cancelled",
     });
     await expect(
-      runtime.executeTurn("new prompt after runtime-owned verifier stop", undefined, {
-        continueActiveTargetAfterTurn: true,
-      }),
+      runtime.executeTurn("new prompt after runtime-owned verifier stop"),
     ).resolves.toMatchObject({
       response: "fresh request after runtime-owned verifier stop",
     });
@@ -6753,7 +7268,7 @@ describe("AgentRuntime tool loop", () => {
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
             const latestText = providerContentToText(
-              withoutAgentListingMessages(request.messages).at(-1)?.content,
+              latestTurnInputMessages(request).at(-1)?.content,
             );
             if (latestText.includes("Verify whether the active session goal")) {
               requestOrder.push("verifier-old");
@@ -14479,12 +14994,18 @@ class RecordingSessionStore implements SessionStorePort {
     sessionID: SessionId;
     status?: GoalStatus;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
+    wallClockBudgetSeconds?: number | null;
   }): Promise<SessionGoal> {
     const target = createTestTarget(
       input.sessionID,
       input.objective,
       input.status ?? "active",
       input.tokenBudget ?? null,
+      {
+        turnBudget: input.turnBudget === undefined ? 256 : input.turnBudget,
+        wallClockBudgetSeconds: input.wallClockBudgetSeconds ?? null,
+      },
     );
     this.targets.set(input.sessionID, target);
     return target;
@@ -14509,6 +15030,7 @@ class RecordingSessionStore implements SessionStorePort {
   async updateTargetStatus(input: {
     sessionID: SessionId;
     status: GoalStatus;
+    reason?: string;
   }): Promise<SessionGoal | null> {
     const current = this.targets.get(input.sessionID);
     if (!current) return null;
@@ -14526,15 +15048,20 @@ class RecordingSessionStore implements SessionStorePort {
     targetID: string;
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
+    turnsUsedDelta?: number;
   }): Promise<SessionGoal | null> {
     const current = this.targets.get(input.sessionID);
     if (!current || current.targetID !== input.targetID) return current ?? null;
     const tokensUsed = current.tokensUsed + Math.max(0, input.tokensUsedDelta ?? 0);
     const timeUsedSeconds = current.timeUsedSeconds + Math.max(0, input.timeUsedSecondsDelta ?? 0);
+    const turnsUsed = (current.turnsUsed ?? 0) + Math.max(0, input.turnsUsedDelta ?? 0);
+    // 与 sqlite store 的三维预算迁移保持同构(设计 §4.1):任一维 100% 翻 budget_limited。
     const status =
       current.status === "active" &&
-      current.tokenBudget !== null &&
-      tokensUsed >= current.tokenBudget
+      ((current.tokenBudget !== null && tokensUsed >= current.tokenBudget) ||
+        (current.turnBudget != null && turnsUsed >= current.turnBudget) ||
+        (current.wallClockBudgetSeconds != null &&
+          timeUsedSeconds >= current.wallClockBudgetSeconds))
         ? "budget_limited"
         : current.status;
     const next = {
@@ -14542,6 +15069,7 @@ class RecordingSessionStore implements SessionStorePort {
       status,
       tokensUsed,
       timeUsedSeconds,
+      turnsUsed,
       time: { ...current.time, updated: 2 },
     };
     this.targets.set(input.sessionID, next);
@@ -14645,6 +15173,7 @@ function createTestTarget(
   objective: string,
   status: GoalStatus,
   tokenBudget: number | null = null,
+  budgets: { turnBudget?: number | null; wallClockBudgetSeconds?: number | null } = {},
 ): SessionGoal {
   return {
     sessionID,
@@ -14655,6 +15184,9 @@ function createTestTarget(
     tokenBudget,
     tokensUsed: 0,
     timeUsedSeconds: 0,
+    turnBudget: budgets.turnBudget === undefined ? 256 : budgets.turnBudget,
+    turnsUsed: 0,
+    wallClockBudgetSeconds: budgets.wallClockBudgetSeconds ?? null,
     time: {
       created: 1,
       updated: 1,
@@ -14668,9 +15200,31 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+/**
+ * 目标锚点/预算终局提醒(target_anchor / target_budget_outcome)在非 MCS 投影下
+ * 是跟在真实输入之后的合成 user 消息;判定“当前正在处理哪条输入”时先剥掉它们。
+ */
+function latestTurnInputMessages(request: { messages: unknown[] }) {
+  const messages = [...withoutAgentListingMessages(request.messages)];
+  while (messages.length > 0) {
+    const text = providerContentToText(
+      (messages.at(-1) as { content?: unknown } | undefined)?.content,
+    );
+    if (
+      text.includes("Active session goal anchor") ||
+      text.includes("Goal budget exhausted mid-turn.")
+    ) {
+      messages.pop();
+      continue;
+    }
+    break;
+  }
+  return messages;
+}
+
 async function waitForCondition(
   check: () => boolean | Promise<boolean>,
-  timeoutMs = 1_000,
+  timeoutMs = 5_000,
 ): Promise<void> {
   const startedAt = Date.now();
   while (!(await check())) {
@@ -14679,6 +15233,15 @@ async function waitForCondition(
     }
     await delay(5);
   }
+}
+
+/**
+ * Phase 2 idle 驱动器:armed 只由手动续跑入口(/goal 语义的 continueActiveTargetLoop)
+ * 置位。测试在直接经 sessionStore.setTarget 造目标时,用本助手单独置进程内标志,
+ * 以便精确控制驱动器从哪个空闲沿开始接管。
+ */
+function armIdleGoalRoundDriver(runtime: unknown): void {
+  (runtime as { goalRoundDriverArmed?: boolean }).goalRoundDriverArmed = true;
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {

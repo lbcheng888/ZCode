@@ -638,6 +638,7 @@ describe("SQLite session store", () => {
       "0022_backfilled_session_reasoning",
       "0023_session_soft_delete_outcome",
       "0024_session_database_identity",
+      "0025_session_target_budget_and_events",
     ];
 
     try {
@@ -674,6 +675,7 @@ describe("SQLite session store", () => {
         "0.16.5",
         "0.16.5",
         "0.16.5",
+        "0.16.9",
         "0.16.9",
         "0.16.9",
       ]);
@@ -713,7 +715,7 @@ describe("SQLite session store", () => {
         ]),
       );
       expect(attempts.flat().filter((result) => !result.ok)).toEqual([]);
-      expect(attempts.flat().every((result) => result.migrationIds?.length === 24)).toBe(true);
+      expect(attempts.flat().every((result) => result.migrationIds?.length === 25)).toBe(true);
     },
     CONCURRENT_STARTUP_TEST_TIMEOUT_MS,
   );
@@ -940,6 +942,7 @@ describe("SQLite session store", () => {
         "0022_backfilled_session_reasoning",
         "0023_session_soft_delete_outcome",
         "0024_session_database_identity",
+        "0025_session_target_budget_and_events",
       ]);
       store.close();
     } finally {
@@ -2590,6 +2593,235 @@ describe("SQLite session store", () => {
       expect(await store.clearTarget({ sessionID })).toBe(true);
       expect(await store.readTarget({ sessionID })).toBeNull();
       expect(await store.clearTarget({ sessionID })).toBe(false);
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("records target state machine events with full post-state snapshots", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-events-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-events");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-events"),
+        slug: "target-events",
+        directory: tempRoot,
+        title: "target events",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      expect(await store.readTargetEvents({ sessionID })).toEqual([]);
+
+      const created = await store.setTarget({ objective: "Ship events", sessionID });
+      const edited = await store.setTarget({ objective: "Ship events v2", sessionID });
+      const paused = await store.updateTargetStatus({
+        reason: "session-start-disarm",
+        sessionID,
+        status: "paused",
+      });
+      const resumed = await store.updateTargetStatus({ sessionID, status: "active" });
+      const cleared = await store.clearTarget({ sessionID });
+
+      expect(cleared).toBe(true);
+      const events = await store.readTargetEvents({ sessionID });
+      expect(events.map((event) => event.kind)).toEqual([
+        "created",
+        "edited",
+        "paused",
+        "resumed",
+        "cleared",
+      ]);
+      expect(events[0]).toMatchObject({
+        kind: "created",
+        blockerCode: null,
+        reason: null,
+        snapshot: { objective: "Ship events", targetID: created.targetID },
+      });
+      expect(events[1]).toMatchObject({
+        kind: "edited",
+        reason: "replaced",
+        snapshot: { objective: "Ship events v2", targetID: edited.targetID },
+      });
+      expect(events[2]).toMatchObject({
+        kind: "paused",
+        reason: "session-start-disarm",
+        snapshot: { status: "paused", targetID: paused?.targetID },
+      });
+      expect(events[3]).toMatchObject({
+        kind: "resumed",
+        snapshot: { status: "active", targetID: resumed?.targetID },
+      });
+      // cleared 是 tombstone:行已删,快照为 null,target_id 记录被清目标。
+      expect(events[4]).toMatchObject({
+        blockerCode: null,
+        kind: "cleared",
+        snapshot: null,
+        targetID: edited.targetID,
+      });
+      for (const event of events) {
+        expect(event.sessionID).toBe(sessionID);
+        expect(event.time).toBeGreaterThan(0);
+      }
+
+      // 幂等同状态重写不追加事件;missing session 也没有事件。
+      const again = await store.setTarget({ objective: "Once more", sessionID });
+      await store.updateTargetStatus({ sessionID, status: "active" });
+      const eventsAfterResume = await store.readTargetEvents({ sessionID });
+      expect(eventsAfterResume.map((event) => event.kind)).toEqual([
+        "created",
+        "edited",
+        "paused",
+        "resumed",
+        "cleared",
+        "created",
+      ]);
+      expect(eventsAfterResume[5]).toMatchObject({
+        kind: "created",
+        snapshot: { targetID: again.targetID },
+      });
+
+      // 取消收口:finish 携带显式 status 把 active 翻 paused 时,事件必须由 finish
+      // 路径落(reason turn-cancelled)——此时 runtime 的 pauseActiveTargetForCancellation
+      // 会因 status 已非 active 早退,不能再依赖 updateTargetStatus 路径。
+      const cancelled = await store.setTarget({ objective: "Cancel me", sessionID });
+      await store.startTargetRun({
+        inputID: "input-cancel",
+        sessionID,
+        startedAtMs: 1_000,
+        targetID: cancelled.targetID,
+      });
+      const cancelledFinish = await store.finishTargetRun({
+        endedAtMs: 2_500,
+        inputID: "input-cancel",
+        reason: "turn-cancelled",
+        sessionID,
+        status: "paused",
+        targetID: cancelled.targetID,
+      });
+      expect(cancelledFinish).toMatchObject({ status: "paused", timeUsedSeconds: 2 });
+      const cancelEvents = await store.readTargetEvents({ sessionID });
+      expect(cancelEvents.at(-1)).toMatchObject({
+        blockerCode: null,
+        kind: "paused",
+        reason: "turn-cancelled",
+        snapshot: { status: "paused", targetID: cancelled.targetID },
+      });
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("enforces the three-dimension target budget on run finish and usage accounting", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-budget-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-budget");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-budget"),
+        slug: "target-budget",
+        directory: tempRoot,
+        title: "target budget",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      // 回合预算缺省 256;显式 null 表示不限。
+      const defaulted = await store.setTarget({ objective: "Default turns", sessionID });
+      expect(defaulted).toMatchObject({ turnBudget: 256, turnsUsed: 0 });
+      const unlimited = await store.setTarget({
+        objective: "Unlimited turns",
+        sessionID,
+        turnBudget: null,
+      });
+      expect(unlimited).toMatchObject({ turnBudget: null });
+
+      const turnLimited = await store.setTarget({
+        objective: "Turn limited",
+        sessionID,
+        turnBudget: 2,
+      });
+      await store.startTargetRun({
+        inputID: "input-turn-1",
+        sessionID,
+        startedAtMs: 1_000,
+        targetID: turnLimited.targetID,
+      });
+      const turnOne = await store.finishTargetRun({
+        endedAtMs: 2_000,
+        inputID: "input-turn-1",
+        sessionID,
+        targetID: turnLimited.targetID,
+        turnsUsedDelta: 1,
+      });
+      expect(turnOne).toMatchObject({ status: "active", turnsUsed: 1 });
+      await store.startTargetRun({
+        inputID: "input-turn-2",
+        sessionID,
+        startedAtMs: 3_000,
+        targetID: turnLimited.targetID,
+      });
+      const turnTwo = await store.finishTargetRun({
+        endedAtMs: 4_000,
+        inputID: "input-turn-2",
+        sessionID,
+        targetID: turnLimited.targetID,
+        turnsUsedDelta: 1,
+      });
+      expect(turnTwo).toMatchObject({ status: "budget_limited", turnsUsed: 2 });
+
+      const wallClockLimited = await store.setTarget({
+        objective: "Wall clock limited",
+        sessionID,
+        wallClockBudgetSeconds: 5,
+      });
+      await store.startTargetRun({
+        inputID: "input-clock-1",
+        sessionID,
+        startedAtMs: 10_000,
+        targetID: wallClockLimited.targetID,
+      });
+      const clockRun = await store.finishTargetRun({
+        endedAtMs: 16_000,
+        inputID: "input-clock-1",
+        sessionID,
+        targetID: wallClockLimited.targetID,
+      });
+      expect(clockRun).toMatchObject({ status: "budget_limited", timeUsedSeconds: 6 });
+
+      const events = await store.readTargetEvents({ sessionID });
+      // blocked 事件按目标分段携带稳定 code budget-exhausted。
+      const blockedEvents = events.filter((event) => event.kind === "blocked");
+      expect(blockedEvents).toHaveLength(2);
+      for (const blockedEvent of blockedEvents) {
+        expect(blockedEvent.blockerCode).toBe("budget-exhausted");
+        expect(blockedEvent.snapshot).toMatchObject({ status: "budget_limited" });
+      }
+
+      // accountTargetUsage 兜底路径同样翻三维预算。
+      const tokenLimited = await store.setTarget({
+        objective: "Token limited",
+        sessionID,
+        tokenBudget: 5,
+      });
+      const accounted = await store.accountTargetUsage({
+        sessionID,
+        targetID: tokenLimited.targetID,
+        tokensUsedDelta: 5,
+        turnsUsedDelta: 1,
+      });
+      expect(accounted).toMatchObject({ status: "budget_limited", tokensUsed: 5, turnsUsed: 1 });
+      const finalEvents = await store.readTargetEvents({ sessionID });
+      expect(finalEvents.filter((event) => event.kind === "blocked")).toHaveLength(3);
     } finally {
       store.close();
       await rm(tempRoot, { force: true, recursive: true });

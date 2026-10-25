@@ -1,4 +1,5 @@
 import { dirname, join, basename } from "node:path";
+import { tmpdir } from "node:os";
 import { sqliteMigrations, MigrationChecksumError } from "@zcode/shared/sqlite-migrations";
 import type { MigrationResult } from "@zcode/shared/sqlite-migrations";
 import {
@@ -101,7 +102,10 @@ export async function runSqliteSessionMigrationsAsync(
     const baseline = db.prepare("SELECT id FROM schema_migration ORDER BY id DESC LIMIT 1").get();
     migration!.lastAppliedMigrationId = baseline ? databaseMigrationIdSchema.safeParse(baseline.id).data : null;
     const directory = dirname(dbPath);
-    const dataRoot = basename(directory) === "db" && basename(dirname(directory)) === "cli" ? dirname(dirname(directory)) : directory;
+    // Bugfix: ":memory:" 库的 dirname 是 "."，dataRoot 会退化为相对路径，备份目录被解析成
+    // "<cwd>/backup"——根级单测把迁移备份写进仓库根，包内运行写进包目录，污染源码树。
+    // 内存库随进程消亡，文件备份没有恢复价值；改投 OS 临时目录，机制保留、不再落进工作区。
+    const dataRoot = dbPath === ":memory:" ? join(tmpdir(), "zcode-migration-backup") : basename(directory) === "db" && basename(dirname(directory)) === "cli" ? dirname(dirname(directory)) : directory;
     const result = await sqliteMigrations.migrate(db, SQLITE_MIGRATIONS, {
       database: "cli", transactionOpen: true, appliedAtColumn: "time_applied", backupDirectories: [join(dataRoot, "backup")],
       onBeforeApply: async (id) => { migrationId = id; if (migration!.kind === "none") migration!.kind = "upgrade"; await progress("migrating", { migrationId: id, completed: migration!.executedCount, total: SQLITE_MIGRATIONS.length }); },

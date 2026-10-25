@@ -400,6 +400,10 @@ export interface ZCodeApp {
     displayText?: string;
     status?: GoalStatus;
     tokenBudget?: number | null;
+    /** 回合预算(缺省 256,null 表示不限);三维预算之一,设计 §4.1。 */
+    turnBudget?: number | null;
+    /** 挂钟预算(秒,null 表示不限);三维预算之一,设计 §4.1。 */
+    wallClockBudgetSeconds?: number | null;
     intent?: TurnInputIntentMetadata;
   }): Promise<SessionGoal>;
   updateTargetStatus(status: GoalStatus): Promise<SessionGoal | null>;

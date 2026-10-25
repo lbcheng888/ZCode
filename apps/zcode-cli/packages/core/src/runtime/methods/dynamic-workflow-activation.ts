@@ -3,7 +3,8 @@
 // ============================================================
 // 灰度 mode 为 `onDemand` 的会话出生时不注册十个工作流工具（Agent / Task 描述里也没有那行
 // CreateWorkflow），直到本会话第一次真的要用到它们：用户敲 `/workflow`、GUI 对本会话的 run 按下
-// Resume / 配置、从中枢直接启动一个保存的工作流，或恢复一条记录里已有工作流的会话。激活只加不减：
+// Resume / 配置、从中枢直接启动一个保存的工作流、用户 arm 一个 goal（goal 回合要能经 CreateWorkflow
+// 发起 run，long-horizon-goal-redesign-plan §3.3 的最小桥），或恢复一条记录里已有工作流的会话。激活只加不减：
 // 会话里一旦有了 run，模型此后一直需要 GetWorkflowRun 等工具去接通知——compaction 不关它
 // （对比技能门：那个问的是「模型此刻还看得见吗」，这个问的是「本会话有没有过工作流」）。
 //
@@ -23,12 +24,13 @@ import type { AgentRuntimeConfig } from "../types.js";
 import { isDynamicWorkflowToolName } from "../../tool/index.js";
 import { refreshBranchAwareBuiltInTools } from "./embedded-search-branch.js";
 
-/** 激活的来源，落进 session entry 供排查；行为上四者等价。 */
+/** 激活的来源，落进 session entry 供排查；行为上五者等价。 */
 export type DynamicWorkflowActivationSource =
   | "command"
   | "run_control"
   | "resume_entry"
-  | "resume_history";
+  | "resume_history"
+  | "goal_arm";
 
 export interface DynamicWorkflowActivationEntryData {
   activated: true;

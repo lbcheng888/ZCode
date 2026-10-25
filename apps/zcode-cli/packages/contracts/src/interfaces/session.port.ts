@@ -154,10 +154,31 @@ export interface PendingSteerInputInfo {
   inputPresentation?: RuntimeInputPresentation;
   /** 当前排队输入附带的工具隐藏列表；automation busy 入队必须在消费时继续生效。 */
   toolDisallowlist?: readonly string[];
+  /**
+   * 投递车道(设计 §3.5 双列表投影):缺省按 queue。next-turn 列表 = queue;
+   * next-step 列表 = guide/inject。事件重放可完整重建两条有序表。
+   */
+  delivery?: TurnSteerDeliveryMode;
   queuedAt: Date;
   targetTurnId: TurnId;
   traceId: TraceId;
   intent?: TurnInputIntentMetadata;
+}
+
+/** 双列表投影:next-turn 收件箱(followup 目标,消费时自成回合)。 */
+export function nextTurnPendingInputs(
+  projection: Pick<SessionProjection, "pendingSteerInputs">,
+): PendingSteerInputInfo[] {
+  return projection.pendingSteerInputs.filter(
+    (item) => (item.delivery ?? "queue") === "queue",
+  );
+}
+
+/** 双列表投影:next-step 收件箱(steer/inject 目标,在 step 边界消费)。 */
+export function nextStepPendingInputs(
+  projection: Pick<SessionProjection, "pendingSteerInputs">,
+): PendingSteerInputInfo[] {
+  return projection.pendingSteerInputs.filter((item) => item.delivery !== "queue");
 }
 
 export interface ActiveToolCall {
@@ -283,12 +304,14 @@ export type TurnSteerCommandKind = "sendText" | "sendGoalCommand" | "compact";
 export type TurnSteerSource = "plan_approval_feedback" | "workflow_refine_feedback";
 
 /**
- * 输入投递语义：
- * - "queue"：排队的未来意图，消费时切新 product turn（每条一轮，自己的回复/工时/edit 范围）；
- * - "guide"：对进行中工作的补充引导，内联在当前轮，不切轮。
- * runtime 注入机制两者相同（boundary 注入），差异只在产品呈现与账本语义。
+ * 输入投递语义(设计 §3.5 三目标契约的落地形态):
+ * - "queue"(followup):排队的未来意图,消费时切新 product turn(每条一轮,自己的回复/工时/edit 范围);
+ * - "guide"(steer):对进行中工作的补充引导,内联在当前轮,不切轮;
+ * - "inject":下一 step 边界消费,且绝不唤醒——不 start turn、不排队提升、不触发 idle 驱动器
+ *   预约;没有在途回合时停留在 next-step 收件箱,由下一个真正起跑的回合在其首个 step 边界消费。
+ * runtime 注入机制三者相同(boundary 注入),差异在唤醒语义与账本车道。
  */
-export type TurnSteerDeliveryMode = "guide" | "queue";
+export type TurnSteerDeliveryMode = "guide" | "queue" | "inject";
 
 /** message.data metadata.highspeed 的持久化契约；不包含运行时凭据。 */
 export interface HighspeedMessageMetadata {

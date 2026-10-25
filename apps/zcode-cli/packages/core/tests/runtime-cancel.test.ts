@@ -104,6 +104,162 @@ describe("AgentRuntime turn cancellation", () => {
     });
   });
 
+  it("forces an active goal to paused at the session-start edge (disarm)", async () => {
+    const sessionId = createSessionId("runtime-cancel-active-goal-disarm");
+    let target: SessionGoal = {
+      sessionID: sessionId,
+      targetID: "target-active" as never,
+      objective: "Ship the active goal",
+      summaryTitle: null,
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 3,
+      timeUsedSeconds: 1,
+      time: {
+        created: 1,
+        updated: 1,
+      },
+    };
+    const updateCalls: Array<{ status: string; reason?: string }> = [];
+    const sessionStore = {
+      async readTarget() {
+        return target;
+      },
+      async updateTargetStatus(input: { status: SessionGoal["status"]; reason?: string }) {
+        updateCalls.push({ reason: input.reason, status: input.status });
+        target = {
+          ...target,
+          status: input.status,
+          time: {
+            ...target.time,
+            updated: target.time.updated + 1,
+          },
+        };
+        return target;
+      },
+    } as unknown as SessionStorePort;
+    const eventStore = createTestSessionEventStore();
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build" },
+      {
+        eventStore,
+        sessionStore,
+      },
+    );
+
+    const resumedTarget = await runtime.activatePausedTargetAfterResume(
+      createRootTraceContext({ sessionId }),
+    );
+
+    // session-start 边缘(重启/resume/fork)必须 disarm:active → paused,
+    // 续跑需人显式 /goal resume(设计 §3.2);事件携带 session-start-disarm 缘由。
+    expect(resumedTarget).toMatchObject({ status: "paused" });
+    expect(updateCalls).toEqual([{ reason: "session-start-disarm", status: "paused" }]);
+    const events = await eventStore.getEvents(sessionId);
+    const targetChanged = events.find(
+      (event) => event.type === SessionEventType.TargetChanged,
+    );
+    expect(targetChanged?.payload).toMatchObject({
+      action: "status_updated",
+      reason: "session-start-disarm",
+      source: "runtime",
+      target: { status: "paused" },
+    });
+  });
+
+
+  // cancel 类型化 + keepInbox(设计 §3.5):keepInbox=false 时收件箱积压显式清账,
+  // 缺省(true)保留为 held——guide 改投 queue、inject 留在 next-step 车道。
+  it("discards the inbox backlog when a typed cancel requests keepInbox=false", async () => {
+    const sessionId = createSessionId("runtime-cancel-keep-inbox-false");
+    const eventStore = createTestSessionEventStore();
+    const firstModelStarted = deferred<void>();
+    const firstModelCanFinish = deferred<void>();
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a keepInbox cancel test agent." },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText() {
+            firstModelStarted.resolve();
+            await firstModelCanFinish.promise;
+            return modelTextResult("in flight");
+          },
+        } as never),
+      },
+    );
+
+    const turn = runtime.executeTurn("prompt that will be stopped");
+    await firstModelStarted.promise;
+    await runtime.steerTurn({ input: "queued followup", delivery: "queue" });
+    await runtime.steerTurn({ input: "ambient inject", delivery: "inject" });
+
+    const stopResult = runtime.stopActiveForegroundExecution({
+      cause: "user",
+      keepInbox: false,
+      reason: "test keepInbox=false stop",
+    });
+    expect(stopResult.kind).toBe("stopped");
+    firstModelCanFinish.resolve();
+    await expect(turn).rejects.toMatchObject({ type: CoreErrorType.TurnCancelled });
+
+    const projection = await runtime.getProjection();
+    expect(projection.pendingSteerInputs).toHaveLength(0);
+    const events = await eventStore.getEvents(sessionId);
+    const discarded = events.find(
+      (event) => event.type === SessionEventType.TurnSteerDiscarded,
+    );
+    expect(discarded?.payload).toMatchObject({ reason: "turn_cancelled" });
+  });
+
+  it("keeps the inbox backlog as held by default on typed cancel", async () => {
+    const sessionId = createSessionId("runtime-cancel-keep-inbox-default");
+    const eventStore = createTestSessionEventStore();
+    const firstModelStarted = deferred<void>();
+    const firstModelCanFinish = deferred<void>();
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { systemPrompt: "You are a default keepInbox cancel test agent." },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText() {
+            firstModelStarted.resolve();
+            await firstModelCanFinish.promise;
+            return modelTextResult("in flight");
+          },
+        } as never),
+      },
+    );
+
+    const turn = runtime.executeTurn("prompt that will be stopped");
+    await firstModelStarted.promise;
+    await runtime.steerTurn({ input: "queued followup", delivery: "queue" });
+    await runtime.steerTurn({ input: "ambient inject", delivery: "inject" });
+
+    // 缺省 keepInbox=true(现状语义):取消后积压保留,guide 类改投 queue。
+    expect(
+      runtime.stopActiveForegroundExecution({ cause: "user", reason: "test default stop" })
+        .kind,
+    ).toBe("stopped");
+    firstModelCanFinish.resolve();
+    await expect(turn).rejects.toMatchObject({ type: CoreErrorType.TurnCancelled });
+
+    const projection = await runtime.getProjection();
+    expect(projection.pendingSteerInputs.map((item) => [item.input, item.delivery])).toEqual([
+      ["queued followup", "queue"],
+      ["ambient inject", "inject"],
+    ]);
+    const events = await eventStore.getEvents(sessionId);
+    expect(
+      events.find((event) => event.type === SessionEventType.TurnSteerDiscarded),
+    ).toBeUndefined();
+  });
+
   it("rejects a cancelled queued prompt before the active turn finishes", async () => {
     const sessionId = createSessionId("runtime-cancel-queued-prompt");
     const firstModelStarted = deferred<void>();

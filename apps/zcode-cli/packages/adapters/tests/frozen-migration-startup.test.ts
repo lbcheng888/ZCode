@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SQLITE_MIGRATIONS } from "../src/storage/session-store/migrations.js";
@@ -142,10 +144,14 @@ describe("Todo144：启动 runner 保持冻结迁移合同", () => {
       const nextDb = createFixture();
       for (const db of [oldDb, nextDb]) seedSelections(db);
       applyFrozen(oldDb);
-      if (mode === "async") await runSqliteSessionMigrationsAsync(nextDb, ":memory:");
-      else await runSqliteSessionMigrations(nextDb, ":memory:");
+      const migrated =
+        mode === "async"
+          ? await runSqliteSessionMigrationsAsync(nextDb, ":memory:")
+          : await runSqliteSessionMigrations(nextDb, ":memory:");
       expect(snapshot(nextDb)).toEqual(snapshot(oldDb));
       expect(nextDb.prepare("SELECT count(*) AS n FROM part").get()?.n).toBe(109);
+      // Bugfix: ":memory:" 升级备份曾解析为相对 "<cwd>/backup" 污染任意工作目录;钉住必须落在 OS 临时目录。
+      expect(migrated.backupPath?.startsWith(join(tmpdir(), "zcode-migration-backup"))).toBe(true);
     },
   );
 

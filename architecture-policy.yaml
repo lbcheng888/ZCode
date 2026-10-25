@@ -886,3 +886,13 @@ exceptions:
       - packages/ui/src/settings/DynamicWorkflowModeSetting.tsx
       - packages/ui/src/store/dynamicWorkflowAvailabilityStore.ts
     reason: Admitted upstream files edited only to let the user's dynamic workflow mode choice always win and keep the settings row visible; adopting packages/shared/src and packages/ui/src needs a separate module boundary refactor.
+  - id: target-budget-grace-tool-visibility-edit
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/core/src/runtime/methods/turn-tool-visibility.ts
+    reason: Admitted upstream file edited only to hide all tools for the goal budget grace turn (long-horizon-goal-redesign-plan §4.1); the veto branch mirrors the existing automationCreateLimitReached gate, contracts and module boundaries unchanged. Adopting the whole core runtime methods directory needs a separate module boundary refactor.
+  - id: goal-workflow-bridge-activation-edit
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/core/src/runtime/methods/dynamic-workflow-activation.ts
+    reason: Admitted upstream file edited only to add the goal_arm activation source so arming a goal can bring up the on-demand workflow toolface (long-horizon-goal-redesign-plan §4.3); no new file, contract or module boundary is introduced. Adopting the whole core runtime methods directory needs a separate module boundary refactor.

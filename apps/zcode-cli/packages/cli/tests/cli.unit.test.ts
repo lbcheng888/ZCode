@@ -1488,6 +1488,12 @@ test("command center handles goal commands locally", async () => {
             status,
             targetID: "target-1",
             time: { created: 1, updated: 1 },
+            tokenBudget: 1000,
+            tokensUsed: 120,
+            turnsUsed: 3,
+            turnBudget: 256,
+            timeUsedSeconds: 45,
+            wallClockBudgetSeconds: 600,
           };
           return target;
         },
@@ -1531,6 +1537,9 @@ test("command center handles goal commands locally", async () => {
 
   assert.match(set.response, /Goal active/);
   assert.match(set.response, /Ship target MVP/);
+  assert.match(set.response, /Usage: 120 tokens \/ 1000/);
+  assert.match(set.response, /Turns: 3 \/ 256/);
+  assert.match(set.response, /Time: 45 seconds \/ 600 seconds/);
   assert.match(paused.response, /Goal paused/);
   assert.match(summary.response, /Goal paused/);
   assert.match(cleared.response, /Goal cleared/);
@@ -5113,6 +5122,58 @@ test("aborts and closes the headless app on process shutdown signals", async () 
   assert.equal(await runPromise, 1);
   assert.equal(abortSeen, true);
   assert.equal(closeCount, 1);
+});
+
+test("gives the signal cleanup path the same staged budget as normal exit", async () => {
+  const ctx = createContext(["--prompt", "hello"]);
+  const shutdownProcess = createTestShutdownProcess("linux");
+  const exitDeferred = createDeferred<number>();
+  const promptStarted = createDeferred<void>();
+  let closeDoneAtMs = 0;
+  let exitAtMs = 0;
+
+  const runPromise = run(ctx, {
+    ...createPromptDeps(),
+    createZCodeApp: () =>
+      ({
+        close: async () => {
+          // 模拟关库前的取消记账排空：耗时必须超过旧信号路径 2s 缺省预算、
+          // 又低于 closeApp 自身的 6s 分阶预算，才能区分两条路径的预算来源。
+          await delay(2_400);
+          closeDoneAtMs = Date.now();
+        },
+        runtime: {} as never,
+        sessionId: "session-signal-budget",
+        submitPrompt: async (_prompt: string, options?: { abortSignal?: AbortSignal }) => {
+          promptStarted.resolve();
+          return await new Promise<never>((_resolve, reject) => {
+            options?.abortSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(new Error("aborted by signal"));
+              },
+              { once: true },
+            );
+          });
+        },
+        traceId: "trace-signal-budget",
+      }) as never,
+    exitProcess: (code) => {
+      exitAtMs = Date.now();
+      exitDeferred.resolve(code);
+    },
+    shutdownProcess,
+  });
+
+  await promptStarted.promise;
+  shutdownProcess.emitSignal("SIGINT");
+
+  assert.equal(await exitDeferred.promise, 130);
+  assert.equal(await runPromise, 1);
+  // 修复断言（关停竞态）：exit(130) 只允许发生在 app.close（含记账排空）完成之后；
+  // 旧的 2s 信号预算会在 close 完成前抢跑，把排空掐断在中间。
+  assert.ok(closeDoneAtMs > 0);
+  assert.ok(exitAtMs >= closeDoneAtMs);
 });
 
 test("closes a late async app without submitting after shutdown during initialization", async () => {

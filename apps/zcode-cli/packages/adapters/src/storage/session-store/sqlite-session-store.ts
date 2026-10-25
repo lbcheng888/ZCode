@@ -48,6 +48,7 @@ import type {
   SessionInputStatus,
   SessionTaskLinkRecord,
   SessionRevert,
+  SessionTargetEvent,
   SessionStorePort,
   SharedContextImportCommitBundle,
   SharedContextImportTransition,
@@ -72,6 +73,7 @@ import {
   finishSessionTargetRun,
   heartbeatSessionTargetRun,
   readSessionTarget,
+  readSessionTargetEvents,
   recoverInterruptedSessionTargetRun,
   setSessionTarget,
   startSessionTargetRun,
@@ -734,17 +736,27 @@ export class SqliteSessionStore
     return readSessionTarget(this.db, input);
   }
 
+  async readTargetEvents(input: {
+    sessionID: SessionId;
+  }): Promise<SessionTargetEvent[]> {
+    return readSessionTargetEvents(this.db, input);
+  }
+
   async setTarget(input: {
     objective: string;
     sessionID: SessionId;
     status?: GoalStatus;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
+    wallClockBudgetSeconds?: number | null;
   }): Promise<SessionGoal> {
     return setSessionTarget(this.db, {
       objective: input.objective,
       sessionID: input.sessionID,
       status: input.status ?? "active",
       tokenBudget: input.tokenBudget,
+      turnBudget: input.turnBudget,
+      wallClockBudgetSeconds: input.wallClockBudgetSeconds,
     });
   }
 
@@ -772,6 +784,7 @@ export class SqliteSessionStore
   async updateTargetStatus(input: {
     sessionID: SessionId;
     status: GoalStatus;
+    reason?: string;
   }): Promise<SessionGoal | null> {
     return updateSessionTargetStatus(this.db, input);
   }
@@ -800,7 +813,9 @@ export class SqliteSessionStore
     inputID: string;
     endedAtMs: number;
     status?: GoalStatus;
+    reason?: string;
     tokensUsedDelta?: number;
+    turnsUsedDelta?: number;
   }): Promise<SessionGoal | null> {
     return finishSessionTargetRun(this.db, input);
   }
@@ -814,6 +829,7 @@ export class SqliteSessionStore
     targetID: string;
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
+    turnsUsedDelta?: number;
   }): Promise<SessionGoal | null> {
     return accountSessionTargetUsage(this.db, input);
   }

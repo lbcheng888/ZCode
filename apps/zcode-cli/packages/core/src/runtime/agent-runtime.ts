@@ -123,6 +123,7 @@ import type {
   StopActiveForegroundExecutionOptions,
   StopActiveForegroundExecutionResult,
   TurnResult,
+  TurnStoppingListener,
   WorkspaceCheckpointSummary,
   WorkspaceFileRewindApplyResult,
   WorkspaceFileRewindPreview,
@@ -264,6 +265,10 @@ export class AgentRuntime {
   private sessionStartHookRan = false;
   private sessionTitleGenerationAttempted = false;
   private agentTelemetry: RuntimeTelemetryFacade;
+  // idle 驱动器进程内事实(armed/standing-down)与 turn-stopping 监听链(设计 §3.2/§3.5)。
+  private goalRoundDriverArmed?: boolean;
+  private goalRoundDriverStandingDown?: boolean;
+  private turnStoppingListeners: TurnStoppingListener[] = [];
 
   constructor(sessionId: SessionId, config: AgentRuntimeConfig, deps: AgentRuntimeDeps) {
     const runtime = this as unknown as AgentRuntimeInternal;
@@ -640,6 +645,11 @@ export interface AgentRuntime {
     verifyBeforeContinue?: boolean;
   }): Promise<TurnResult | null>;
   continueActiveTargetLoop(options: ContinueActiveTargetLoopOptions): Promise<TurnResult | null>;
+  /**
+   * 注册 turn-stopping 异议监听者(设计 §3.5):回合收尾前串行运行,反对收尾并
+   * 经 steer/inject 补充输入时,loop 重读收件箱并续跑当前回合。返回注销函数。
+   */
+  registerTurnStoppingListener(listener: TurnStoppingListener): () => void;
   stopActiveForegroundExecution(
     options?: StopActiveForegroundExecutionOptions,
   ): StopActiveForegroundExecutionResult;

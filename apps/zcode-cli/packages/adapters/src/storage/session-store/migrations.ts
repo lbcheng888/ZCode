@@ -984,4 +984,81 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
     `,
   },
   { ...SESSION_DATABASE_IDENTITY_MIGRATION, touchedTables: ["zcode_database_identity"] },
+  {
+    appVersion: "0.16.9",
+    id: "0025_session_target_budget_and_events",
+    touchedTables: ["session_target", "session_target_event"],
+    // long-horizon-goal-redesign-plan §4.1:target 三维预算(token/回合/挂钟)+
+    // append-only 状态机事件日志。回合预算默认 256(dsh-goal 骨架沿用),
+    // 既有行 backfill 该默认;显式 null 才表示不限(由应用层写入)。
+    // apply 与 0023 同款幂等守卫:启动链路存在"删除账本行后重放"的场景
+    // (SILENTDB 降级模拟/双写竞争收口),裸 alter 在列已存在时会直接失败。
+    apply: (db) => {
+      const targetColumns = new Set(
+        db
+          .prepare("pragma table_info(session_target)")
+          .all()
+          .map((row) => row.name),
+      );
+      if (!targetColumns.has("turn_budget"))
+        db.exec("alter table session_target add column turn_budget integer");
+      if (!targetColumns.has("turns_used"))
+        db.exec("alter table session_target add column turns_used integer not null default 0");
+      if (!targetColumns.has("wall_clock_budget_seconds"))
+        db.exec("alter table session_target add column wall_clock_budget_seconds integer");
+      db.exec("update session_target set turn_budget = 256 where turn_budget is null");
+      db.exec(`
+        create table if not exists session_target_event (
+          id integer primary key autoincrement,
+          session_id text not null references session(id) on delete cascade,
+          target_id text not null,
+          kind text not null check(kind in (
+            'created',
+            'edited',
+            'paused',
+            'resumed',
+            'blocked',
+            'completed',
+            'cleared'
+          )),
+          blocker_code text,
+          reason text,
+          snapshot_json text,
+          time_created integer not null
+        );
+
+        create index if not exists session_target_event_session_idx
+          on session_target_event(session_id, id);
+      `);
+    },
+    sql: `
+      alter table session_target add column turn_budget integer;
+      alter table session_target add column turns_used integer not null default 0;
+      alter table session_target add column wall_clock_budget_seconds integer;
+
+      update session_target set turn_budget = 256 where turn_budget is null;
+
+      create table if not exists session_target_event (
+        id integer primary key autoincrement,
+        session_id text not null references session(id) on delete cascade,
+        target_id text not null,
+        kind text not null check(kind in (
+          'created',
+          'edited',
+          'paused',
+          'resumed',
+          'blocked',
+          'completed',
+          'cleared'
+        )),
+        blocker_code text,
+        reason text,
+        snapshot_json text,
+        time_created integer not null
+      );
+
+      create index if not exists session_target_event_session_idx
+        on session_target_event(session_id, id);
+    `,
+  },
 ];

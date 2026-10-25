@@ -11,7 +11,6 @@ import { persistSubagentMessageCommand } from "./subagent-messages.js";
 import { runControlOnlyTurnCommand } from "./control-only-turn.js";
 import { createTurnCancelledError } from "../helpers/index.js";
 import { executeTargetContinuationCommand } from "./target.js";
-import { runActiveTargetContinuationLoop } from "./target-continuation-loop.js";
 import { isStaleBranchRuntimeCommand } from "./runtime-command-generation.js";
 import { noteWorkflowReminderCommandStarted } from "./dynamic-workflow-blocked-reminder.js";
 import type {
@@ -84,8 +83,14 @@ export async function drainRuntimeCommandQueue(this: AgentRuntimeInternal): Prom
     return;
   }
   // 空闲沿：队列排空，且没有任何在跑 / 排着 / 预留的回合（持着晋升租约、或 prompt 已预留未入队时不算，
-  // 那一轮自己排空时会再走到这里）。「run 还欠着决定」的提醒钟从这里起算。
-  if (!hasActiveOrQueuedTurnWork.call(this)) this.workflowBlockedReminder?.sessionIdle();
+  // 那一轮自己排空时会再走到这里）。「run 还欠着决定」的提醒钟从这里起算；
+  // idle 驱动器在同一边缘预约下一个 goal 回合(设计 §3.2,取代旧忙碌循环与
+  // continueActiveTargetAfterTurn / task-notification 双触发源)。
+  if (!hasActiveOrQueuedTurnWork.call(this)) {
+    this.workflowBlockedReminder?.sessionIdle();
+    // 与 workflowBlockedReminder 同例:真实 runtime 恒在场,可选仅为手写局部桩。
+    this.scheduleIdleGoalRound?.();
+  }
 }
 
 function dequeueNextRunnableBatch(this: AgentRuntimeInternal): readonly RuntimeCommand[] {
@@ -106,11 +111,7 @@ function dequeueNextRunnableBatch(this: AgentRuntimeInternal): readonly RuntimeC
 }
 
 function runtimeCommandInputId(command: RuntimeCommand): string | undefined {
-  if (
-    command.mode === "prompt" ||
-    command.mode === "target-continuation" ||
-    command.mode === "target-continuation-loop"
-  ) {
+  if (command.mode === "prompt" || command.mode === "target-continuation") {
     return command.options?.inputId;
   }
   return undefined;
@@ -169,40 +170,6 @@ export function releaseForegroundPromotionLease(
   return true;
 }
 
-async function runPostCommandActiveTargetLoop(
-  this: AgentRuntimeInternal,
-  command: RuntimeCommand,
-  abortSignal: AbortSignal,
-): Promise<Awaited<ReturnType<AgentRuntimeInternal["continueActiveTargetLoop"]>> | null> {
-  if (command.mode === "prompt" && command.options?.continueActiveTargetAfterTurn === true) {
-    return await runActiveTargetContinuationLoop.call(this, {
-      abortSignal,
-      inputId: command.options.inputId,
-      traceContext: command.options.traceContext ?? command.traceContext,
-      trigger: "user-prompt",
-      verifyBeforeFirstContinue: true,
-    });
-  }
-  if (command.mode === "task-notification") {
-    try {
-      return await runActiveTargetContinuationLoop.call(this, {
-        abortSignal,
-        traceContext: command.traceContext,
-        trigger: "task-notification",
-        verifyBeforeFirstContinue: true,
-      });
-    } catch (error) {
-      this.logger?.warn("Post-command goal continuation failed", {
-        ...traceContextToLogContext(command.traceContext),
-        errorMessage: error instanceof Error ? error.message : String(error),
-        event: "target.continuation.after_command_failed",
-        module: "core.runtime",
-      });
-    }
-  }
-  return null;
-}
-
 async function runRuntimeCommand(
   this: AgentRuntimeInternal,
   command: RuntimeCommand,
@@ -230,12 +197,9 @@ async function runRuntimeCommand(
           },
           command.startReservation,
         );
-        const continuationResult = await runPostCommandActiveTargetLoop.call(
-          this,
-          command,
-          foregroundExecution.controller.signal,
-        );
-        command.resolve(continuationResult ?? result);
+        // goal 续跑不再由 prompt 命令尾部触发(continueActiveTargetAfterTurn 已删除,
+        // 设计 §3.6):drain 收口后的空闲沿由 idle 驱动器统一预约。
+        command.resolve(result);
       } finally {
         this.runtimeCommandQueue.clearCancelPending(command.id);
       }
@@ -251,24 +215,19 @@ async function runRuntimeCommand(
           ...command.options,
           abortSignal: foregroundExecution.controller.signal,
         });
+        // idle 驱动器预约的回合在此同步落 standing-down 信号:drain 收口的空闲沿与
+        // 本命令的完成同属一个微任务延续,驱动器侧的 promise 反应(经 async 包装)
+        // 必然晚于空闲沿,异步置位会漏掉紧跟其后的边缘(实测复现:失败回合被立即重约)。
+        if (command.options.idleDriver) {
+          this.goalRoundDriverStandingDown = result === null;
+        }
         command.resolve(result);
-      } finally {
-        this.runtimeCommandQueue.clearCancelPending(command.id);
-      }
-      return;
-    }
-    if (command.mode === "target-continuation-loop") {
-      if (this.runtimeCommandQueue.consumeCancelPending(command.id)) {
-        command.reject(createTurnCancelledError(command.options.abortSignal?.reason));
+      } catch (error) {
+        if (command.options.idleDriver) {
+          this.goalRoundDriverStandingDown = true;
+        }
+        command.reject(error);
         return;
-      }
-      try {
-        const result = await runActiveTargetContinuationLoop.call(this, {
-          ...command.options,
-          abortSignal: foregroundExecution.controller.signal,
-          yieldBeforeFirstContinue: false,
-        });
-        command.resolve(result);
       } finally {
         this.runtimeCommandQueue.clearCancelPending(command.id);
       }
@@ -314,11 +273,7 @@ async function runRuntimeCommand(
       return;
     }
   } catch (error) {
-    if (
-      command.mode === "prompt" ||
-      command.mode === "target-continuation" ||
-      command.mode === "target-continuation-loop"
-    ) {
+    if (command.mode === "prompt" || command.mode === "target-continuation") {
       command.reject(error);
       return;
     }
@@ -385,11 +340,6 @@ async function runTaskNotificationBatch(
       skipUserPromptSubmitHooks: true,
       traceContext: firstCommand.traceContext,
     });
-    await runPostCommandActiveTargetLoop.call(
-      this,
-      firstCommand,
-      foregroundExecution.controller.signal,
-    );
     this.logger?.info?.("Background task notification batch completed", {
       ...traceContextToLogContext(firstCommand.traceContext),
       batchSize: eligibleCommands.length,
@@ -454,11 +404,7 @@ function finishForegroundExecution(
 }
 
 function runtimeCommandAbortSignal(command: RuntimeCommand): AbortSignal | undefined {
-  if (
-    command.mode === "prompt" ||
-    command.mode === "target-continuation" ||
-    command.mode === "target-continuation-loop"
-  ) {
+  if (command.mode === "prompt" || command.mode === "target-continuation") {
     return command.options?.abortSignal;
   }
   return undefined;
@@ -485,7 +431,17 @@ export function stopActiveForegroundExecution(
   // turn catch 因而把 queueAutoDrain 关闭。把调用意图固定在当前 foreground
   // execution 上，保证超时后迟到的 TurnComplete 仍能保留原队列授权。
   active.preserveQueueAutoDrainOnCancel = options.preserveQueueAutoDrainOnCancel === true;
-  active.controller.abort(new Error(options.reason ?? "foreground execution stopped"));
+  // cancel 类型化(设计 §3.5):cause/keepInbox 随首因一次性落档;已 aborted 的
+  // 执行在上面的 idle 分支返回,后续 stop 调用不会改写首因。
+  active.cancellation = {
+    cause: options.cause ?? "user",
+    keepInbox: options.keepInbox !== false,
+  };
+  active.controller.abort(
+    new Error(
+      `${options.reason ?? "foreground execution stopped"} (cancel cause: ${active.cancellation.cause})`,
+    ),
+  );
   return {
     kind: "stopped",
     foregroundExecutionId: active.foregroundExecutionId,

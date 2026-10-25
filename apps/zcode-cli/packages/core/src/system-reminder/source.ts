@@ -53,6 +53,8 @@ export const SYSTEM_REMINDER_PER_REQUEST_SOURCES = [
   "model_anomaly",
   "prompt_attachment",
   "diagnostics",
+  "target_anchor",
+  "target_budget_outcome",
 ] as const;
 
 export type SystemReminderPrefixSource = (typeof SYSTEM_REMINDER_PREFIX_SOURCES)[number];
@@ -181,6 +183,16 @@ const SYSTEM_REMINDER_DESCRIPTORS: Record<SystemReminderSource, DescriptorShape>
     "sr.shell_environment_change",
   ),
   diagnostics: descriptor("mid_turn_event", "mid_turn_event", true, "sr.diagnostics"),
+  // 目标层(long-horizon-goal-redesign-plan §3.2/§4.1):回合首步锚点与预算终局提示
+  // 都是 per-request 注入——随当前 turn 的 request history 释放,不进持久历史,
+  // 也不会像 date_change 那样常驻 messageHistory 造成逐回合线性膨胀。
+  target_anchor: descriptor("current_turn", "per_current_turn", true, "sr.target_anchor"),
+  target_budget_outcome: descriptor(
+    "current_turn",
+    "per_current_turn",
+    true,
+    "sr.target_budget_outcome",
+  ),
   // 第四批 4a-0（2026-09-12）：原 plugin_ui_state 源已删除，插件给模型的信息改走 ui/update-model-context。
 };
 

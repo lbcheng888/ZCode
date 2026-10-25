@@ -63,6 +63,7 @@ import {
   completeExternalQueueDrain,
   discardHeldPendingInputById,
   discardPendingInput,
+  hydrateDeferredInjectInputsForTurnStart,
   editPendingInputById,
   emitModeChanged,
   emitModelSelected,
@@ -112,7 +113,8 @@ import { injectTargetStateIntoMessageHistory } from "./resume.js";
 import { recordTargetChanged } from "./target.js";
 import { recordGoalStateChangeReminder } from "./goal-state-reminder.js";
 import { continueActiveTargetIfIdle } from "./target.js";
-import { continueActiveTargetLoop } from "./target-continuation-loop.js";
+import { continueActiveTargetLoop } from "./target.js";
+import { scheduleIdleGoalRound } from "./target.js";
 import { targetContinuationCandidate } from "./target.js";
 import { accountTargetTurnCompletion } from "./target.js";
 import { startTargetTurnAccounting } from "./target.js";
@@ -122,7 +124,9 @@ import { pauseActiveTargetForCancellation } from "./target.js";
 import { activatePausedTargetAfterResume } from "./target.js";
 import {
   injectHookAdditionalContextIntoMessageHistory,
+  registerTurnStoppingListener,
   runSessionStartHooks,
+  runTurnStoppingListeners,
   runStopHooks,
   runUserPromptSubmitHooks,
   shouldContinueAfterStopHooks,
@@ -263,6 +267,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.drainPendingRuntimeCommandsForActiveLoop = drainPendingRuntimeCommandsForActiveLoop;
   proto.sealBackgroundTaskNotifications = sealBackgroundTaskNotifications;
   proto.discardPendingInput = discardPendingInput;
+  proto.hydrateDeferredInjectInputsForTurnStart = hydrateDeferredInjectInputsForTurnStart;
   proto.removePendingInputById = removePendingInputById;
   proto.reservePendingInputById = reservePendingInputById;
   proto.markPendingInputPromoting = markPendingInputPromoting;
@@ -317,6 +322,9 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.recordGoalStateChangeReminder = recordGoalStateChangeReminder;
   proto.continueActiveTargetIfIdle = continueActiveTargetIfIdle;
   proto.continueActiveTargetLoop = continueActiveTargetLoop;
+  proto.scheduleIdleGoalRound = scheduleIdleGoalRound;
+  proto.registerTurnStoppingListener = registerTurnStoppingListener;
+  proto.runTurnStoppingListeners = runTurnStoppingListeners;
   proto.targetContinuationCandidate = targetContinuationCandidate;
   proto.accountTargetTurnCompletion = accountTargetTurnCompletion;
   proto.startTargetTurnAccounting = startTargetTurnAccounting;

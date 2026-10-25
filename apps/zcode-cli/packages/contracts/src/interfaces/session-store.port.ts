@@ -26,7 +26,7 @@ import type {
   ModelToolSideEffectScope,
 } from "../model/index.js";
 import type { TodoItem } from "../tools/todo.js";
-import type { SessionGoal, GoalStatus } from "../tools/target.js";
+import type { SessionGoal, GoalStatus, SessionTargetEvent } from "../tools/target.js";
 import type { PermissionRuleset } from "./permission.port.js";
 import type { CollaborationMode } from "./session.port.js";
 import type { EnvInfo } from "./context-source.port.js";
@@ -1211,6 +1211,8 @@ export interface SessionStorePort {
     sessionID: SessionId;
     status?: GoalStatus;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
+    wallClockBudgetSeconds?: number | null;
   }): Promise<SessionGoal>;
   cloneTargetForFork?(input: {
     source: SessionGoal;
@@ -1225,6 +1227,8 @@ export interface SessionStorePort {
   updateTargetStatus(input: {
     sessionID: SessionId;
     status: GoalStatus;
+    /** 状态机事件缘由(session-start-disarm / budget-exhausted 等)。 */
+    reason?: string;
   }): Promise<SessionGoal | null>;
   startTargetRun?(input: {
     sessionID: SessionId;
@@ -1244,7 +1248,10 @@ export interface SessionStorePort {
     inputID: string;
     endedAtMs: number;
     status?: GoalStatus;
+    /** 显式 status 迁移的事件缘由(取消收口传 turn-cancelled)。 */
+    reason?: string;
     tokensUsedDelta?: number;
+    turnsUsedDelta?: number;
   }): Promise<SessionGoal | null>;
   recoverInterruptedTargetRun?(input: { sessionID: SessionId }): Promise<SessionGoal | null>;
   accountTargetUsage(input: {
@@ -1252,7 +1259,10 @@ export interface SessionStorePort {
     targetID: string;
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
+    turnsUsedDelta?: number;
   }): Promise<SessionGoal | null>;
+  /** target 状态机 durable 事件日志(append-only,全量后置快照),按 id 升序。 */
+  readTargetEvents?(input: { sessionID: SessionId }): Promise<SessionTargetEvent[]>;
   updateTargetSummaryTitle(input: {
     sessionID: SessionId;
     targetID: string;

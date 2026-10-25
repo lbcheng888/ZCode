@@ -4,7 +4,15 @@
 
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { SessionId, SessionGoal, GoalStatus } from "@zcode/contracts";
+import {
+  DEFAULT_TARGET_TURN_BUDGET,
+  TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
+  type SessionId,
+  type SessionGoal,
+  type GoalStatus,
+  type SessionTargetEvent,
+  type SessionTargetEventKind,
+} from "@zcode/contracts";
 
 interface TargetRow {
   session_id: string;
@@ -15,11 +23,82 @@ interface TargetRow {
   token_budget: number | null;
   tokens_used: number;
   time_used_seconds: number;
+  turn_budget: number | null;
+  turns_used: number;
+  wall_clock_budget_seconds: number | null;
   active_input_id: string | null;
   active_run_started_at: number | null;
   active_run_last_seen_at: number | null;
   time_created: number;
   time_updated: number;
+}
+
+interface TargetEventRow {
+  id: number;
+  session_id: string;
+  target_id: string;
+  kind: string;
+  blocker_code: string | null;
+  reason: string | null;
+  snapshot_json: string | null;
+  time_created: number;
+}
+
+/**
+ * 状态机事件种类推导(long-horizon-goal-redesign-plan §3.2/§4.1):
+ * 持久状态 blocked 复用 budget_limited 列,事件层用稳定 blocker code 区分。
+ */
+function targetEventKindForStatus(
+  status: GoalStatus,
+): SessionTargetEventKind | null {
+  switch (status) {
+    case "active":
+      return "resumed";
+    case "paused":
+      return "paused";
+    case "budget_limited":
+      return "blocked";
+    case "complete":
+      return "completed";
+  }
+}
+
+function blockerCodeForStatus(
+  status: GoalStatus,
+  reason: string | undefined,
+): string | null {
+  if (status !== "budget_limited") return null;
+  // 现阶段 budget_limited 只由预算耗尽触发;reason 透传调用方语义。
+  return reason ?? TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE;
+}
+
+function appendSessionTargetEvent(
+  db: DatabaseSync,
+  input: {
+    blockerCode?: string | null;
+    kind: SessionTargetEventKind;
+    reason?: string | null;
+    sessionID: SessionId;
+    /** cleared tombstone 时为 null。 */
+    snapshot: SessionGoal | null;
+    targetID: string;
+  },
+): void {
+  db.prepare(
+    `
+    insert into session_target_event (
+      session_id, target_id, kind, blocker_code, reason, snapshot_json, time_created
+    ) values (?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    input.sessionID,
+    input.targetID,
+    input.kind,
+    input.blockerCode ?? null,
+    input.reason ?? null,
+    input.snapshot ? JSON.stringify(input.snapshot) : null,
+    Date.now(),
+  );
 }
 
 export function readSessionTarget(
@@ -32,6 +111,41 @@ export function readSessionTarget(
   return row ? decodeTargetRow(row) : null;
 }
 
+export function readSessionTargetEvents(
+  db: DatabaseSync,
+  input: { sessionID: SessionId },
+): SessionTargetEvent[] {
+  const rows = db
+    .prepare(
+      "select * from session_target_event where session_id = ? order by id asc",
+    )
+    .all(input.sessionID) as unknown as TargetEventRow[];
+  return rows.map(decodeTargetEventRow);
+}
+
+function decodeTargetEventRow(row: TargetEventRow): SessionTargetEvent {
+  let snapshot: SessionGoal | null = null;
+  if (row.snapshot_json) {
+    try {
+      const parsed = JSON.parse(row.snapshot_json) as SessionGoal;
+      snapshot = parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      // 事件行由本模块写入;解析失败按缺失快照处理,不拖垮事件枚举。
+      snapshot = null;
+    }
+  }
+  return {
+    id: row.id,
+    sessionID: row.session_id as SessionId,
+    targetID: row.target_id,
+    kind: row.kind as SessionTargetEventKind,
+    blockerCode: row.blocker_code,
+    reason: row.reason,
+    snapshot,
+    time: row.time_created,
+  };
+}
+
 export function setSessionTarget(
   db: DatabaseSync,
   input: {
@@ -39,15 +153,21 @@ export function setSessionTarget(
     sessionID: SessionId;
     status: GoalStatus;
     tokenBudget?: number | null;
+    turnBudget?: number | null;
+    wallClockBudgetSeconds?: number | null;
   },
 ): SessionGoal {
   const now = Date.now();
   const targetID = createStorageTargetId();
+  // 回合预算缺省 256;显式 null 才表示不限(设计 §4.1 裁定 4)。
+  const turnBudget =
+    input.turnBudget === undefined ? DEFAULT_TARGET_TURN_BUDGET : input.turnBudget;
+  const previous = readSessionTarget(db, { sessionID: input.sessionID });
   db.prepare(
     `
     insert into session_target (
-      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated
-    ) values (?, ?, ?, null, ?, ?, 0, 0, ?, ?)
+      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
+    ) values (?, ?, ?, null, ?, ?, 0, 0, ?, 0, ?, ?, ?)
     on conflict(session_id) do update set
       target_id = excluded.target_id,
       objective = excluded.objective,
@@ -56,6 +176,9 @@ export function setSessionTarget(
       token_budget = excluded.token_budget,
       tokens_used = excluded.tokens_used,
       time_used_seconds = excluded.time_used_seconds,
+      turn_budget = excluded.turn_budget,
+      turns_used = excluded.turns_used,
+      wall_clock_budget_seconds = excluded.wall_clock_budget_seconds,
       active_input_id = null,
       active_run_started_at = null,
       active_run_last_seen_at = null,
@@ -68,11 +191,21 @@ export function setSessionTarget(
     input.objective,
     input.status,
     input.tokenBudget ?? null,
+    turnBudget,
+    input.wallClockBudgetSeconds ?? null,
     now,
     now,
   );
   touchSessionForTarget(db, input.sessionID, now);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  appendSessionTargetEvent(db, {
+    kind: previous ? "edited" : "created",
+    reason: previous ? "replaced" : null,
+    sessionID: input.sessionID,
+    snapshot: target,
+    targetID: target.targetID,
+  });
+  return target;
 }
 
 export function cloneSessionTargetForFork(
@@ -88,6 +221,7 @@ export function cloneSessionTargetForFork(
   // fork 是 session state branch，不是新建 goal。必须保留 target_id 和
   // 原始 created time，让已复制的 goal-continuation / verifier metadata 能继续对齐。
   // active run 字段属于父 session 当前运行态，child 不能继承，否则会显示幽灵运行中。
+  const hadExistingRow = readSessionTarget(db, { sessionID: input.sessionID }) !== null;
   db.prepare(
     `
     insert into session_target (
@@ -99,12 +233,15 @@ export function cloneSessionTargetForFork(
       token_budget,
       tokens_used,
       time_used_seconds,
+      turn_budget,
+      turns_used,
+      wall_clock_budget_seconds,
       active_input_id,
       active_run_started_at,
       active_run_last_seen_at,
       time_created,
       time_updated
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
     on conflict(session_id) do update set
       target_id = excluded.target_id,
       objective = excluded.objective,
@@ -113,6 +250,9 @@ export function cloneSessionTargetForFork(
       token_budget = excluded.token_budget,
       tokens_used = excluded.tokens_used,
       time_used_seconds = excluded.time_used_seconds,
+      turn_budget = excluded.turn_budget,
+      turns_used = excluded.turns_used,
+      wall_clock_budget_seconds = excluded.wall_clock_budget_seconds,
       active_input_id = null,
       active_run_started_at = null,
       active_run_last_seen_at = null,
@@ -128,11 +268,26 @@ export function cloneSessionTargetForFork(
     source.tokenBudget,
     source.tokensUsed,
     source.timeUsedSeconds,
+    source.turnBudget ?? DEFAULT_TARGET_TURN_BUDGET,
+    source.turnsUsed ?? 0,
+    source.wallClockBudgetSeconds ?? null,
     source.time.created,
     source.time.updated,
   );
   touchSessionForTarget(db, input.sessionID, now);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  if (!hadExistingRow) {
+    // 子会话事件流从 created 起步;session-start 边缘的强制 paused 由子会话
+    // resume 链路(activatePausedTargetAfterResume)统一落 paused 事件。
+    appendSessionTargetEvent(db, {
+      kind: "created",
+      reason: "fork",
+      sessionID: input.sessionID,
+      snapshot: target,
+      targetID: target.targetID,
+    });
+  }
+  return target;
 }
 
 export function createSessionTarget(
@@ -144,22 +299,39 @@ export function createSessionTarget(
   db.prepare(
     `
     insert or ignore into session_target (
-      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated
-    ) values (?, ?, ?, null, 'active', ?, 0, 0, ?, ?)
+      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
+    ) values (?, ?, ?, null, 'active', ?, 0, 0, ?, 0, ?, ?, ?)
     `,
-  ).run(input.sessionID, targetID, input.objective, input.tokenBudget ?? null, now, now);
+  ).run(
+    input.sessionID,
+    targetID,
+    input.objective,
+    input.tokenBudget ?? null,
+    DEFAULT_TARGET_TURN_BUDGET,
+    null,
+    now,
+    now,
+  );
 
   const target = readSessionTarget(db, { sessionID: input.sessionID });
   if (target?.targetID !== targetID) return null;
   touchSessionForTarget(db, input.sessionID, now);
+  appendSessionTargetEvent(db, {
+    kind: "created",
+    sessionID: input.sessionID,
+    snapshot: target,
+    targetID: target.targetID,
+  });
   return target;
 }
 
 export function updateSessionTargetStatus(
   db: DatabaseSync,
-  input: { sessionID: SessionId; status: GoalStatus },
+  input: { sessionID: SessionId; status: GoalStatus; reason?: string },
 ): SessionGoal | null {
   const now = Date.now();
+  const previous = readSessionTarget(db, { sessionID: input.sessionID });
+  if (!previous) return null;
   const result = db
     .prepare(
       `
@@ -171,7 +343,22 @@ export function updateSessionTargetStatus(
     .run(input.status, now, input.sessionID);
   if (result.changes === 0) return null;
   touchSessionForTarget(db, input.sessionID, now);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  // 状态机事件只在真实迁移时追加;幂等重写(同状态)不产生事件。
+  if (target.status !== previous.status) {
+    const kind = targetEventKindForStatus(target.status);
+    if (kind) {
+      appendSessionTargetEvent(db, {
+        blockerCode: blockerCodeForStatus(target.status, input.reason),
+        kind,
+        reason: input.reason ?? null,
+        sessionID: input.sessionID,
+        snapshot: target,
+        targetID: target.targetID,
+      });
+    }
+  }
+  return target;
 }
 
 export function startSessionTargetRun(
@@ -243,7 +430,9 @@ export function finishSessionTargetRun(
     inputID: string;
     endedAtMs: number;
     status?: GoalStatus;
+    reason?: string;
     tokensUsedDelta?: number;
+    turnsUsedDelta?: number;
   },
 ): SessionGoal | null {
   const current = readSessionTarget(db, { sessionID: input.sessionID });
@@ -258,6 +447,7 @@ export function finishSessionTargetRun(
 
   const endedAt = Math.max(0, input.endedAtMs);
   const tokenDelta = Math.max(0, input.tokensUsedDelta ?? 0);
+  const turnDelta = Math.max(0, input.turnsUsedDelta ?? 0);
   const timeDelta = elapsedSecondsBetween(current.activeRunStartedAtMs, endedAt);
   const result = db
     .prepare(
@@ -265,10 +455,15 @@ export function finishSessionTargetRun(
       update session_target
       set
         tokens_used = tokens_used + ?,
+        turns_used = turns_used + ?,
         time_used_seconds = time_used_seconds + ?,
         status = case
           when ? is not null then ?
-          when status = 'active' and token_budget is not null and tokens_used + ? >= token_budget then 'budget_limited'
+          when status = 'active' and (
+            (token_budget is not null and tokens_used + ? >= token_budget)
+            or (turn_budget is not null and turns_used + ? >= turn_budget)
+            or (wall_clock_budget_seconds is not null and time_used_seconds + ? >= wall_clock_budget_seconds)
+          ) then 'budget_limited'
           else status
         end,
         active_input_id = null,
@@ -283,10 +478,13 @@ export function finishSessionTargetRun(
     )
     .run(
       tokenDelta,
+      turnDelta,
       timeDelta,
       input.status ?? null,
       input.status ?? null,
       tokenDelta,
+      turnDelta,
+      timeDelta,
       endedAt,
       input.sessionID,
       input.targetID,
@@ -295,7 +493,26 @@ export function finishSessionTargetRun(
     );
   if (result.changes === 0) return readSessionTarget(db, { sessionID: input.sessionID });
   touchSessionForTarget(db, input.sessionID, endedAt);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  // run 计量本身不产状态事件,但两类迁移必须落:①显式 status(取消收口把
+  // active 翻 paused,reason turn-cancelled;此时 pauseActiveTargetForCancellation
+  // 会因 status 已非 active 早退,事件只能在此落);②三维预算翻 budget_limited。
+  if (input.status != null && target.status !== current.status) {
+    const kind = targetEventKindForStatus(target.status);
+    if (kind) {
+      appendSessionTargetEvent(db, {
+        blockerCode: blockerCodeForStatus(target.status, input.reason),
+        kind,
+        reason: input.reason ?? null,
+        sessionID: input.sessionID,
+        snapshot: target,
+        targetID: target.targetID,
+      });
+    }
+  } else {
+    appendBlockedEventOnBudgetFlip(db, { current, sessionID: input.sessionID, target });
+  }
+  return target;
 }
 
 export function recoverInterruptedSessionTargetRun(
@@ -340,7 +557,17 @@ export function recoverInterruptedSessionTargetRun(
     );
   if (result.changes === 0) return readSessionTarget(db, { sessionID: input.sessionID });
   touchSessionForTarget(db, input.sessionID, endedAt);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  if (target.status === "paused" && current.status === "active") {
+    appendSessionTargetEvent(db, {
+      kind: "paused",
+      reason: "interrupted-run-recovery",
+      sessionID: input.sessionID,
+      snapshot: target,
+      targetID: target.targetID,
+    });
+  }
+  return target;
 }
 
 export function accountSessionTargetUsage(
@@ -350,13 +577,19 @@ export function accountSessionTargetUsage(
     targetID: string;
     tokensUsedDelta?: number;
     timeUsedSecondsDelta?: number;
+    turnsUsedDelta?: number;
   },
 ): SessionGoal | null {
   const now = Date.now();
+  const current = readSessionTarget(db, { sessionID: input.sessionID });
+  if (!current || current.targetID !== input.targetID) {
+    return readSessionTarget(db, { sessionID: input.sessionID });
+  }
   const tokenDelta = Math.max(0, input.tokensUsedDelta ?? 0);
   const timeDelta = Math.max(0, input.timeUsedSecondsDelta ?? 0);
-  if (tokenDelta === 0 && timeDelta === 0) {
-    return readSessionTarget(db, { sessionID: input.sessionID });
+  const turnDelta = Math.max(0, input.turnsUsedDelta ?? 0);
+  if (tokenDelta === 0 && timeDelta === 0 && turnDelta === 0) {
+    return current;
   }
 
   const result = db
@@ -365,19 +598,57 @@ export function accountSessionTargetUsage(
       update session_target
       set
         tokens_used = tokens_used + ?,
+        turns_used = turns_used + ?,
         time_used_seconds = time_used_seconds + ?,
         status = case
-          when status = 'active' and token_budget is not null and tokens_used + ? >= token_budget then 'budget_limited'
+          when status = 'active' and (
+            (token_budget is not null and tokens_used + ? >= token_budget)
+            or (turn_budget is not null and turns_used + ? >= turn_budget)
+            or (wall_clock_budget_seconds is not null and time_used_seconds + ? >= wall_clock_budget_seconds)
+          ) then 'budget_limited'
           else status
         end,
         time_updated = ?
       where session_id = ? and target_id = ?
       `,
     )
-    .run(tokenDelta, timeDelta, tokenDelta, now, input.sessionID, input.targetID);
+    .run(
+      tokenDelta,
+      turnDelta,
+      timeDelta,
+      tokenDelta,
+      turnDelta,
+      timeDelta,
+      now,
+      input.sessionID,
+      input.targetID,
+    );
   if (result.changes === 0) return readSessionTarget(db, { sessionID: input.sessionID });
   touchSessionForTarget(db, input.sessionID, now);
-  return mustReadTarget(db, input.sessionID);
+  const target = mustReadTarget(db, input.sessionID);
+  appendBlockedEventOnBudgetFlip(db, { current, sessionID: input.sessionID, target });
+  return target;
+}
+
+/** 预算三维任一到达 100% 时的 active→budget_limited 迁移,追加 blocked 事件(稳定 code)。 */
+function appendBlockedEventOnBudgetFlip(
+  db: DatabaseSync,
+  input: { current: SessionGoal; sessionID: SessionId; target: SessionGoal },
+): void {
+  if (
+    input.current.status === "active" &&
+    input.target.status === "budget_limited" &&
+    input.target.targetID === input.current.targetID
+  ) {
+    appendSessionTargetEvent(db, {
+      blockerCode: TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
+      kind: "blocked",
+      reason: TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
+      sessionID: input.sessionID,
+      snapshot: input.target,
+      targetID: input.target.targetID,
+    });
+  }
 }
 
 export function updateSessionTargetSummaryTitle(
@@ -407,8 +678,18 @@ export function updateSessionTargetSummaryTitle(
 
 export function clearSessionTarget(db: DatabaseSync, input: { sessionID: SessionId }): boolean {
   const now = Date.now();
+  const current = readSessionTarget(db, { sessionID: input.sessionID });
   const result = db.prepare("delete from session_target where session_id = ?").run(input.sessionID);
   if (result.changes === 0) return false;
+  if (current) {
+    // cleared tombstone:目标行已删,快照为 null,target_id 记录被清的是哪个目标。
+    appendSessionTargetEvent(db, {
+      kind: "cleared",
+      sessionID: input.sessionID,
+      snapshot: null,
+      targetID: current.targetID,
+    });
+  }
   touchSessionForTarget(db, input.sessionID, now);
   return true;
 }
@@ -438,6 +719,9 @@ function decodeTargetRow(row: TargetRow): SessionGoal {
     tokenBudget: row.token_budget,
     tokensUsed: row.tokens_used,
     timeUsedSeconds: row.time_used_seconds,
+    turnBudget: row.turn_budget,
+    turnsUsed: row.turns_used,
+    wallClockBudgetSeconds: row.wall_clock_budget_seconds,
     activeInputId: row.active_input_id,
     activeRunStartedAtMs: row.active_run_started_at,
     activeRunLastSeenAtMs: row.active_run_last_seen_at,

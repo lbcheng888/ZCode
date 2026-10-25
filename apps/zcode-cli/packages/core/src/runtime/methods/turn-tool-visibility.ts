@@ -10,6 +10,9 @@ import {
 export function getTurnTools(runtime: AgentRuntimeInternal, state: RegularTurnLoopState) {
   const disallowed = buildTurnDisallowedTools(state);
   if (state.automationCreateLimitReached) return [];
+  // 预算宽限:任一维 100% 后本回合剩余请求不再暴露任何工具,
+  // 逼模型以纯文本写终局总结(设计 §3.2;与 automationCreateLimitReached 同构)。
+  if (state.targetBudget?.exhausted) return [];
   const tools = runtime.getTools(state.model);
   return disallowed ? tools.filter((tool) => !disallowed.has(tool.name)) : tools;
 }

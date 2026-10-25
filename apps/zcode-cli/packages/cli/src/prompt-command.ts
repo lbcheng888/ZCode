@@ -167,7 +167,11 @@ export const runPrompt = async (
   const unregisterShutdownHandlers = registerCliShutdownHandlers({
     abort: (signal) => abortController.abort(new Error(`CLI received ${signal}`)),
     cleanup: closeApp,
-    cleanupTimeoutMs: deps.shutdownCleanupTimeoutMs,
+    // 缺陷根因（关停竞态）：这里原样透传 deps.shutdownCleanupTimeoutMs（缺省 undefined），
+    // shutdown.ts 因此落到自己的 2s 缺省，而 closeApp 内部按上面算出的 6s 缺省分阶执行；
+    // SIGINT 下 process.exit(130) 会在 2s 处掐断 app.close 的记账排空，竞态因此复活。
+    // 修复：信号路径与 finally 路径共用同一份预算。
+    cleanupTimeoutMs,
     exitProcess: deps.exitProcess,
     process: deps.shutdownProcess,
   });

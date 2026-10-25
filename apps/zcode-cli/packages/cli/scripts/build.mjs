@@ -1,5 +1,5 @@
-import { chmod, readFile, rm } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import { chmod, readdir, readFile, rm, stat } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import sharedPackage from "../../../../../packages/shared/package.json" with { type: "json" };
@@ -151,6 +151,132 @@ export const resolveBuildAliases = ({
   "@zcode/core": resolve(cliDirectory, "../core/dist/index.js"),
 });
 
+export const WORKSPACE_FRESHNESS_SKIP_ENV = "ZCODE_SKIP_WORKSPACE_FRESHNESS_CHECK";
+
+const FRESHNESS_SKIP_DIRECTORIES = new Set(["node_modules", ".turbo"]);
+
+async function isDirectory(path) {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function newestFileMs(directory) {
+  let newest = 0;
+  const queue = [directory];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!FRESHNESS_SKIP_DIRECTORIES.has(entry.name)) queue.push(join(current, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const stats = await stat(join(current, entry.name));
+      if (stats.mtimeMs > newest) newest = stats.mtimeMs;
+    }
+  }
+  return newest;
+}
+
+/**
+ * 解析 CLI 的 @zcode/* workspace 依赖的包根目录。兄弟包可能在 zcode-cli 的 packages/ 下，
+ * 也可能在仓库根的 packages/ 下（@zcode/shared、@zcode/provider-node），按 package.json 的
+ * name 逐一确认，避免把同名目录误当包根。
+ */
+export const resolveWorkspaceDependencyRoots = async ({
+  cliDirectory = cliRoot,
+  rootDirectory = projectRoot,
+} = {}) => {
+  const manifest = JSON.parse(await readFile(resolve(cliDirectory, packageJsonFile), "utf8"));
+  const external = new Set(resolveBuildExternal());
+  const shortName = (name) => name.slice("@zcode/".length);
+  const roots = [];
+  for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
+    if (!name.startsWith("@zcode/") || external.has(name)) continue;
+    if (typeof version !== "string" || !version.startsWith("workspace:")) continue;
+    for (const candidate of [
+      resolve(rootDirectory, "packages", shortName(name)),
+      resolve(rootDirectory, "..", "..", "packages", shortName(name)),
+    ]) {
+      try {
+        const manifestPath = resolve(candidate, packageJsonFile);
+        const candidateManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        if (candidateManifest.name === name) {
+          roots.push({ name, root: candidate });
+          break;
+        }
+      } catch {
+        // 候选目录不是包根（无 package.json 或不可读），试下一个候选位置。
+      }
+    }
+  }
+  return roots;
+};
+
+/**
+ * 找出「src 比 dist 新」或「有 src 无 dist」的 workspace 依赖。
+ * 根因防回归（goal-arm-bridge 缺陷）：本脚本经兄弟包 package.json exports 消费它们的
+ * 预构建 dist，不编译任何 src——只进 packages/cli 跑 build 会把过期的兄弟包制品原样
+ * 打进 bundle（例：core 的 goal_arm 桥改了 src，dist 还是旧版，验收二进制里就没有桥）。
+ * 守卫宁可误报（编辑后 revert、分支切换都会刷新 src mtime）也不漏报：多一次重建很便宜，
+ * 静默打进旧制品会让验收拿到一份“看似新”的旧二进制。
+ */
+export const findStaleWorkspaceBuilds = async ({
+  cliDirectory = cliRoot,
+  rootDirectory = projectRoot,
+} = {}) => {
+  const stale = [];
+  for (const { name, root } of await resolveWorkspaceDependencyRoots({ cliDirectory, rootDirectory })) {
+    const srcRoot = resolve(root, "src");
+    if (!(await isDirectory(srcRoot))) continue;
+    const distRoot = resolve(root, "dist");
+    const newestSourceMs = await newestFileMs(srcRoot);
+    if (!(await isDirectory(distRoot))) {
+      stale.push({ name, root, reason: "missing-dist", newestSourceMs, newestOutputMs: undefined });
+      continue;
+    }
+    const newestOutputMs = await newestFileMs(distRoot);
+    if (newestSourceMs > newestOutputMs) {
+      stale.push({ name, root, reason: "source-newer", newestSourceMs, newestOutputMs });
+    }
+  }
+  return stale;
+};
+
+const staleWorkspaceBuildError = (stale) => {
+  const lines = stale.map((entry) => {
+    if (entry.reason === "missing-dist") {
+      return `  - ${entry.name} (${relative(process.cwd(), entry.root)}): no dist/ output for its src/`;
+    }
+    return [
+      `  - ${entry.name} (${relative(process.cwd(), entry.root)}):`,
+      `newest src file ${new Date(entry.newestSourceMs).toISOString()} is newer than`,
+      `newest dist file ${new Date(entry.newestOutputMs).toISOString()}`,
+    ].join(" ");
+  });
+  return [
+    "Refusing to bundle stale workspace outputs into the CLI:",
+    ...lines,
+    "This script consumes @zcode/* workspace siblings through their package.json exports (their dist); building inside packages/cli never recompiles them.",
+    "Rebuild from the zcode-cli root instead: `pnpm --dir apps/zcode-cli build` (turbo rebuilds dependencies first).",
+    `Set ${WORKSPACE_FRESHNESS_SKIP_ENV}=1 to bypass this check (never for release or acceptance builds).`,
+  ].join("\n");
+};
+
+export const assertWorkspaceBuildsFresh = async ({
+  cliDirectory = cliRoot,
+  rootDirectory = projectRoot,
+  env = process.env,
+} = {}) => {
+  if (env[WORKSPACE_FRESHNESS_SKIP_ENV] === "1") return [];
+  const stale = await findStaleWorkspaceBuilds({ cliDirectory, rootDirectory });
+  if (stale.length > 0) throw new Error(staleWorkspaceBuildError(stale));
+  return stale;
+};
+
 export const buildCli = async ({
   cliDirectory = cliRoot,
   rootDirectory = projectRoot,
@@ -161,6 +287,9 @@ export const buildCli = async ({
     root: rootDirectory,
   }),
 } = {}) => {
+  // 源码/制品错位是 goal-arm-bridge 缺陷的根因：验收二进制打进的是兄弟包的旧 dist。
+  // 打包前先确认所有会被内联的 @zcode/* workspace 依赖的 dist 不落后于其 src。
+  await assertWorkspaceBuildsFresh({ cliDirectory, rootDirectory, env });
   const cliVersion = await version;
   const outfile = resolve(cliDirectory, "dist/zcode.cjs");
   const sourcemapFile = `${outfile}.map`;

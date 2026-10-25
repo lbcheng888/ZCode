@@ -217,7 +217,26 @@ CREATE TABLE "session_target" (
         time_used_seconds integer not null default 0,
         time_created integer not null,
         time_updated integer not null
-      , summary_title text, active_input_id text, active_run_started_at integer, active_run_last_seen_at integer);
+      , summary_title text, active_input_id text, active_run_started_at integer, active_run_last_seen_at integer, turn_budget integer, turns_used integer not null default 0, wall_clock_budget_seconds integer);
+
+CREATE TABLE session_target_event (
+          id integer primary key autoincrement,
+          session_id text not null references session(id) on delete cascade,
+          target_id text not null,
+          kind text not null check(kind in (
+            'created',
+            'edited',
+            'paused',
+            'resumed',
+            'blocked',
+            'completed',
+            'cleared'
+          )),
+          blocker_code text,
+          reason text,
+          snapshot_json text,
+          time_created integer not null
+        );
 
 CREATE TABLE session_task_link (
         id text primary key,
@@ -470,6 +489,9 @@ CREATE INDEX session_input_session_status_idx
 CREATE INDEX session_parent_idx on session(parent_id);
 
 CREATE INDEX session_project_idx on session(project_id);
+
+CREATE INDEX session_target_event_session_idx
+          on session_target_event(session_id, id);
 
 CREATE INDEX session_task_link_activity_idx
         on session_task_link(activity_id);

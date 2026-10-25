@@ -1156,6 +1156,10 @@ export interface TargetChangedPayload {
   source: TargetChangedSource;
   target: SessionGoal | null;
   previousTarget?: SessionGoal | null;
+  /** 状态机事件缘由(session-start-disarm / budget-exhausted 等),供 UI/审计展示。 */
+  reason?: string;
+  /** blocked 迁移的稳定 blocker code(当前唯一值 budget-exhausted)。 */
+  blockerCode?: string;
 }
 
 // -----------------------------------------------
