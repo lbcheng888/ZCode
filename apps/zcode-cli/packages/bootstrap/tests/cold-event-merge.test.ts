@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  SESSION_ENTRY_TODO_STATE,
   SessionEventType,
   type EventId,
   type MessageWithParts,
   type SessionEvent,
   type SessionId,
+  type TodoItem,
   type TraceId,
   type TurnId,
 } from "@zcode/contracts";
@@ -71,6 +73,54 @@ function assistantMessage(
       },
     ],
   };
+}
+
+function todoWriteAssistantMessage(
+  id: string,
+  parentId: string,
+  todos: TodoItem[],
+  created: number,
+  turnId: string,
+): MessageWithParts {
+  const message = assistantMessage(id, parentId, "", created, turnId);
+  message.parts = [
+    {
+      id: `${id}-todo` as never,
+      sessionID: "s1" as never,
+      messageID: id as never,
+      type: "tool",
+      callID: "call-todo-write",
+      tool: "TodoWrite",
+      state: {
+        status: "completed",
+        input: { todos },
+        output: JSON.stringify({
+          oldTodos: [],
+          todos,
+          summary: {
+            completed: todos.filter((todo) => todo.status === "completed").length,
+            inProgress: todos.filter((todo) => todo.status === "in_progress").length,
+            pending: todos.filter((todo) => todo.status === "pending").length,
+            total: todos.length,
+          },
+        }),
+        title: "TodoWrite",
+        metadata: {},
+        time: { start: created, end: created },
+      },
+    },
+  ];
+  return message;
+}
+
+function todoStateEntry(todosCount: number) {
+  return {
+    id: "todo_state:s1",
+    sessionID: "s1" as never,
+    type: SESSION_ENTRY_TODO_STATE,
+    time: { created: 1, updated: 1 },
+    data: { todosCount, updatedAt: 1 },
+  } as never;
 }
 
 function event(
@@ -573,6 +623,232 @@ describe("cold conversation three-source merge", () => {
     });
     expect(reduce(merged.events).getSnapshot().goal).toBeNull();
     expect(merged.usedDurableTranscript).toBe(true);
+  });
+
+  it("persisted todo rows synthesize a restore event that wins over stale memory", async () => {
+    // 崩溃窗口：TodoWrite 已 updateTodos，tool part 尚未结算。冷恢复必须以 todo 表为准，
+    // 且 restore 事件里的旧 plan 不能覆盖 DB 真值。
+    const persistedTodos: TodoItem[] = [
+      { content: "恢复 Todo 面板", status: "completed", priority: "high" },
+      { content: "补冷恢复", status: "in_progress", priority: "medium" },
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => [],
+        readTarget: async () => null,
+        readTodos: async () => persistedTodos,
+      },
+    });
+    expect(loaded.todos).toEqual(persistedTodos);
+
+    const merged = mergeColdConversationEvents({
+      memoryEvents: [
+        event(1, SessionEventType.TodosUpdated, {
+          todos: [{ content: "旧计划", status: "pending", priority: "low" }],
+        }),
+      ],
+      messages: [],
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+      ...(Object.prototype.hasOwnProperty.call(loaded, "todos") ? { todos: loaded.todos } : {}),
+    });
+
+    const todosEvents = merged.events.filter((item) => item.type === SessionEventType.TodosUpdated);
+    expect(todosEvents).toHaveLength(1);
+    expect(todosEvents[0]?.payload).toMatchObject({
+      todos: persistedTodos,
+    });
+    expect(reduce(merged.events).getSnapshot().plan?.items).toEqual([
+      { id: "恢复 Todo 面板", content: "恢复 Todo 面板", status: "completed" },
+      { id: "补冷恢复", content: "补冷恢复", status: "inProgress" },
+    ]);
+    expect(
+      merged.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "cold_merge.durable_event_suppressed" &&
+          diagnostic.eventTypes[SessionEventType.TodosUpdated] === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("fork/edit-retry 子会话的空 todo 表不清掉 transcript 继承的 plan", async () => {
+    // 回归根因：fork bundle 只复制 message/part 与 goal，不复制 todo 表；子会话冷恢复
+    // 若把空表当 authority，就会合成清除事件，抹掉 transcript 里继承的计划（历史行为可见）。
+    const inheritedTodos: TodoItem[] = [
+      { content: "继承的计划", status: "in_progress", priority: "high" },
+    ];
+    const messages = [
+      userMessage("u-fork", "continue", 1_000, "turn-fork"),
+      todoWriteAssistantMessage("a-fork", "u-fork", inheritedTodos, 1_100, "turn-fork"),
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => messages,
+        readTarget: async () => null,
+        readTodos: async () => [],
+      },
+    });
+
+    expect(Object.prototype.hasOwnProperty.call(loaded, "todos")).toBe(false);
+    const merged = mergeColdConversationEvents({
+      memoryEvents: loaded.memoryEvents,
+      messages: loaded.messages,
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+    });
+
+    expect(merged.events.some((item) => item.type === SessionEventType.TodosUpdated)).toBe(false);
+    expect(reduce(merged.events).getSnapshot().plan?.items).toEqual([
+      { id: "继承的计划", content: "继承的计划", status: "inProgress" },
+    ]);
+  });
+
+  it("子会话 transcript 末条 TodoWrite 清空时合成清空（父会话清空后 fork）", async () => {
+    const staleTodos: TodoItem[] = [
+      { content: "父会话旧计划", status: "in_progress", priority: "high" },
+    ];
+    const messages = [
+      userMessage("u-child-clear", "clear plan", 1_000, "turn-child-clear"),
+      todoWriteAssistantMessage(
+        "a-child-write",
+        "u-child-clear",
+        staleTodos,
+        1_100,
+        "turn-child-clear",
+      ),
+      todoWriteAssistantMessage("a-child-clear", "u-child-clear", [], 1_200, "turn-child-clear"),
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => messages,
+        readTarget: async () => null,
+        readTodos: async () => [],
+      },
+    });
+
+    // 子会话没有 marker/表行，但 transcript 最后一条写入是空清单：必须显式清空。
+    expect(loaded.todos).toEqual([]);
+    const merged = mergeColdConversationEvents({
+      memoryEvents: loaded.memoryEvents,
+      messages: loaded.messages,
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+      ...(Object.prototype.hasOwnProperty.call(loaded, "todos") ? { todos: loaded.todos } : {}),
+    });
+
+    expect(reduce(merged.events).getSnapshot().plan).toBeNull();
+  });
+
+  it("子会话空表 + 持久 marker 时以 DB 清空为准（清空后 tool part 未结算的崩溃窗口）", async () => {
+    const staleTodos: TodoItem[] = [
+      { content: "崩溃前旧计划", status: "in_progress", priority: "high" },
+    ];
+    const messages = [
+      userMessage("u-child-crash", "clear plan", 1_000, "turn-child-crash"),
+      todoWriteAssistantMessage(
+        "a-child-crash",
+        "u-child-crash",
+        staleTodos,
+        1_100,
+        "turn-child-crash",
+      ),
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => messages,
+        readTarget: async () => null,
+        readTodos: async () => [],
+        sessionEntries: async () => [todoStateEntry(0)],
+      },
+    });
+
+    expect(loaded.todos).toEqual([]);
+    const merged = mergeColdConversationEvents({
+      memoryEvents: loaded.memoryEvents,
+      messages: loaded.messages,
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+      ...(Object.prototype.hasOwnProperty.call(loaded, "todos") ? { todos: loaded.todos } : {}),
+    });
+
+    expect(reduce(merged.events).getSnapshot().plan).toBeNull();
+  });
+
+  it("非空 todo 表覆盖 transcript 里的旧非空清单", async () => {
+    const transcriptTodos: TodoItem[] = [
+      { content: "transcript 旧计划", status: "in_progress", priority: "high" },
+    ];
+    const dbTodos: TodoItem[] = [{ content: "DB 新计划", status: "completed", priority: "medium" }];
+    const messages = [
+      userMessage("u-db-wins", "continue", 1_000, "turn-db-wins"),
+      todoWriteAssistantMessage("a-db-wins", "u-db-wins", transcriptTodos, 1_100, "turn-db-wins"),
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => messages,
+        readTarget: async () => null,
+        readTodos: async () => dbTodos,
+      },
+    });
+
+    expect(loaded.todos).toEqual(dbTodos);
+    const merged = mergeColdConversationEvents({
+      memoryEvents: loaded.memoryEvents,
+      messages: loaded.messages,
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+      ...(Object.prototype.hasOwnProperty.call(loaded, "todos") ? { todos: loaded.todos } : {}),
+    });
+
+    expect(reduce(merged.events).getSnapshot().plan?.items).toEqual([
+      { id: "DB 新计划", content: "DB 新计划", status: "completed" },
+    ]);
+  });
+
+  it("顶层会话的空表 + todo marker 压过 transcript 里的旧 TodoWrite plan", async () => {
+    // 顶层会话的空表只有在存在写库 marker 时才是明确清空；marker 必须覆盖 transcript 旧清单。
+    const staleTodos: TodoItem[] = [{ content: "旧计划", status: "in_progress", priority: "high" }];
+    const messages = [
+      userMessage("u-clear", "clear plan", 1_000, "turn-clear"),
+      todoWriteAssistantMessage("a-clear", "u-clear", staleTodos, 1_100, "turn-clear"),
+    ];
+    const loaded = await loadPersistedConversationMaterialization({
+      memoryEvents: [],
+      sessionId: "s1",
+      store: {
+        getSession: async () => null,
+        messages: async () => messages,
+        readTarget: async () => null,
+        readTodos: async () => [],
+        sessionEntries: async () => [todoStateEntry(0)],
+      },
+    });
+
+    expect(loaded.todos).toEqual([]);
+    const merged = mergeColdConversationEvents({
+      memoryEvents: loaded.memoryEvents,
+      messages: loaded.messages,
+      sessionId: "s1",
+      ...(Object.prototype.hasOwnProperty.call(loaded, "target") ? { target: loaded.target } : {}),
+      ...(Object.prototype.hasOwnProperty.call(loaded, "todos") ? { todos: loaded.todos } : {}),
+    });
+
+    expect(reduce(merged.events).getSnapshot().plan).toBeNull();
   });
 
   it("materializes the persisted cold goal before verifier lifecycle", () => {

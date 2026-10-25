@@ -1,10 +1,12 @@
 import {
+  SESSION_ENTRY_TODO_STATE,
   SessionEventType,
   selectActiveConversationBranch,
   type MessageWithParts,
   type SessionEntryInfo,
   type SessionEvent,
   type SessionGoal,
+  type TodoItem,
   type TurnFileChangeSummary,
   type TurnId,
 } from "@zcode/contracts";
@@ -23,6 +25,8 @@ export interface ConversationMaterializationSource {
   sharedContextImport?: ConversationSnapshot["sharedContextImport"];
   /** 只有成功读取 session_target 后才存在；显式 null 也是持久 authority。 */
   target?: SessionGoal | null;
+  /** 只有成功读取 todo 表且存在写库事实（非空行 / marker / transcript 明确清空）时才存在。 */
+  todos?: TodoItem[];
 }
 
 interface PersistedConversationMaterializationStore {
@@ -40,10 +44,49 @@ interface PersistedConversationMaterializationStore {
   readTarget(input: {
     sessionID: import("@zcode/contracts").SessionId;
   }): Promise<SessionGoal | null>;
+  /** 可选：老 bridge / 测试替身未提供时退回 transcript 投影。 */
+  readTodos?(input: { sessionID: import("@zcode/contracts").SessionId }): Promise<TodoItem[]>;
   sessionEntries?(input: {
     sessionID: import("@zcode/contracts").SessionId;
     type?: string;
   }): Promise<SessionEntryInfo[]>;
+}
+
+// 只认“写”类计划工具：TodoRead 的输出不能表达写库事实。
+const TODO_WRITE_TOOL_NAME_PATTERN =
+  /(?:^|[_\s-])(?:todo[_\s-]*write|update[_\s-]*plan)(?:$|[_\s-])/i;
+
+/** 从持久 tool part 的入参读完整 todos；TodoWrite 的语义就是“本次入参替换整张清单”。 */
+function todoWriteInputTodos(part: MessageWithParts["parts"][number]): TodoItem[] | undefined {
+  // 只认成功完成的写入：失败/进行中的 TodoWrite 没有改表，不能当作清空事实。
+  if (
+    part.type !== "tool" ||
+    part.state.status !== "completed" ||
+    !TODO_WRITE_TOOL_NAME_PATTERN.test(part.tool.trim())
+  ) {
+    return undefined;
+  }
+  const input = part.state.input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const todos = (input as { todos?: unknown }).todos;
+  if (!Array.isArray(todos)) return undefined;
+  return todos as TodoItem[];
+}
+
+/**
+ * fork / edit-retry 子会话不复制 todo 表，transcript 最后一条 TodoWrite 的入参就是 fork
+ * 边界上的计划事实。最后一条写入为空表示“已清空”：冷恢复必须显式合成清空，不能回放
+ * 更早的非空快照（todo 表的 delete+insert 本身无法表达这一点）。
+ */
+function lastTodoWriteCleared(messages: readonly MessageWithParts[]): boolean {
+  let cleared = false;
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const todos = todoWriteInputTodos(part);
+      if (todos !== undefined) cleared = todos.length === 0;
+    }
+  }
+  return cleared;
 }
 
 /**
@@ -69,11 +112,12 @@ export async function loadPersistedConversationMaterialization(input: {
     };
   }
   const sessionID = input.sessionId as import("@zcode/contracts").SessionId;
-  const [session, allMessages, target, entries] = await Promise.all([
+  const [session, allMessages, target, entries, todos] = await Promise.all([
     input.store.getSession(sessionID),
     input.persistedMessages ?? input.store.messages({ sessionID }),
     input.store.readTarget({ sessionID }),
     input.store.sessionEntries ? input.store.sessionEntries({ sessionID }) : Promise.resolve([]),
+    input.store.readTodos ? input.store.readTodos({ sessionID }) : Promise.resolve(undefined),
   ]);
   const messages = selectActiveConversationBranch(allMessages, {
     branchCutAfterMessageId: session?.revert?.branchCutAfterMessageID,
@@ -81,6 +125,17 @@ export async function loadPersistedConversationMaterialization(input: {
     rewindKeptMessageIds: session?.revert?.keptMessageIDs,
     rewindTargetMessageId: session?.revert?.targetMessageID,
   });
+  // todo 表是 delete+insert，空表既可能是“从未写过”（fork/edit-retry 子会话不复制表），
+  // 也可能是“写过并清空”。冷恢复只在有写库事实时才把空表当权威清空：
+  // - 表非空：值权威；
+  // - marker 在场：updateTodos 与表在同一事务写过（含清空、含崩溃窗口）；
+  // - transcript 最后一条 TodoWrite 为空：fork 边界上已清空，但子会话没有 marker/表行。
+  const hasTodoWriteMarker = entries.some((entry) => entry.type === SESSION_ENTRY_TODO_STATE);
+  const transcriptLastWriteCleared = lastTodoWriteCleared(messages);
+  const persistedTodos =
+    todos !== undefined && (todos.length > 0 || hasTodoWriteMarker || transcriptLastWriteCleared)
+      ? todos
+      : undefined;
   const sharedContextMessage = messages.find(
     (message) =>
       message.info.role === "user" &&
@@ -117,6 +172,9 @@ export async function loadPersistedConversationMaterialization(input: {
     messages,
     ...(sharedContextImport ? { sharedContextImport } : {}),
     target,
+    // 读取失败会整体 reject（与 messages/target 同语义）；顶层会话读到 [] 仍是“明确清空”
+    // 的持久 authority，不能因为空数组被当成 absent。
+    ...(persistedTodos !== undefined ? { todos: persistedTodos } : {}),
   };
 }
 
@@ -146,6 +204,7 @@ interface MergeInput {
   messages: readonly MessageWithParts[];
   sessionId: string;
   target?: SessionGoal | null;
+  todos?: TodoItem[];
 }
 
 const LIVE_ONLY_EVENT_TYPES = new Set<string>([
@@ -172,6 +231,9 @@ const MEMORY_ONLY_EVENT_TYPES = new Set<string>([
   // 信号淹掉。
   SessionEventType.DynamicWorkflowRunProgress,
   SessionEventType.TargetChanged,
+  // TodoWrite 写库事件：权威在 todo 表，冷恢复会从表合成同构 TodosUpdated，
+  // 不归类会让每次冷恢复都刷一条 unclassified 诊断。
+  SessionEventType.TodosUpdated,
   SessionEventType.RewindTriggered,
   SessionEventType.TurnExecutionModelFallback,
 ]);
@@ -729,6 +791,7 @@ function resequence(events: readonly SessionEvent[]): SessionEvent[] {
 export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeResult {
   const diagnostics = new Map<ColdEventMergeDiagnostic["code"], ColdEventMergeDiagnostic>();
   const hasPersistedTargetAuthority = Object.prototype.hasOwnProperty.call(input, "target");
+  const hasPersistedTodoAuthority = Object.prototype.hasOwnProperty.call(input, "todos");
   const authorityTurns = memoryAuthorityTurnIds(input.memoryEvents, input.messages);
   const authorityTurnIds = authorityTurns.turnIds;
   for (const event of authorityTurns.ambiguousLegacyStarts) {
@@ -878,6 +941,12 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
       recordDiagnostic(diagnostics, "cold_merge.durable_event_suppressed", event);
       return;
     }
+    if (event.type === SessionEventType.TodosUpdated && hasPersistedTodoAuthority) {
+      // todo 表是行权威：内存事件的清单可能早于最后一次写库（崩溃窗口/异步结算），
+      // 若保留为尾事件会覆盖下面从表合成的同构事件。
+      recordDiagnostic(diagnostics, "cold_merge.durable_event_suppressed", event);
+      return;
+    }
     if (LIVE_ONLY_EVENT_TYPES.has(event.type)) {
       // 插件 UI 资源通知只对当时活着的沙箱实例有意义，冷恢复一律丢弃。
       recordDiagnostic(diagnostics, "cold_merge.non_product_event_suppressed", event);
@@ -903,6 +972,24 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
     recordDiagnostic(diagnostics, "cold_merge.unclassified_event_preserved", event);
   });
 
+  if (hasPersistedTodoAuthority) {
+    // 原因：todoWriteHandler 先 updateTodos 再等 tool part 结算落 transcript，两步之间崩溃
+    // 会让 transcript 回放出的 plan 落后于 todo 表。仿照 session_target 的冷合成范式，
+    // 从持久行补一条展开后的同构事件并放在事件流末尾，让 DB 真值覆盖 transcript 的旧值；
+    // 投影只消费其 plan，不参与 goal iteration 归属。
+    supplements.push({
+      id: "hydrate-todo-state" as SessionEvent["id"],
+      sessionId: input.sessionId as SessionEvent["sessionId"],
+      type: SessionEventType.TodosUpdated,
+      timestamp: new Date(),
+      traceId: "trace-hydration" as SessionEvent["traceId"],
+      sequenceNumber: 0,
+      payload: {
+        todos: input.todos ?? [],
+      },
+    });
+  }
+
   return {
     diagnostics: [...diagnostics.values()],
     events: resequence(
@@ -914,6 +1001,9 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
       }),
     ),
     usedDurableTranscript:
-      durableMessages.length > 0 || durableGoalEntries.length > 0 || hasPersistedTargetAuthority,
+      durableMessages.length > 0 ||
+      durableGoalEntries.length > 0 ||
+      hasPersistedTargetAuthority ||
+      hasPersistedTodoAuthority,
   };
 }

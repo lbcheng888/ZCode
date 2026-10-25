@@ -633,6 +633,8 @@ export const TID_V4_EDIT_WORKSPACE_CONFLICT_CONVERSATION_ONLY =
   "v4-edit-workspace-conflict-conversation-only";
 /** v4 queue 面板容器 */
 export const TID_V4_QUEUE = "v4-queue";
+/** v4 composer 上方 todo 进度条（消费 snapshot.plan） */
+export const TID_V4_TODO_PANEL = "v4-todo-panel";
 /** v4 暂停队列原因/恢复提示条 */
 export const TID_V4_QUEUE_PAUSED_BANNER = "v4-queue-paused-banner";
 /** v4 暂停队列继续自动消费按钮 */

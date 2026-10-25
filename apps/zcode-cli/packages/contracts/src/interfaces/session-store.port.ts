@@ -817,6 +817,12 @@ export const SESSION_ENTRY_WORKSPACE_FILE_REWIND = "runtime/workspace_file_rewin
 /** 动态工作流工具面已在本会话激活（docs/dynamic-workflow/launch.md「On demand: activation」）。 */
 export const SESSION_ENTRY_DYNAMIC_WORKFLOW_ACTIVATION =
   "runtime/dynamic_workflow_activation" as const;
+/**
+ * TodoWrite 已成功写过本次会话的 todo 表（含清空）。
+ * delete+insert 无法区分“从未写过”与“写过并清空”；冷恢复用这条 marker 决定空表能否
+ * 当作权威清空（尤其 fork/edit-retry 子会话与崩溃窗口）。值仍以 todo 表为权威。
+ */
+export const SESSION_ENTRY_TODO_STATE = "runtime/todo_state" as const;
 
 export const SESSION_ENTRY_TYPES = [
   SESSION_ENTRY_TARGET_COMPLETION_VERIFICATION,
@@ -827,6 +833,7 @@ export const SESSION_ENTRY_TYPES = [
   SESSION_ENTRY_WORKSPACE_CHECKPOINT,
   SESSION_ENTRY_WORKSPACE_FILE_REWIND,
   SESSION_ENTRY_DYNAMIC_WORKFLOW_ACTIVATION,
+  SESSION_ENTRY_TODO_STATE,
 ] as const;
 
 export type SessionEntryType = (typeof SESSION_ENTRY_TYPES)[number];

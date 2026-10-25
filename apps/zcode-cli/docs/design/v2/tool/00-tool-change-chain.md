@@ -1824,3 +1824,30 @@ MCP isError 和历史 hydration 不触发创建。工具执行、权限、原始
 ### 文档插件多窗口视图修复（2026-10-16）
 
 MCP app-only report_view 增加可选 viewId，release_view 释放指定窗口；模型 get_view 可选 viewId，缺省且存在多个上报窗口时返回歧义与清单。状态唯一归属 DocumentOwner，不由页面决定其他窗口的视图；旧客户端缺省 viewId 仍走 legacy 槽。show_in_viewer 保持专用 surface 路由并明确工具描述。导入仍为 app-only workspace 副作用；串行 admission、10 分钟未活动过期与部分文件清扫归 importer，完成副本不清理。覆盖 schema 到真实 MCP/AppBridge 的多窗口回归。
+
+## Todo 进度事件化（2026-10-25）
+
+TodoWrite 成功写库后新增会话事件 `todos_updated`（`TodosUpdatedPayload`：完整清单、可选写前清单）。
+
+- 发射点：`packages/core/src/tool/handlers/todo.ts` 在 `updateTodos` 成功后经 `ToolExecutionContext.emitEvent`
+  发出；没有 emitEvent 的宿主/单元测试不发射。
+- 行权威：SQLite `todo` 表仍是唯一持久 owner；事件不新增落库路径（`persistDurableSessionEvent`
+  不处理该类型），进程内 event store 只服务 live 投影与 replay。
+- V4 投影：`ProductProjection.onTodosUpdated` 只 patch `snapshot.plan`（空清单置 null），不推进
+  `goal.iterations`；轮次归属仍由 tool scheduled/result 与 verifier boundary 决定。
+- 冷恢复：`loadPersistedConversationMaterialization` 读取 todo 表；`mergeColdConversationEvents`
+  在表是持久 authority 时压掉内存 `todos_updated`，并在事件流末尾合成同构事件。TodoWrite
+  先写表、tool part 后结算的崩溃窗口因此以 DB 为准。
+- 空表语义：`updateTodos` 的 delete+insert 无法区分“从未写过”和“写过并清空”。adapter 在
+  同一事务内写 `runtime/todo_state` session_entry marker（含 `todosCount`）；冷恢复只在
+  “表非空 / marker 在场 / transcript 最后一条 TodoWrite 入参为空”时才把空表当作权威清空。
+  这样 fork / edit-retry 子会话（不复制父 todo 表）保留 transcript 继承的 plan，而子会话
+  自己清空、清空后崩溃、父会话清空后再 fork 都能在冷恢复中保持清空。
+- v3：`shouldExposeSessionEventToProtocol` 显式剥离；legacy `session/read|resume` 继续从 todo 表填充 todos。
+- 桌面 / 手机 Web：`packages/ui/src/TodoPanel.tsx` 从死组件恢复为 composer 上方常驻进度条
+  （`SessionPane` bottom dock，唯一数据源仍是 `snapshot.plan`）。桌面 continuous 与手机
+  replayable 共用同一挂载点；空清单或全部完成时整条隐藏，运行期用 streaming 样式、
+  会话结束/停止后用 idle 样式，不新增第二份 todo 状态或写入路径。
+- 验证：core todo-tool、bootstrap product-projection / cold-event-merge /
+  product-projection-cold-hydration / v4-cold-resume；ui todoPanel /
+  v4SessionPaneLayoutParity（桌面 + compact 挂载位置与进度计数）。

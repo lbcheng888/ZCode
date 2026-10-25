@@ -39,6 +39,7 @@ import type {
   ToolCallScheduledPayload,
   ToolCallStartedPayload,
   ToolResultDisplayPayload,
+  TodosUpdatedPayload,
   TurnCompletePayload,
   TurnErrorPayload,
   TurnInputIntentMetadata,
@@ -96,6 +97,7 @@ import type {
   HookInvocationRow,
   MutableConversationSnapshotAccumulator,
   PendingInteraction,
+  PlanItem,
   QueueItem,
   ReasoningRow,
   RunningSubagentSummary,
@@ -1534,6 +1536,10 @@ export class ProductProjection {
         return this.onTargetChanged(event);
       case SessionEventType.TargetCompletionVerification:
         return this.onTargetVerification(event);
+      // TodoWrite 写库后的权威清单：不经过 tool row，也不受 isRunning 闸门限制——
+      // 迟到的写库事实仍应把 plan 收敛到 DB 真值。
+      case SessionEventType.TodosUpdated:
+        return this.onTodosUpdated(event);
       case SessionEventType.SessionForked:
         return this.onSessionForked(event);
       case SessionEventType.RewindTriggered:
@@ -3276,6 +3282,49 @@ export class ProductProjection {
         )
       : [];
     return [{ op: "row.upserted", row: next }, ...planDeltas];
+  }
+
+  /**
+   * TodoWrite 写库成功后的权威清单只收敛 plan，不碰 goal.iterations。
+   * iteration 归属由 tool lifecycle（scheduled/result）负责；冷恢复末尾的合成事件排在
+   * 事件流最后，若在这里按 goal.iteration + 1 再记一轮，会凭空多出一组不属于任何
+   * verifier boundary 的计划。
+   */
+  private onTodosUpdated(event: SessionEvent): ConversationDelta[] {
+    // child 工具的 todo 写库事实只属于 child session；若未来镜像到父会话，不能覆盖父 plan。
+    if (this.isMirroredSubagentToolEvent(event)) return [];
+    const payload = event.payload as TodosUpdatedPayload;
+    if (!Array.isArray(payload.todos)) return [];
+    // 与 extractPlanStepsFromTool* 的产出保持同一口径（id=content、状态同名映射），
+    // 让事件与 tool 结果收敛到同一个 plan，历史冷恢复也只差这一次 updatedAt。
+    const items: PlanItem[] = payload.todos.map((todo) => ({
+      id: todo.content,
+      content: todo.content,
+      status:
+        todo.status === "in_progress"
+          ? "inProgress"
+          : todo.status === "completed"
+            ? "completed"
+            : "pending",
+    }));
+    // 空清单代表计划被清空：todo 表是权威，plan 必须一起消失。tool 路径对空数组
+    // 提取不到步骤（no-op），不能承担清空语义。
+    if (items.length === 0) {
+      return this.snapshot.plan === null ? [] : [{ op: "state.updated", patch: { plan: null } }];
+    }
+    // tool scheduled/result 已在事件之前写过同一份 plan；这里只在清单真的变化时产出
+    // delta，避免每次 TodoWrite 多推一次 revision（冷恢复末尾的同构事件同理由此变成 no-op）。
+    const current = this.snapshot.plan?.items;
+    if (
+      current?.length === items.length &&
+      current.every((item, index) => {
+        const next = items[index];
+        return item.id === next?.id && item.content === next.content && item.status === next.status;
+      })
+    ) {
+      return [];
+    }
+    return [{ op: "state.updated", patch: { plan: { items, updatedAt: this.ms(event) } } }];
   }
 
   /**

@@ -20,6 +20,9 @@
         "**/apps/zcode-cli/packages/bootstrap/src/app/session-facade.ts",
         // v4 queue 投影宿主(上游存量 5k+ 行);Phase 2 只加 inject→guide 车道映射,不重排投影。
         "**/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/product-projection.ts",
+        // 冷恢复三源合并(上游准入文件,接入 todo 事件前已有 808 行);补 todo 表合成事件后
+        // 超过 800 行,不为行数机械拆分 authority 判定与事件合成。
+        "**/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/cold-event-merge.ts",
         "**/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/v4-gateway.ts",
         "**/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts",
         "**/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/session-mapper.ts",

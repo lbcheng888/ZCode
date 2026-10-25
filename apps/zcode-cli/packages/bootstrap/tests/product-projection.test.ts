@@ -5548,6 +5548,61 @@ describe("goal 状态机", () => {
     expect(() => conversationSnapshotSchema.parse(snapshot)).not.toThrow();
   });
 
+  it("TodosUpdated：写库事件在 turn 结束后仍收敛 plan，且不自行推进 goal iteration", () => {
+    // Bug 根因：plan 更新只由 tool scheduled/result 触发，二者都受 isRunning() 闸门约束；
+    // TodoWrite 已写库但 tool result 迟到/丢失时，右上角进度会停在旧值。事件路径必须
+    // 无条件收敛到 DB 真值，同时把 iteration 归属留给 verifier boundary。
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TargetChanged, {
+      action: "set",
+      source: "command",
+      target: goalTarget("active"),
+    });
+    log.push(SessionEventType.TurnStarted, { turnNumber: 1, input: "plan" }, { turnId: "turn-1" });
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 1, toolCallCount: 1, duration: 1, resultType: "success" },
+      { turnId: "turn-1" },
+    );
+    log.push(SessionEventType.TodosUpdated, {
+      previousTodos: [],
+      todos: [
+        { content: "恢复计时", status: "completed", priority: "high" },
+        { content: "补暂停", status: "in_progress", priority: "medium" },
+      ],
+    });
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    expect(snapshot.plan?.items).toEqual([
+      { id: "恢复计时", content: "恢复计时", status: "completed" },
+      { id: "补暂停", content: "补暂停", status: "inProgress" },
+    ]);
+    expect(snapshot.goal?.iterations).toEqual([]);
+  });
+
+  it("TodosUpdated：空清单代表计划被清空", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TodosUpdated, {
+      todos: [{ content: "唯一一步", status: "pending", priority: "low" }],
+    });
+    log.push(SessionEventType.TodosUpdated, { todos: [] });
+
+    expect(runAll(log.events).projection.getSnapshot().plan).toBeNull();
+  });
+
+  it("TodosUpdated：subagent 镜像事件不覆盖父 plan", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TodosUpdated, {
+      source: "subagent",
+      todos: [{ content: "child only", status: "in_progress", priority: "high" }],
+    });
+
+    expect(runAll(log.events).projection.getSnapshot().plan).toBeNull();
+  });
+
   it("stopPausesActiveGoalTarget：stop（cancelled turn）把 active goal 压成 paused，resumeGoal 放行", () => {
     const log = new EventLog();
     log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });

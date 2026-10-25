@@ -298,6 +298,8 @@ session 内 todo 列表。
 
 第一版通过 `SessionStorePort.readTodos()` / `SessionStorePort.updateTodos()` 暴露给 `TodoRead` 和 `TodoWrite`。tool handler 只依赖 port，不直接访问 SQLite；SQLite adapter 用事务先删除当前 session 的旧 todo，再按 `position` 写入完整新列表，保证“完整计划替换”语义和稳定读取顺序。
 
+TodoWrite 写库成功后会发出 `todos_updated` 会话事件（完整清单）。该事件不新增落库路径：表仍是行权威，进程内 event store 只供 live 投影/replay；冷恢复由 `mergeColdConversationEvents` 读取 todo 表并在事件流末尾合成同构事件，覆盖 TodoWrite 已写表、tool part 尚未结算的崩溃窗口。`updateTodos` 在同一 SQLite 事务内写 `runtime/todo_state` session_entry marker：空表只有在 marker 在场、表非空或 transcript 最后一条 TodoWrite 入参为空时才被当作权威清空；fork / edit-retry 子会话不复制父 todo 表，因此仍能看到 transcript 继承的计划。V4 投影只把它收敛到 `snapshot.plan`，不参与 goal iteration 归属。
+
 | 字段 | 类型 | 用途 |
 | --- | --- | --- |
 | `session_id` | text not null | 所属 session。 |

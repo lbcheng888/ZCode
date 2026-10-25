@@ -371,6 +371,12 @@ export function shouldExposeSessionEventToProtocol(event: SessionEvent): boolean
     return false;
   }
 
+  if (event.type === SessionEventType.TodosUpdated) {
+    // v3 的 todo 状态由 legacy session/read|resume 直接从 todo 表填充，不消费事件；
+    // 不透出可避免把每条 TodoWrite 都映射成一次无信息的 session.updated。
+    return false;
+  }
+
   if (event.type !== SessionEventType.ModelStreaming) {
     return true;
   }

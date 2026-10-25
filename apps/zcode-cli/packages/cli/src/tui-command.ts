@@ -4,7 +4,7 @@ import { resolveZCodeRuntimeEnv, type DynamicWorkflowMode } from "@zcode/shared"
 import { createNodeClipboardImageReader } from "./clipboard-image.js";
 import { createNodeClipboardTextWriter } from "./clipboard-text.js";
 import { listSlashCommandSuggestions } from "./command-center.js";
-import { registerCliShutdownHandlers } from "./shutdown.js";
+import { DEFAULT_CLI_CLEANUP_TIMEOUT_MS, registerCliShutdownHandlers } from "./shutdown.js";
 import { listCustomCommandsForTui, loadInitialTuiSessionMetadata } from "./tui-command-data.js";
 import { createTuiSubmitPrompt } from "./tui-prompt-handler.js";
 import { loadTuiRuntime } from "./tui-runtime-loader.js";
@@ -53,11 +53,20 @@ export const runTuiCommand = async (
       options.browserExecutable,
       workflowMode,
     );
+    // 缺陷根因（关停竞态，与 prompt-command 同型）：这里原样透传 deps.shutdownCleanupTimeoutMs
+    // （缺省 undefined）时，shutdown.ts 落到自己的 2s 缺省，而 promptHandler.close 内部按
+    // DEFAULT_CLI_CLEANUP_TIMEOUT_MS（6s）缺省分阶执行 app.close / telemetry / registry 清理；
+    // SIGINT 的 process.exit(130) 会在 2s 处掐断 6s 的分阶关停（含 turn 记账排空）。
+    // 修复：信号路径与 promptHandler 内部共用同一份预算。
+    const cleanupTimeoutMs = Math.max(
+      1,
+      Math.trunc(deps.shutdownCleanupTimeoutMs ?? DEFAULT_CLI_CLEANUP_TIMEOUT_MS),
+    );
     const unregisterShutdownHandlers = registerCliShutdownHandlers({
       cleanup: async () => {
         await promptHandler.close?.();
       },
-      cleanupTimeoutMs: deps.shutdownCleanupTimeoutMs,
+      cleanupTimeoutMs,
       exitProcess: deps.exitProcess,
       process: deps.shutdownProcess,
     });

@@ -2628,8 +2628,9 @@ describe("v4 冷恢复（集成：真 sqlite + server + binder）", () => {
       if (frame.payload.kind !== "snapshot") throw new Error("Expected snapshot frame");
 
       // Bug 根因：旧 V4 resume 钩子会先构建一份无人消费的 legacy snapshot，
-      // usage seed 随后又构建第二份。readTodos 只属于 full snapshot，可作为稳定 seam
-      // 证明 V4 现在只做 activation + 自己的 durable hydration。
+      // usage seed 随后又构建第二份。probe.readTodos 只统计 legacy full snapshot 的读取，
+      // 因此仍为 0；V4 的 todo 真值经 sessionStore.readTodos 进入 cold merge（见下方
+      // “从 todo 表重建 plan” 用例），不经过 legacy snapshot。
       expect(probe).toEqual({ readTodosCalls: 0, resumeCalls: 1 });
       // 性能根因：同一份父会话 messages 过去又被 hydration、subagent seed、usage seed
       // 各读一次。正常冷订阅必须只在 activation 起点物化一次。
@@ -2658,6 +2659,47 @@ describe("v4 冷恢复（集成：真 sqlite + server + binder）", () => {
       expect(frame.payload.snapshot.usage.contextWindow?.cache).toEqual(
         legacy.runtime.contextUsage?.cache,
       );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("V4 冷订阅从 todo 表重建 plan（tool part 尚未落库的崩溃窗口）", async () => {
+    // 模拟 todoWriteHandler 已 updateTodos、tool part 尚未结算时进程退出：transcript 里
+    // 没有任何 TodoWrite 记录，V4 首帧仍必须带上 todo 表里的计划。
+    const dbPath = join(tempRoot, "sessions.db");
+    await seedPersistedSession(dbPath);
+    const seedStore = await createSqliteSessionStore({ dbPath });
+    try {
+      await seedStore.updateTodos({
+        sessionID: SESSION_ID,
+        todos: [
+          { content: "历史步骤一", status: "completed", priority: "high" },
+          { content: "历史步骤二", status: "in_progress", priority: "medium" },
+        ],
+      });
+    } finally {
+      seedStore.close();
+    }
+    const { server, store } = await bootRestartedServer(dbPath, []);
+    try {
+      await requestResult(server, {
+        id: "subscribe-todo-plan",
+        method: V4_METHODS.conversationSubscribe,
+        params: {
+          topic: conversationTopic(SESSION_ID),
+          connectionId: "conn-todo-plan",
+          clientMode: "desktop-continuous",
+        },
+      });
+      const frame = conversationTopicFrameSchema.parse(
+        takeInitialFrameParams(server, "subscribe-todo-plan"),
+      );
+      if (frame.payload.kind !== "snapshot") throw new Error("Expected snapshot frame");
+      expect(frame.payload.snapshot.plan?.items).toEqual([
+        { id: "历史步骤一", content: "历史步骤一", status: "completed" },
+        { id: "历史步骤二", content: "历史步骤二", status: "inProgress" },
+      ]);
     } finally {
       store.close();
     }

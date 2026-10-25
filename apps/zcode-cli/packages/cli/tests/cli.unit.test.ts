@@ -2511,6 +2511,57 @@ test("closes the active TUI app on process shutdown signals", async () => {
   assert.equal(telemetryShutdownCount, 1);
 });
 
+test("gives the TUI signal cleanup path the same staged budget as normal exit", async () => {
+  const ctx = createContext(["tui"]);
+  const shutdownProcess = createTestShutdownProcess("linux");
+  const exitDeferred = createDeferred<number>();
+  let closeDoneAtMs = 0;
+  let exitAtMs = 0;
+
+  const runPromise = run(ctx, {
+    ...createPromptDeps(),
+    prepareZCodeTelemetryEnv: async (env) => env,
+    createZCodeApp: () =>
+      ({
+        close: async () => {
+          // 模拟关库前的 turn 记账排空：耗时必须超过旧信号路径 2s 缺省预算、
+          // 又低于 promptHandler.closeApp 自身的 6s 分阶预算，才能区分两条路径的预算来源。
+          await delay(2_400);
+          closeDoneAtMs = Date.now();
+        },
+        getModel: () => "openai/gpt-test",
+        getThoughtLevel: () => "medium",
+        runtime: {} as never,
+        sessionId: "session-tui-signal-budget",
+        submitPrompt: async (prompt: string) => ({
+          events: [],
+          projection: fakeProjection as never,
+          response: prompt,
+          traceId: "trace-test" as never,
+          turnId: "turn-test" as never,
+        }),
+        traceId: "trace-test",
+      }) as never,
+    exitProcess: (code) => {
+      exitAtMs = Date.now();
+      exitDeferred.resolve(code);
+    },
+    runTui: async (options) => {
+      await options.submitPrompt("hello", { abortSignal: new AbortController().signal });
+      shutdownProcess.emitSignal("SIGINT");
+      return 0;
+    },
+    shutdownProcess,
+  });
+
+  assert.equal(await exitDeferred.promise, 130);
+  assert.equal(await runPromise, 0);
+  // 修复断言（关停竞态）：exit(130) 只允许发生在 app.close（含记账排空）完成之后；
+  // 旧的 2s 信号预算会在 close 完成前抢跑，把排空掐断在中间。
+  assert.ok(closeDoneAtMs > 0);
+  assert.ok(exitAtMs >= closeDoneAtMs);
+});
+
 test("parses built-in slash commands outside the TUI", () => {
   assert.deepEqual(parseSlashCommand("hello"), null);
   assert.deepEqual(parseSlashCommand("/compact keep files"), {

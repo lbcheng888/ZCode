@@ -191,6 +191,7 @@ import { ConversationDraftEmptyState } from "@/v4/ConversationDraftEmptyState.js
 import { ConversationDraftSuggestedPromptsContainer } from "@/v4/ConversationDraftSuggestedPromptsContainer.js";
 import { ConversationHeader, type PaneWorkspaceBadge } from "@/v4/ConversationHeader.js";
 import { ConversationQueuePanel } from "@/v4/ConversationQueuePanel.js";
+import { TodoPanel } from "@/TodoPanel.js";
 import { projectPendingGuideQueue } from "@/v4/pendingGuideProjection.js";
 import { ConversationQuotaBanner } from "@/v4/ConversationQuotaBanner.js";
 import { PendingCommandRecoveryBanner } from "@/v4/PendingCommandRecoveryBanner.js";
@@ -5626,6 +5627,12 @@ export function SessionPane({
             compactForRemoteControl ? handleMobilePlanInteractionAccepted : undefined
           }
         />
+      ) : null}
+      {/* TodoWrite 进度条紧贴 composer 上方：桌面 continuous 与手机 replayable 共用同一
+          bottom dock，只消费 snapshot.plan（唯一 todo 投影），不新增第二份 todo 状态。
+          浮窗形态只露出输入区，草稿态没有会话 todo，二者都不挂载。 */}
+      {!isDraft && !isFloatingPresentation && snapshot?.plan ? (
+        <TodoPanel plan={snapshot.plan} isStreaming={isRunning} className="mb-2" />
       ) : null}
       {composerNode}
       {/* 办公模式显示主动任务推荐；编程模式保留原有小型场景入口。 */}

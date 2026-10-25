@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  SessionEventType,
   createSessionId,
   formatTodoStateForModel,
   todoItemsFromToolResultContent,
+  type SessionEvent,
   type SessionStorePort,
   type TodoItem,
 } from "@zcode/contracts";
@@ -85,6 +87,64 @@ describe("todo tools", () => {
     await expect(todoReadHandler({}, context)).resolves.toEqual({ todos: write.todos });
   });
 
+  it("emits an authoritative TodosUpdated event only after the write succeeds", async () => {
+    const store = createTodoStore();
+    const emitted: SessionEvent[] = [];
+    const previous: TodoItem[] = [{ content: "Old step", priority: "low", status: "pending" }];
+    await store.updateTodos({ sessionID: createSessionId("todo-tool"), todos: previous });
+
+    const order: string[] = [];
+    const baseUpdate = store.updateTodos.bind(store);
+    store.updateTodos = async (input) => {
+      order.push("write");
+      await baseUpdate(input);
+    };
+    const context = createContext(store, async (event) => {
+      order.push("emit");
+      emitted.push(event);
+    });
+
+    const write = await todoWriteHandler(
+      {
+        todos: [
+          { content: "Ship projection", priority: "high", status: "in_progress" },
+          { content: "Old step", priority: "low", status: "completed" },
+        ],
+      },
+      context,
+    );
+
+    expect(order).toEqual(["write", "emit"]);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      type: SessionEventType.TodosUpdated,
+      sessionId: context.sessionId,
+      payload: {
+        previousTodos: previous,
+        todos: write.todos,
+      },
+    });
+  });
+
+  it("does not emit TodosUpdated when the todo write fails", async () => {
+    const store = createTodoStore();
+    store.updateTodos = async () => {
+      throw new Error("disk full");
+    };
+    const emitted: SessionEvent[] = [];
+    const context = createContext(store, async (event) => {
+      emitted.push(event);
+    });
+
+    await expect(
+      todoWriteHandler(
+        { todos: [{ content: "Never lands", priority: "high", status: "pending" }] },
+        context,
+      ),
+    ).rejects.toThrow("disk full");
+    expect(emitted).toEqual([]);
+  });
+
   it("parses serialized TodoRead and TodoWrite outputs for projections", () => {
     const todos: TodoItem[] = [
       {
@@ -132,11 +192,15 @@ function createTodoStore(): SessionStorePort {
   } as unknown as SessionStorePort;
 }
 
-function createContext(sessionStore: SessionStorePort): ToolExecutionContext {
+function createContext(
+  sessionStore: SessionStorePort,
+  emitEvent?: (event: SessionEvent) => Promise<void>,
+): ToolExecutionContext {
   return {
     abortSignal: new AbortController().signal,
     sessionId: createSessionId("todo-tool"),
     sessionStore,
+    ...(emitEvent ? { emitEvent } : {}),
     toolCallId: "todo-call",
     traceId: "trace-todo" as never,
     workingDirectory: "/tmp/zcode-todo-tool",

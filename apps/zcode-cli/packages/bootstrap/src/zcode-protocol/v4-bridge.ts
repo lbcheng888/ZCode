@@ -2037,6 +2037,8 @@ export function createConversationV4Gateway(
                 getSession: (id) => store.getSession(id),
                 messages: (input) => store.messages(input),
                 readTarget: (input) => store.readTarget(input),
+                // todo 表是冷恢复 plan 的行权威：崩溃窗口里它可能比 transcript 新。
+                readTodos: (input) => store.readTodos(input),
                 ...(store.sessionEntries
                   ? {
                       sessionEntries: (input) =>
@@ -2089,6 +2091,7 @@ export function createConversationV4Gateway(
         ...(Object.prototype.hasOwnProperty.call(source, "target")
           ? { target: source.target }
           : {}),
+        ...(Object.prototype.hasOwnProperty.call(source, "todos") ? { todos: source.todos } : {}),
       });
       for (const diagnostic of merged.diagnostics) {
         const fields = {

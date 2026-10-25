@@ -1,7 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { SessionId, TodoItem } from "@zcode/contracts";
+import { SESSION_ENTRY_TODO_STATE, type SessionId, type TodoItem } from "@zcode/contracts";
 import { decodeTodoRow } from "../codecs.js";
 import type { TodoRow } from "../rows.js";
+import { saveSessionEntry } from "./session-entries.js";
 import { touchSession } from "./sessions.js";
 
 export async function readTodos(
@@ -43,6 +44,18 @@ export async function updateTodos(
         insert.run(input.sessionID, todo.content, todo.status, todo.priority, position, now, now);
       }
     }
+    // 原因：todo 表是 delete+insert，空表既可能是“从未写过”，也可能是“写过并清空”。
+    // 冷恢复（尤其 fork/edit-retry 子会话）必须能区分两者，否则清空会在重启后复活旧 plan。
+    // marker 与 todo 行在同一事务内落库：崩溃只会同时丢失两者，不会产生半写状态。
+    // 值仍以 todo 表为权威，marker 只表达“本会话写过”这一持久事实。
+    saveSessionEntry(db, {
+      id: `todo_state:${input.sessionID}`,
+      sessionID: input.sessionID,
+      type: SESSION_ENTRY_TODO_STATE,
+      time: { created: now, updated: now },
+      data: { todosCount: input.todos.length, updatedAt: now },
+      touchSession: false,
+    });
     touchSession(db, input.sessionID, now);
     db.exec("commit");
   } catch (error) {

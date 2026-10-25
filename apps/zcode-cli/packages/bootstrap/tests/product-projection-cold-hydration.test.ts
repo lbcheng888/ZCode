@@ -734,3 +734,37 @@ describe("ProductProjection cold hydration workflowRuns", () => {
     });
   });
 });
+
+describe("ProductProjection cold hydration todo plan", () => {
+  it("cold 批量用 TodosUpdated 重建 plan 并推进 revision", () => {
+    const projection = new ProductProjection("cold-hydration-session", "epoch-cold");
+    projection.beginHydrationReplay();
+    const deltas = projection.applyHydrationEvent(
+      sessionEvent(1, SessionEventType.TodosUpdated, {
+        todos: [
+          { content: "恢复 Todo 面板", status: "completed", priority: "high" },
+          { content: "补冷恢复", status: "in_progress", priority: "medium" },
+        ],
+      }),
+    );
+
+    expect(deltas).toEqual([
+      {
+        op: "state.updated",
+        patch: {
+          revision: 1,
+          plan: {
+            items: [
+              { id: "恢复 Todo 面板", content: "恢复 Todo 面板", status: "completed" },
+              { id: "补冷恢复", content: "补冷恢复", status: "inProgress" },
+            ],
+            updatedAt: 1_700_000_000_001,
+          },
+        },
+      },
+    ]);
+    projection.completeHydrationReplay();
+    expect(projection.getSnapshot().plan?.items).toHaveLength(2);
+    expect(projection.getSnapshot().revision).toBe(1);
+  });
+});

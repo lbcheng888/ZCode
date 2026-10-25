@@ -7,6 +7,8 @@ import type {
   SubagentRow,
   UserInputRow,
 } from "@zcode/shared/zcode-protocol-v4";
+import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
+import { TooltipProvider } from "@/components/ui/tooltip.js";
 import { SessionPane } from "@/v4/SessionPane.js";
 import { ZCodeIntlProvider } from "@/i18n/IntlProvider.js";
 import type {
@@ -316,6 +318,16 @@ function makeSnapshot(overrides: Partial<ConversationSnapshot> = {}): Conversati
   return { ...snapshot, ...overrides };
 }
 
+function todoPlan(): ConversationSnapshot["plan"] {
+  return {
+    items: [
+      { id: "step-1", status: "completed", content: "已经完成的事项" },
+      { id: "step-2", status: "inProgress", content: "正在处理的事项" },
+    ],
+    updatedAt: 1_777_777_777,
+  };
+}
+
 function renderPane({
   compactForRemoteControl = false,
   onOpenSubagentSession,
@@ -346,15 +358,21 @@ function renderPane({
     createElement(
       ZCodeIntlProvider,
       { initialLocale: "zh-CN" },
-      createElement(SessionPane, {
-        paneId: "workspace-main",
-        sessionId,
-        workspacePath: "/workspace",
-        compactForRemoteControl,
-        ...(onOpenSubagentSession ? { onOpenSubagentSession } : {}),
-        ...(onOpenWorkflowRun ? { onOpenWorkflowRun } : {}),
-        ...(onSummaryPanelVariantOverrideChange ? { onSummaryPanelVariantOverrideChange } : {}),
-      }),
+      // TodoPanel 的折叠按钮走共享 ControlHintTooltip；生产环境由 Root 提供 provider，
+      // 这里补齐同一上下文，避免 SSR 直接渲染 pane 时缺少 Radix Tooltip Provider。
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(SessionPane, {
+          paneId: "workspace-main",
+          sessionId,
+          workspacePath: "/workspace",
+          compactForRemoteControl,
+          ...(onOpenSubagentSession ? { onOpenSubagentSession } : {}),
+          ...(onOpenWorkflowRun ? { onOpenWorkflowRun } : {}),
+          ...(onSummaryPanelVariantOverrideChange ? { onSummaryPanelVariantOverrideChange } : {}),
+        }),
+      ),
     ),
   );
 }
@@ -404,6 +422,54 @@ describe("SessionPane v4 chat layout parity", () => {
     expect(html.indexOf('data-v4-composer-dock="true"')).toBeLessThan(
       html.indexOf('data-testid="mock-composer"'),
     );
+  });
+
+  for (const compactForRemoteControl of [false, true]) {
+    it(`renders the todo progress strip above the composer in the dock (remote=${compactForRemoteControl})`, () => {
+      const html = renderPane({
+        compactForRemoteControl,
+        snapshot: makeSnapshot({ plan: todoPlan() }),
+      });
+      const dockIndex = html.indexOf('data-v4-composer-dock="true"');
+      const todoIndex = html.indexOf(`data-testid="${TID_V4_TODO_PANEL}"`);
+      const composerIndex = html.indexOf('data-testid="mock-composer"');
+
+      expect(dockIndex).toBeGreaterThanOrEqual(0);
+      expect(todoIndex).toBeGreaterThan(dockIndex);
+      expect(composerIndex).toBeGreaterThan(todoIndex);
+      // 进度条复用 TodoPanel 的 completed/total 计数。
+      expect(html).toContain("1/2");
+      expect(html).toContain("正在处理的事项");
+    });
+  }
+
+  it("omits the todo progress strip when the plan is null or empty", () => {
+    const nullPlanHtml = renderPane();
+    const emptyPlanHtml = renderPane({
+      snapshot: makeSnapshot({ plan: { items: [], updatedAt: 1_777_777_777 } }),
+    });
+
+    expect(nullPlanHtml).not.toContain(TID_V4_TODO_PANEL);
+    expect(emptyPlanHtml).not.toContain(TID_V4_TODO_PANEL);
+  });
+
+  it("passes the pane running state to the todo strip", () => {
+    const runningHtml = renderPane({
+      snapshot: makeSnapshot({
+        control: {
+          ...makeSnapshot().control,
+          phase: "running",
+          sessionEnded: false,
+          canStop: true,
+          stopState: "stoppable",
+        },
+        plan: todoPlan(),
+      }),
+    });
+    const idleHtml = renderPane({ snapshot: makeSnapshot({ plan: todoPlan() }) });
+
+    expect(runningHtml).toContain("animated-gradient-text");
+    expect(idleHtml).not.toContain("animated-gradient-text");
   });
 
   it("anchors the back-to-bottom control to the composer dock above input", () => {

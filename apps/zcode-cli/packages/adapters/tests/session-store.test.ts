@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   SESSION_ENTRY_MODEL_SELECTION,
   SESSION_ENTRY_TARGET_COMPLETION_VERIFICATION,
+  SESSION_ENTRY_TODO_STATE,
   createMessageId,
   createPartId,
   createProjectId,
@@ -2347,6 +2348,27 @@ describe("SQLite session store", () => {
         },
       ]);
       expect(store.debugCounts(sessionID).todos).toBe(1);
+
+      // 空表与“从未写过”的区分依赖同事务写入的 todo_state marker；marker 只表达写过，
+      // 值仍以 todo 表为权威（docs/design/v2/session-persistence.md「表：todo」）。
+      const markerBeforeClear = await store.sessionEntries?.({
+        sessionID,
+        type: SESSION_ENTRY_TODO_STATE,
+      });
+      expect(markerBeforeClear).toHaveLength(1);
+      expect(markerBeforeClear?.[0]).toMatchObject({
+        id: `todo_state:${sessionID}`,
+        data: { todosCount: 1 },
+      });
+
+      await store.updateTodos({ sessionID, todos: [] });
+      expect(await store.readTodos({ sessionID })).toEqual([]);
+      const markerAfterClear = await store.sessionEntries?.({
+        sessionID,
+        type: SESSION_ENTRY_TODO_STATE,
+      });
+      expect(markerAfterClear).toHaveLength(1);
+      expect(markerAfterClear?.[0]).toMatchObject({ data: { todosCount: 0 } });
     } finally {
       store.close();
       await rm(tempRoot, { force: true, recursive: true });

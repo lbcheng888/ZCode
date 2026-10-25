@@ -4,6 +4,7 @@
 
 import {
   CoreErrorType,
+  SessionEventType,
   TodoReadInputJsonSchema,
   TodoReadInputSchema,
   TodoReadOutputJsonSchema,
@@ -13,10 +14,12 @@ import {
   TodoWriteOutputJsonSchema,
   TodoWriteOutputSchema,
   createCoreError,
+  createSessionEvent,
   type TodoItem,
   type TodoReadOutput,
   type TodoWriteInput,
   type TodoWriteOutput,
+  type TodosUpdatedPayload,
 } from "@zcode/contracts";
 import type { ToolEntry, ToolHandler } from "../types.js";
 
@@ -63,6 +66,18 @@ export const todoWriteHandler: ToolHandler = async (input, context) => {
 
   const oldTodos = await context.sessionStore.readTodos({ sessionID: context.sessionId });
   await context.sessionStore.updateTodos({ sessionID: context.sessionId, todos });
+
+  // 原因：之前 todo 只靠 tool result 被投影层解析，turn 结束后迟到/丢失的结果不会更新
+  // 右上角进度；而 todo 表又先于 transcript 落库，崩溃恢复时 DB 可能比 transcript 新。
+  // 写库成功后发一条权威清单事件，让 live 投影与冷恢复消费同一事实（表仍是行权威）。
+  await context.emitEvent?.(
+    createSessionEvent(
+      SessionEventType.TodosUpdated,
+      context.sessionId,
+      { todos, previousTodos: oldTodos } satisfies TodosUpdatedPayload,
+      { turnId: context.turnId, traceId: context.traceId },
+    ),
+  );
 
   return {
     oldTodos,

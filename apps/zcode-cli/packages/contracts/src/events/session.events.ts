@@ -52,6 +52,7 @@ import type { ModelApiErrorPhase, ModelFailureExceptionKind } from "../telemetry
 import type { ToolSideEffectScope } from "../tools/contract.js";
 import type { SavedWorkflowScope } from "../tools/saved-workflow.js";
 import type { GoalCompletionVerificationOutput, SessionGoal } from "../tools/target.js";
+import type { TodoItem } from "../tools/todo.js";
 import type { ToolResultDisplayPayload } from "../tools/tool-result-metadata.js";
 import type {
   StreamRecoveryAnchorPayload,
@@ -175,6 +176,9 @@ export const SessionEventType = {
   CheckpointCreated: "checkpoint_created",
   TargetChanged: "target_changed",
   TargetCompletionVerification: "target_completion_verification",
+  // TodoWrite 写库成功后的权威清单。SQLite todo 表是行权威；本事件只服务 live 投影与
+  // 进程内 replay，冷恢复由 todo 表合成同构事件。
+  TodosUpdated: "todos_updated",
   SubagentSpawned: "subagent_spawned",
   SubagentMessage: "subagent_message",
   SubagentStopped: "subagent_stopped",
@@ -1162,6 +1166,19 @@ export interface TargetChangedPayload {
   blockerCode?: string;
 }
 
+/**
+ * TodoWrite 成功写库后的完整清单快照。
+ *
+ * 事件只承载清单事实，不标注发射来源：live handler 与冷恢复的合成事件消费同一个形状。
+ * 投影只更新 plan，goal iteration 归属仍由 tool lifecycle 决定——冷恢复末尾若把 DB
+ * 快照再记一轮 iteration，会凭空多出一组不属于任何 verifier boundary 的计划。
+ */
+export interface TodosUpdatedPayload {
+  todos: TodoItem[];
+  /** 写前清单；冷恢复合成事件不携带。 */
+  previousTodos?: TodoItem[];
+}
+
 // -----------------------------------------------
 // Supporting Types
 // -----------------------------------------------
@@ -1337,6 +1354,7 @@ export type SessionEventPayload =
   | NetworkRequestStatusPayload
   | ModelCompletePayload
   | TargetCompletionVerificationPayload
+  | TodosUpdatedPayload
   | ModelErrorPayload
   | ToolCallScheduledPayload
   | ToolCallStartedPayload

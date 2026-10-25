@@ -1895,6 +1895,38 @@ describe("订阅与帧调度", () => {
     expect(host.frames[1]!.fromSeq).toBe(host.frames[0]!.toSeq);
   });
 
+  it("TodosUpdated 经 gateway 投影为 plan state.updated 并随帧下发", async () => {
+    const host = makeHost();
+    const gateway = makeGateway(host);
+    const log = new EventLog();
+    gateway.ingest("session-1", sessionCreated(log));
+    const { initialFrame: initial } = await gateway.subscribe(subscribeParams());
+
+    gateway.ingest(
+      "session-1",
+      log.push(SessionEventType.TodosUpdated, {
+        todos: [
+          { content: "写投影", status: "in_progress", priority: "high" },
+          { content: "补测试", status: "pending", priority: "medium" },
+        ],
+      }),
+    );
+    vi.advanceTimersByTime(CONTINUOUS_WINDOW);
+
+    expect(host.frames).toHaveLength(1);
+    expect(host.frames[0]!.fromSeq).toBe(initial!.toSeq);
+    const payload = host.frames[0]!.payload;
+    if (payload.kind !== "deltas") throw new Error("Expected deltas frame");
+    const planDelta = payload.deltas.find(
+      (delta) => delta.op === "state.updated" && delta.patch.plan !== undefined,
+    );
+    if (planDelta?.op !== "state.updated") throw new Error("Expected plan state.updated");
+    expect(planDelta.patch.plan?.items).toEqual([
+      { id: "写投影", content: "写投影", status: "inProgress" },
+      { id: "补测试", content: "补测试", status: "pending" },
+    ]);
+  });
+
   it("host clientMode 固定 desktop continuous / mobile replayable 调度边界", async () => {
     const host = makeHost();
     const gateway = makeGateway(host);
