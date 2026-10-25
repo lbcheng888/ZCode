@@ -6,6 +6,7 @@ import {
   findExhaustedTargetBudgetDimension,
   formatGoalContinuationPrompt,
   formatTargetBudgetOutcomePrompt,
+  nextTurnPendingInputs,
   TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
   traceContextToLogContext,
 } from "../deps.js";
@@ -145,8 +146,13 @@ export function scheduleIdleGoalRound(this: AgentRuntimeInternal): void {
   if (this.queueAutoDrain === false || this.queueExternalDrainActive) return;
   if (this.permissionFullAccessPending) return;
   if (hasRunningBackgroundRuntimeTask(this.runtimeTaskRegistry)) return;
-  void this.continueActiveTargetIfIdle({ idleDriver: true, verifyBeforeContinue: true }).catch(
-    (error: unknown) => {
+  // 预约前的用户队列判定要读事件投影(异步);同步预约改成了异步判定 + 预约,
+  // 在途标志挡住判定窗口内新出现的空闲沿,避免同一边缘预约两个回合。
+  if (this.goalRoundDriverReservationPending) return;
+  this.goalRoundDriverReservationPending = true;
+  void reserveIdleGoalRoundAfterQueueCheck
+    .call(this)
+    .catch((error: unknown) => {
       // 预约命令本身极少数在入队前失败(abort 已决);回合内失败经 runRuntimeCommand
       // 的同步 standing-down 落档,此处只兜日志,不承担时序。
       this.logger?.warn("Idle goal round reservation failed", {
@@ -155,8 +161,38 @@ export function scheduleIdleGoalRound(this: AgentRuntimeInternal): void {
         module: "core.runtime",
         status: "failed",
       });
-    },
-  );
+    })
+    .finally(() => {
+      // 兜底释放:判定/入队前的异常路径。正常路径在入队同步段内已释放(见下)。
+      this.goalRoundDriverReservationPending = false;
+    });
+}
+
+/**
+ * 空闲沿预约前的用户队列判定(裁定 b,2026-10-25 常驻闭环验收发现):
+ * 排队的用户输入必须先于驱动器的下一回合执行。验收证据——round 1 执行中以默认
+ * sendText 排队的用户消息要等目标 complete 后才被 v4 auto-drain 提升,用户排在了
+ * 整个目标后面。queue 的『不打断当前回合』语义不变,只修正排空顺序:空闲沿若
+ * next-turn 用户队列非空,驱动器不预约(quiet yield,不落 standing-down,armed
+ * 保持),让既有提升路径(v4 auto-drain → sendQueuedNow)先跑用户回合;用户回合
+ * 排空后的下一空闲沿照常预约。不新增车道,队列存储与提升机制本身不动。
+ */
+async function reserveIdleGoalRoundAfterQueueCheck(this: AgentRuntimeInternal): Promise<void> {
+  const projection = await this.rebuildProjection();
+  if (nextTurnPendingInputs(projection).length > 0) return;
+  // 判定期间机器可能已不再空闲(新命令入队/别的回合起跑);预约入队前复查,
+  // 让那一轮自己排空时制造的空闲沿再走本函数。
+  if (this.hasActiveOrQueuedTurnWork()) return;
+  // 入队发生在本次同步段内(continueActiveTargetIfIdle 的命令创建与 enqueue 不经
+  // await);在途标志必须在入队后立即释放——预约命令的完成反应(≥2 跳微任务)必然
+  // 晚于该命令排空后的空闲沿,拖到 finally 释放会让下一个空闲沿被误判为「判定在
+  // 途」而错过预约(与 standing-down 同类时序,见 runtime-command-queue 的实测记录)。
+  const reservation = this.continueActiveTargetIfIdle({
+    idleDriver: true,
+    verifyBeforeContinue: true,
+  });
+  this.goalRoundDriverReservationPending = false;
+  await reservation;
 }
 
 export async function executeTargetContinuationCommand(

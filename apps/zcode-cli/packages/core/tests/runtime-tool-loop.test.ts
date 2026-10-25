@@ -3928,9 +3928,106 @@ describe("AgentRuntime tool loop", () => {
 
     expect(requestOrder).toEqual(["prompt"]);
     expect(
-      (runtime as unknown as { goalRoundDriverStandingDown?: boolean })
-        .goalRoundDriverStandingDown,
+      (runtime as unknown as { goalRoundDriverStandingDown?: boolean }).goalRoundDriverStandingDown,
     ).toBeFalsy();
+  });
+
+  // 裁定 b(2026-10-25 常驻闭环验收):排队的用户输入必须先于驱动器的下一回合执行。
+  // 验收复现:round 1 执行中以默认 sendText 排队的用户消息要等目标 complete 后才被
+  // v4 auto-drain 提升,驱动器 round 2/3 先跑。空闲沿(next-turn 用户队列非空)驱动器
+  // quiet yield(不预约、不落 standing-down);用户回合排空后的下一空闲沿恢复预约。
+  it("idle driver yields to a queued user input and resumes after it drains", async () => {
+    const sessionId = createSessionId("runtime-target-driver-queue-yield");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-driver-queue-yield" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("user turn A")) {
+              requestOrder.push("user-a");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "user a done",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("user turn B")) {
+              requestOrder.push("user-b");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "user b done",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Verify whether the active session goal")) {
+              requestOrder.push("verifier");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: JSON.stringify({
+                  nextAction: "",
+                  passed: true,
+                  reason: "The goal is complete.",
+                }),
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            requestOrder.push("continuation");
+            throw new Error("queued user input must run before the driver round");
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Queue yield");
+    await sessionStore.setTarget({
+      objective: "Yield to queued user input",
+      sessionID: sessionId,
+    });
+    armIdleGoalRoundDriver(runtime);
+
+    // 与验收同构:busy/default sendText 的排队项落在 next-turn 车道(事件投影)。
+    const queued = await runtime.enqueueDeferredInput({
+      delivery: "queue",
+      input: "queued user message",
+    });
+    expect(queued.kind).toBe("queued");
+
+    // 用户回合 A 排空后的空闲沿:队列非空,驱动器必须让位(无 verifier/continuation)。
+    await runtime.executeTurn("user turn A");
+    await delay(40);
+
+    expect(requestOrder).toEqual(["user-a"]);
+    // quiet yield:不落 standing-down(armed 保持),否则用户回合后的下一空闲沿被吞。
+    expect(
+      (runtime as unknown as { goalRoundDriverStandingDown?: boolean }).goalRoundDriverStandingDown,
+    ).toBeFalsy();
+
+    // 模拟既有提升路径(sendQueuedNow)消费排队项后,用户回合 B 照常执行。
+    expect(
+      await runtime.removePendingInputById({
+        pendingInputId: queued.kind === "queued" ? queued.pendingInputId : "",
+        reason: "promoted",
+        traceContext: { sessionId, traceId: createTraceId("trace-driver-queue-yield") },
+      }),
+    ).toBe(true);
+    await runtime.executeTurn("user turn B");
+
+    // 用户回合排空后的下一空闲沿,驱动器恢复预约(verifier 先行)。
+    await waitForCondition(() => requestOrder.includes("verifier"));
+    expect(requestOrder).toEqual(["user-a", "user-b", "verifier"]);
   });
 
   it("manual active target loop queues behind an active prompt turn", async () => {
@@ -5098,9 +5195,7 @@ describe("AgentRuntime tool loop", () => {
         eventStore,
         modelFactory: createTestModelFactory({
           async generateText(request: any) {
-            requests.push(
-              providerContentToText(latestTurnInputMessages(request).at(-1)?.content),
-            );
+            requests.push(providerContentToText(latestTurnInputMessages(request).at(-1)?.content));
             return {
               finishReason: "stop",
               providerMetadata: undefined,

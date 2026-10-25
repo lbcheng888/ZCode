@@ -342,6 +342,13 @@ export interface V4GatewayHost {
   invalidatePersistentCommandFacts?(sessionId: string): void;
   /** canonical goal complete 已进入 projection；宿主副作用必须 detached，禁止阻塞 ingest。 */
   onTargetCompleted?(sessionId: string, event: SessionEvent): void;
+  /**
+   * 任一回合终态（TurnComplete/TurnError）已进入 projection（裁定 b，2026-10-25）。
+   * core 发起的 model-only 回合（idle 驱动器 goal 回合、通知轮）没有 v4 命令层
+   * mutation 可挂；宿主在此 detached 重评普通 queue 的自动提升，保证排队的用户
+   * 输入在驱动器让位后先于下一个 goal 回合执行。禁止阻塞 ingest。
+   */
+  onTurnSettled?(sessionId: string, event: SessionEvent): void;
   /** Highspeed 真实耗时在 CLI 终态落 transcript；宿主副作用必须 detached。 */
   onHighspeedTurnTerminal?(
     sessionId: string,
@@ -1063,6 +1070,13 @@ export class ConversationV4Gateway {
         this.host.onHighspeedTurnTerminal?.(sessionId, event, publisher.getSnapshot());
       } catch (error) {
         this.host.onError?.("v4.projection.highspeedMetrics", error);
+      }
+      // 裁定 b（2026-10-25）：回合终态统一补一次 auto-drain 重评（detached 由宿主
+      // 保证），覆盖不经 v4 命令层的 core 发起回合（idle 驱动器 goal 回合、通知轮）。
+      try {
+        this.host.onTurnSettled?.(sessionId, event);
+      } catch (error) {
+        this.host.onError?.("v4.projection.turnSettled", error);
       }
     }
     if (

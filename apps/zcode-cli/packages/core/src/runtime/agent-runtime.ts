@@ -268,6 +268,8 @@ export class AgentRuntime {
   // idle 驱动器进程内事实(armed/standing-down)与 turn-stopping 监听链(设计 §3.2/§3.5)。
   private goalRoundDriverArmed?: boolean;
   private goalRoundDriverStandingDown?: boolean;
+  // 预约前的用户队列判定在途标志(裁定 b,2026-10-25):判定窗口内的新空闲沿不重入。
+  private goalRoundDriverReservationPending?: boolean;
   private turnStoppingListeners: TurnStoppingListener[] = [];
 
   constructor(sessionId: SessionId, config: AgentRuntimeConfig, deps: AgentRuntimeDeps) {

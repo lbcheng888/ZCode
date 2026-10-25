@@ -74,6 +74,7 @@ export {
   isProviderVisiblePdfModelInputBlock,
   isProviderVisibleVideoModelInputBlock,
   modelMessageContentToText,
+  nextTurnPendingInputs,
   parseCheckpointCreatedPayload,
   parseRewindTriggeredPayload,
   parseCompactBoundaryPayload,

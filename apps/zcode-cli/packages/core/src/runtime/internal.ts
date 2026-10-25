@@ -187,6 +187,11 @@ export interface AgentRuntimeInternal
    */
   goalRoundDriverArmed?: boolean;
   goalRoundDriverStandingDown?: boolean;
+  /**
+   * idle 驱动器的预约判定在途(裁定 b,2026-10-25):预约前的用户队列判定要读事件投影,
+   * 是异步的;在途期间新出现的空闲沿不得再进入第二轮判定,否则同一边缘会预约两个回合。
+   */
+  goalRoundDriverReservationPending?: boolean;
   /** turn-stopping 异议钩子监听链(设计 §3.5);进程内注册,不持久。 */
   turnStoppingListeners: TurnStoppingListener[];
 }

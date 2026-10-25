@@ -81,7 +81,6 @@ import type {
   DynamicWorkflowRunProgressPayload,
   EventId,
   ForkCommitBundle,
-  GoalStatus,
   MessageId,
   MessageWithParts,
   SessionEvent,
@@ -707,27 +706,11 @@ export function createConversationV4Gateway(
       scheduleAutoDrainRetry(record);
       return;
     }
-    let targetStatus: GoalStatus | null = null;
-    if (head.autoDrain && head.dispatchState === "queued" && !record.activeAbortController) {
-      try {
-        targetStatus = (await record.app.readTarget())?.status ?? null;
-      } catch (error) {
-        // target 读取失败时按“未知且未完成”处理；直接提升会让
-        // goal verification 的持久终态尚未可证时普通 queue 偷跑。
-        context.logger?.warn("v4 auto-drain held because target state could not be read", {
-          error: error instanceof Error ? error.message : String(error),
-          queueItemId: head.queueItemId,
-          sessionId: record.app.sessionId,
-        });
-        return;
-      }
-    }
     if (
       !shouldAutoDrainV4QueueHead({
         autoDrain: head.autoDrain,
         dispatchState: head.dispatchState,
         sessionBusy: Boolean(record.activeAbortController) || coreForegroundBusy,
-        targetStatus,
       })
     ) {
       return;
@@ -1636,6 +1619,24 @@ export function createConversationV4Gateway(
         .then(() => autoDrainV4QueueIfReady(record))
         .catch((error: unknown) => {
           context.logger?.warn("v4 auto-drain reevaluation after target completion failed", {
+            error: error instanceof Error ? error.message : String(error),
+            sessionId,
+          });
+        });
+    },
+    onTurnSettled: (sessionId) => {
+      const record = context.sessions.get(sessionId);
+      if (!record) return;
+      // 裁定 b（2026-10-25）：排队的用户输入先于驱动器的下一回合。idle 驱动器的
+      // goal 回合是 core 发起的 model-only turn，不经过 v4 命令层，回合收口没有
+      // afterLegacyStateMutation 来重评 auto-drain——旧世界唯一重评源是
+      // TargetChanged(complete)，用户排队输入因此被压在整个目标后面（常驻闭环
+      // 验收复现）。每个回合终态补一次 detached 重评：忙碌时既有 retry 兜住，
+      // 真正空闲且队列非空时用户回合在驱动器让位后先跑。
+      void Promise.resolve()
+        .then(() => autoDrainV4QueueIfReady(record))
+        .catch((error: unknown) => {
+          context.logger?.warn("v4 auto-drain reevaluation after turn settlement failed", {
             error: error instanceof Error ? error.message : String(error),
             sessionId,
           });

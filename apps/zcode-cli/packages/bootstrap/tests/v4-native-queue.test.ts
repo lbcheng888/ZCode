@@ -330,33 +330,51 @@ describe("v4 原生 queue 单项命令", () => {
 });
 
 describe("v4 普通 queue 自动消费 goal gate", () => {
-  it.each(["active", "paused", "budget_limited"] as const)(
-    "target=%s 时即使 session ready 也不自动消费",
-    (targetStatus) => {
-      expect(
-        shouldAutoDrainV4QueueHead({
-          autoDrain: true,
-          dispatchState: "queued",
-          sessionBusy: false,
-          targetStatus,
-        }),
-      ).toBe(false);
-    },
-  );
+  // 裁定 b(2026-10-25 常驻闭环验收):排队的用户输入必须先于 idle 驱动器的下一
+  // 回合执行。旧闸门用 targetStatus ∈ {null, complete} 把普通 queue 压在整个目标
+  // 后面(验收复现:active 目标三轮驱动器回合先跑,用户消息等 complete 后才提升)。
+  // 驱动器已在空闲沿对非空用户队列让位,目标状态不再参与排队顺序(闸门签名随之
+  // 去掉 targetStatus);verifier 在途由 sessionBusy(前台执行)挡住。held
+  // (autoDrain=false)与 dispatch 占用语义不变。
+  it("空闲会话照常自动消费(目标状态不再参与排队顺序)", () => {
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: true,
+        dispatchState: "queued",
+        sessionBusy: false,
+      }),
+    ).toBe(true);
+  });
 
-  it.each([null, "complete"] as const)(
-    "target=%s 时保留既有 ready 自动消费语义",
-    (targetStatus) => {
-      expect(
-        shouldAutoDrainV4QueueHead({
-          autoDrain: true,
-          dispatchState: "queued",
-          sessionBusy: false,
-          targetStatus,
-        }),
-      ).toBe(true);
-    },
-  );
+  it("held 队列(autoDrain=false)不自动消费", () => {
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: false,
+        dispatchState: "queued",
+        sessionBusy: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("busy 会话(verifier/回合成败未知)不自动消费", () => {
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: true,
+        dispatchState: "queued",
+        sessionBusy: true,
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["reserved", "promoting"] as const)("dispatchState=%s 不自动消费", (dispatchState) => {
+    expect(
+      shouldAutoDrainV4QueueHead({
+        autoDrain: true,
+        dispatchState,
+        sessionBusy: false,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("v4 原生 sendQueuedNow", () => {
