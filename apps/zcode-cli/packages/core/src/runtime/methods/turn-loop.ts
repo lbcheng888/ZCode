@@ -21,8 +21,9 @@ import {
   buildRuntimeProviderRequestMessages,
   prepareRuntimeProviderRequest,
   createCompactRapidRefillError,
+  getDueTodoReminderTurnsSinceWrite,
+  hasOpenTodoItems,
   throwIfTurnAborted,
-  shouldBuildTodoReminder,
 } from "../helpers/index.js";
 import {
   systemReminderAttachmentEntry,
@@ -42,6 +43,7 @@ import {
 import type { RegularTurnLoopState } from "./turn-loop-state.js";
 import { consumeSettledProjectMemoryRecall } from "../helpers/project-memory-recall.js";
 import { consumePendingProjectMemoryUpdate } from "../helpers/project-memory-dream.js";
+import { isMainAgentTaskType } from "../helpers/project-memory.js";
 import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../../memory/project-memory-retrieval-branch.js";
 import {
   appendTurnRequestEntries,
@@ -154,24 +156,36 @@ export async function runRegularTurnLoop(
         systemReminderAttachmentEntry("runtime_mode", runtimeModeReminderBody),
       ]);
     }
-    if (
+    // todo 提醒只服务会话主 agent：按 taskType 排除子代理与 workflow 子会话。不能用
+    // parentSessionId 判断——fork / selection_side_chat 主会话同样带它（session-fork 的父子
+    // 事实），会误伤用户可直接交互的主会话。这是行为变化——此前 Explore 等子代理也会收到该
+    // 提醒；依据是对齐 kimi-code 仅在 MAIN_AGENT_ID 注册 todoListReminder。
+    const todoReminderEligible =
       !outputTokenRecoveryActive &&
-      tools.some((tool) => tool.name === "TodoWrite") &&
-      shouldBuildTodoReminder(state.turnRequestState.entries)
-    ) {
+      isMainAgentTaskType(this.config.taskType) &&
+      tools.some((tool) => tool.name === "TodoWrite");
+    const dueTodoReminderTurns = todoReminderEligible
+      ? getDueTodoReminderTurnsSinceWrite(state.turnRequestState.entries)
+      : null;
+    if (dueTodoReminderTurns !== null) {
       const currentTodos = await this.readSessionTodosForContext(state.turnTraceContext);
-      const reminderBody = buildTodoReminderBody(currentTodos);
-      commitTurnRequestEntries(this, state.turnRequestState, [
-        systemReminderAttachmentEntry("todo_reminder", reminderBody),
-      ]);
-      await this.persistSyntheticUserNoticeForSession({
-        messageID: createMessageId(),
-        metadata: { runtimeMessage: todoReminderRuntimeMetadata() },
-        sessionId: this.sessionId,
-        source: "todo_reminder",
-        text: reminderBody,
-        traceContext: state.turnTraceContext,
-      });
+      // 空清单或全部 completed 时没有可提醒的开放项：只提醒“该更新清单”，不提醒“该建清单”。
+      // 未提醒时 cadence 不重置，同一 turn 的后续 model step 会再次读到同一结论（单次有索引的
+      // SELECT）；这里刻意不缓存“无开放项”，避免为 TodoWrite 中途清表引入缓存失效状态。
+      if (hasOpenTodoItems(currentTodos)) {
+        const reminderBody = buildTodoReminderBody(currentTodos, dueTodoReminderTurns);
+        commitTurnRequestEntries(this, state.turnRequestState, [
+          systemReminderAttachmentEntry("todo_reminder", reminderBody),
+        ]);
+        await this.persistSyntheticUserNoticeForSession({
+          messageID: createMessageId(),
+          metadata: { runtimeMessage: todoReminderRuntimeMetadata() },
+          sessionId: this.sessionId,
+          source: "todo_reminder",
+          text: reminderBody,
+          traceContext: state.turnTraceContext,
+        });
+      }
     }
     const outputStyleReminderBody =
       state.modelStepCount === 0

@@ -23,7 +23,7 @@ import {
   type ProjectMemoryAgentContext,
 } from "./project-memory-agent.js";
 import { invalidateProjectMemoryRecallPaths } from "./project-memory-recall.js";
-import { isMainMemoryTaskType, resolveEnabledProjectMemoryRoot } from "./project-memory.js";
+import { isMainAgentTaskType, resolveEnabledProjectMemoryRoot } from "./project-memory.js";
 
 const DREAM_MINIMUM_TRANSCRIPT_SESSIONS = 5;
 const DREAM_MAX_TURNS = 50;
@@ -45,7 +45,7 @@ export function selectProjectDreamSessions(input: {
 
   return input.sessions.filter((session) => {
     if (session.id === input.currentSessionId) return false;
-    if (!isMainMemoryTaskType(session.taskType)) return false;
+    if (!isMainAgentTaskType(session.taskType)) return false;
     if (workspaceIdentity) return session.workspaceID === workspaceIdentity;
     return resolve(session.directory) === workspacePath;
   });

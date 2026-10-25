@@ -56,6 +56,7 @@ import { hydrateMessageHistoryFromSession } from "../src/agent/session-history-h
 import { DEFAULT_MODEL_REQUEST_MEDIA_BUDGET_BYTES } from "../src/runtime/helpers/media-budget.js";
 import { MAX_TURN_STEER_INPUT_BYTES } from "../src/runtime/helpers/steering.js";
 import { projectIdFromDirectory } from "../src/runtime/helpers/project.js";
+import { TODO_REMINDER_CONFIG } from "../src/runtime/helpers/runtime-reminders.js";
 import { InMemoryRuntimeTaskRegistry } from "../src/runtime-task/registry.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import { BackgroundTaskTracker } from "../src/tool/executor/background-tasks.js";
@@ -6109,10 +6110,10 @@ describe("AgentRuntime tool loop", () => {
       .map((part) => part.text);
 
     expect(contextText).not.toContain("Current session todo state (authoritative):");
-    expect(contextText).not.toContain("The TodoWrite tool hasn't been used recently.");
+    expect(contextText).not.toContain("The TodoWrite tool hasn't been updated in the last");
     expect(persistedTexts.join("\n")).not.toContain("Current session todo state (authoritative):");
     expect(persistedTexts.join("\n")).not.toContain(
-      "The TodoWrite tool hasn't been used recently.",
+      "The TodoWrite tool hasn't been updated in the last",
     );
   });
 
@@ -6154,35 +6155,259 @@ describe("AgentRuntime tool loop", () => {
           priority: "high",
           status: "in_progress",
         },
+        {
+          content: "Land the change",
+          priority: "medium",
+          status: "completed",
+        },
       ],
     });
 
-    for (let index = 0; index < 10; index++) {
+    for (let index = 0; index < TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
       await runtime.executeTurn(`warmup ${index}`);
     }
     await runtime.executeTurn("cadence due");
     await runtime.executeTurn("cadence should not repeat");
 
-    const dueRequestText = providerMessagesToText(requests[10]!);
-    const nextRequestText = providerMessagesToText(requests[11]!);
+    const dueRequestText = providerMessagesToText(
+      requests[TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE]!,
+    );
+    const nextRequestText = providerMessagesToText(
+      requests[TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE + 1]!,
+    );
     const persistedTodoReminders = (await sessionStore.messages({ sessionID: sessionId }))
       .flatMap((message) => message.parts)
       .filter((part) => part.type === "text" && part.synthetic)
       .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
 
-    expect(dueRequestText).toContain("The TodoWrite tool hasn't been used recently.");
-    expect(dueRequestText).toContain("1. [in_progress] Review prompt trajectory output");
-    expect(dueRequestText).not.toContain("Current session todo state (authoritative):");
-    expect(dueRequestText.match(/The TodoWrite tool hasn't been used recently\./g)).toHaveLength(1);
-    expect(nextRequestText.match(/The TodoWrite tool hasn't been used recently\./g)).toHaveLength(
-      1,
+    expect(dueRequestText).toContain(
+      `The TodoWrite tool hasn't been updated in the last ${TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE} steps (1/2 done, "Review prompt trajectory output" still in_progress).`,
     );
+    expect(dueRequestText).toContain("1. [in_progress] Review prompt trajectory output");
+    expect(dueRequestText).toContain("2. [completed] Land the change");
+    expect(dueRequestText).not.toContain("Current session todo state (authoritative):");
+    expect(
+      dueRequestText.match(/The TodoWrite tool hasn't been updated in the last/g),
+    ).toHaveLength(1);
+    expect(
+      nextRequestText.match(/The TodoWrite tool hasn't been updated in the last/g),
+    ).toHaveLength(1);
     expect(persistedTodoReminders).toHaveLength(1);
     expect(persistedTodoReminders[0]?.text).toContain(
-      "The TodoWrite tool hasn't been used recently.",
+      "The TodoWrite tool hasn't been updated in the last",
     );
     expect(persistedTodoReminders[0]?.text).not.toContain("<system-reminder>");
     expect(persistedTodoReminders[0]?.text).not.toContain("</system-reminder>");
+  });
+
+  it("does not inject todo reminders when every todo item is completed", async () => {
+    const sessionId = createSessionId("runtime-todo-reminder-no-open-item");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[][] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-todo-reminder-no-open-item" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: `answer ${requests.length}`,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await sessionStore.updateTodos({
+      sessionID: sessionId,
+      todos: [
+        {
+          content: "Already finished",
+          priority: "high",
+          status: "completed",
+        },
+      ],
+    });
+
+    for (let index = 0; index <= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+      await runtime.executeTurn(`turn ${index}`);
+    }
+
+    const finalRequestText = providerMessagesToText(requests.at(-1)!);
+    const persistedTodoReminders = (await sessionStore.messages({ sessionID: sessionId }))
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type === "text" && part.synthetic)
+      .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
+
+    expect(finalRequestText).not.toContain("The TodoWrite tool hasn't been updated in the last");
+    expect(persistedTodoReminders).toHaveLength(0);
+  });
+
+  it.each(["subagent_child", "workflow_child"] as const)(
+    "does not inject todo reminders into child agent runtimes (%s)",
+    async (taskType) => {
+      const sessionId = createSessionId(`runtime-todo-reminder-${taskType}`);
+      const eventStore = createTestSessionEventStore();
+      const sessionStore = new RecordingSessionStore();
+      const requests: any[][] = [];
+
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          mode: "build",
+          parentSessionId: createSessionId(`runtime-todo-reminder-${taskType}-parent`),
+          taskType,
+          workingDirectory: `/tmp/zcode-todo-reminder-${taskType}`,
+        },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory({
+            async generateText(request: any) {
+              requests.push(withoutAgentListingMessages(request.messages));
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: `answer ${requests.length}`,
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          } as never),
+          sessionStore,
+        },
+      );
+
+      await sessionStore.updateTodos({
+        sessionID: sessionId,
+        todos: [
+          {
+            content: "Stale child agent todo",
+            priority: "medium",
+            status: "in_progress",
+          },
+        ],
+      });
+
+      for (let index = 0; index <= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+        await runtime.executeTurn(`turn ${index}`);
+      }
+
+      const finalRequestText = providerMessagesToText(requests.at(-1)!);
+      const persistedTodoReminders = (await sessionStore.messages({ sessionID: sessionId }))
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === "text" && part.synthetic)
+        .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
+
+      expect(finalRequestText).not.toContain("The TodoWrite tool hasn't been updated in the last");
+      expect(persistedTodoReminders).toHaveLength(0);
+    },
+  );
+
+  it.each(["fork", "selection_side_chat"] as const)(
+    "keeps todo reminders in main sessions that carry a parent session (%s)",
+    async (taskType) => {
+      const sessionId = createSessionId(`runtime-todo-reminder-main-${taskType}`);
+      const eventStore = createTestSessionEventStore();
+      const sessionStore = new RecordingSessionStore();
+      const requests: any[][] = [];
+
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          mode: "build",
+          parentSessionId: createSessionId(`runtime-todo-reminder-main-${taskType}-parent`),
+          taskType,
+          workingDirectory: `/tmp/zcode-todo-reminder-main-${taskType}`,
+        },
+        {
+          eventStore,
+          modelFactory: createTestModelFactory({
+            async generateText(request: any) {
+              requests.push(withoutAgentListingMessages(request.messages));
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: `answer ${requests.length}`,
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          } as never),
+          sessionStore,
+        },
+      );
+
+      await sessionStore.updateTodos({
+        sessionID: sessionId,
+        todos: [
+          {
+            content: "Keep the forked todo visible",
+            priority: "high",
+            status: "in_progress",
+          },
+        ],
+      });
+
+      for (let index = 0; index <= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+        await runtime.executeTurn(`turn ${index}`);
+      }
+
+      const finalRequestText = providerMessagesToText(requests.at(-1)!);
+      const persistedTodoReminders = (await sessionStore.messages({ sessionID: sessionId }))
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === "text" && part.synthetic)
+        .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
+
+      expect(finalRequestText).toContain("The TodoWrite tool hasn't been updated in the last");
+      expect(finalRequestText).toContain("1. [in_progress] Keep the forked todo visible");
+      expect(persistedTodoReminders).toHaveLength(1);
+    },
+  );
+
+  it("does not inject todo reminders when the session has no todo list", async () => {
+    const sessionId = createSessionId("runtime-todo-reminder-empty-list");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[][] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-todo-reminder-empty-list" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(withoutAgentListingMessages(request.messages));
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: `answer ${requests.length}`,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    for (let index = 0; index <= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+      await runtime.executeTurn(`turn ${index}`);
+    }
+
+    const finalRequestText = providerMessagesToText(requests.at(-1)!);
+    const persistedTodoReminders = (await sessionStore.messages({ sessionID: sessionId }))
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type === "text" && part.synthetic)
+      .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
+
+    expect(finalRequestText).not.toContain("The TodoWrite tool hasn't been updated in the last");
+    expect(persistedTodoReminders).toHaveLength(0);
   });
 
   it("does not inject todo reminders when TodoWrite is not exposed", async () => {
@@ -6236,7 +6461,7 @@ describe("AgentRuntime tool loop", () => {
       .filter((part) => part.type === "text" && part.synthetic)
       .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
 
-    expect(finalRequestText).not.toContain("The TodoWrite tool hasn't been used recently.");
+    expect(finalRequestText).not.toContain("The TodoWrite tool hasn't been updated in the last");
     expect(finalRequestText).not.toContain("Current session todo state (authoritative):");
     expect(persistedTodoReminders).toHaveLength(0);
   });
@@ -6379,7 +6604,18 @@ describe("AgentRuntime tool loop", () => {
       },
     );
 
-    for (let index = 0; index < 11; index++) {
+    await sessionStore.updateTodos({
+      sessionID: sessionId,
+      todos: [
+        {
+          content: "Keep the resumed plan visible",
+          priority: "high",
+          status: "in_progress",
+        },
+      ],
+    });
+
+    for (let index = 0; index <= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
       await firstRuntime.executeTurn(`first runtime ${index}`);
     }
 
@@ -6416,9 +6652,9 @@ describe("AgentRuntime tool loop", () => {
       .filter((part) => part.type === "text" && part.synthetic)
       .filter((part) => part.metadata?.runtimeMessage?.source === "todo_reminder");
 
-    expect(resumeRequestText.match(/The TodoWrite tool hasn't been used recently\./g)).toHaveLength(
-      1,
-    );
+    expect(
+      resumeRequestText.match(/The TodoWrite tool hasn't been updated in the last/g),
+    ).toHaveLength(1);
     expect(persistedTodoReminders).toHaveLength(1);
   });
 

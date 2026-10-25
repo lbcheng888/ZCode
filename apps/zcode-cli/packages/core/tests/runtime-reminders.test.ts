@@ -12,9 +12,10 @@ import {
   buildRepeatedToolCallReminderBody,
   buildToolCallBudgetReminderBody,
   formatConversationForkNoticeBody,
+  getDueTodoReminderTurnsSinceWrite,
   getTodoReminderTurnCounts,
+  hasOpenTodoItems,
   runtimeMetadataForSyntheticUserMessageSource,
-  shouldBuildTodoReminder,
 } from "../src/runtime/helpers/index.js";
 import {
   legacySyntheticRuntimeMetadata,
@@ -159,35 +160,102 @@ describe("runtime request reminders", () => {
       })),
     ];
 
-    expect(shouldBuildTodoReminder(entries)).toBe(true);
+    expect(getDueTodoReminderTurnsSinceWrite(entries)).toBe(
+      TODO_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
+    );
   });
 
-  it("omits todo list details when a due reminder has no current todos", () => {
-    const body = buildTodoReminderBody([]);
-    expect(body).toContain("The TodoWrite tool hasn't been used recently.");
+  it("holds todo reminders until both thresholds are reached within 5 steps", () => {
+    const assistantTurns = Array.from({ length: 5 }, (_, index) => ({
+      message: { role: "assistant" as const, content: `assistant turn ${index}` },
+    }));
+
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns.slice(0, 4))).toBeNull();
+    expect(getDueTodoReminderTurnsSinceWrite(assistantTurns)).toBe(5);
+
+    const recentReminder = [
+      {
+        message: { role: "user" as const, content: "recent todo reminder" },
+        metadata: { source: "todo_reminder" as const },
+      },
+      ...assistantTurns.slice(0, 4),
+    ];
+    expect(getDueTodoReminderTurnsSinceWrite(recentReminder)).toBeNull();
+  });
+
+  it("keeps reminders only for todo lists with open items", () => {
+    expect(hasOpenTodoItems([])).toBe(false);
+    expect(hasOpenTodoItems([{ content: "done", priority: "high", status: "completed" }])).toBe(
+      false,
+    );
+    expect(hasOpenTodoItems([{ content: "queued", priority: "high", status: "pending" }])).toBe(
+      true,
+    );
+    expect(
+      hasOpenTodoItems([{ content: "current", priority: "high", status: "in_progress" }]),
+    ).toBe(true);
+  });
+
+  it("omits todo list details when the body is rendered without todos", () => {
+    const body = buildTodoReminderBody([], 5);
+    expect(body).toContain(
+      "The TodoWrite tool hasn't been updated in the last 5 steps (0/0 done, none in_progress).",
+    );
     expect(body).not.toContain("<system-reminder>");
-    expect(body).toContain("Only use it if it's relevant to the current work.");
-    expect(body).toContain("ignore if not applicable");
+    expect(body).toContain("This is just a gentle reminder - ignore if not applicable.");
     expect(body).not.toContain("Here are the existing contents of your todo list:");
     expect(body).not.toContain("[pending]");
   });
 
-  it("builds an aligned todo reminder without the old authoritative todo_state wording", () => {
-    const body = buildTodoReminderBody([
-      {
-        content: "Review prompt trajectory output",
-        priority: "high",
-        status: "in_progress",
-      },
-    ]);
-    expect(body).toContain("1. [in_progress] Review prompt trajectory output");
-    expect(body).not.toContain("<system-reminder>");
-    expect(body).toContain("The TodoWrite tool hasn't been used recently.");
-    expect(body).toContain("Only use it if it's relevant to the current work.");
-    expect(body).toContain("ignore if not applicable");
+  it("builds a todo reminder with steps, done/total, the in_progress item and the full list", () => {
+    const body = buildTodoReminderBody(
+      [
+        {
+          content: "Review prompt trajectory output",
+          priority: "high",
+          status: "in_progress",
+        },
+        {
+          content: "Write the regression test",
+          priority: "medium",
+          status: "completed",
+        },
+        {
+          content: "Land the change",
+          priority: "low",
+          status: "pending",
+        },
+      ],
+      7,
+    );
+
+    expect(body).toContain(
+      'The TodoWrite tool hasn\'t been updated in the last 7 steps (1/3 done, "Review prompt trajectory output" still in_progress).',
+    );
     expect(body).toContain("Here are the existing contents of your todo list:");
+    expect(body).toContain("1. [in_progress] Review prompt trajectory output");
+    expect(body).toContain("2. [completed] Write the regression test");
+    expect(body).toContain("3. [pending] Land the change");
+    expect(body).not.toContain("<system-reminder>");
     expect(body).not.toContain("Current session todo state (authoritative):");
     expect(body).not.toContain("source=");
+  });
+
+  it("reports none in_progress and every parallel in_progress item", () => {
+    const noCurrent = buildTodoReminderBody(
+      [{ content: "Land the change", priority: "low", status: "pending" }],
+      5,
+    );
+    expect(noCurrent).toContain("(0/1 done, none in_progress)");
+
+    const parallel = buildTodoReminderBody(
+      [
+        { content: "Agent A", priority: "high", status: "in_progress" },
+        { content: "Agent B", priority: "high", status: "in_progress" },
+      ],
+      5,
+    );
+    expect(parallel).toContain('(0/2 done, "Agent A", "Agent B" still in_progress)');
   });
 
   it("builds date change reminder with no-user-mention wording", () => {

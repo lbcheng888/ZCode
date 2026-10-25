@@ -14,6 +14,7 @@ import type { AgentRuntimeInternal } from "../../core/src/runtime/internal.js";
 import { createTestAgentRuntime } from "../../core/tests/test-agent-runtime.js";
 import { createTestModelFactory } from "../../core/tests/test-runtime-model.js";
 import { createTestSessionEventStore } from "../../core/tests/test-event-store.js";
+import { TODO_REMINDER_CONFIG } from "../../core/src/runtime/helpers/runtime-reminders.js";
 import type { ZCodeApp } from "../src/app/types.js";
 import { V4CommandExecutor } from "../src/zcode-protocol-v4/commands/executor.js";
 import type {
@@ -84,9 +85,22 @@ it.each([
     };
     try {
       await runtime.executeTurn(PREFIX);
-      // 使用真实提醒收集：十轮未使用 TodoWrite 后，下一轮自动保存 Todo reminder。
+      // 使用真实提醒收集：TodoWrite 清单连续 TURNS_SINCE_WRITE 个 assistant 步未更新后，
+      // 下一轮（即 INPUT 轮）自动保存 Todo reminder。清单必须留有开放项，否则新门槛不会提醒。
       if (reminder === "todo") {
-        for (let index = 1; index < 10; index++) await runtime.executeTurn(`warmup ${index}`);
+        await store.updateTodos({
+          sessionID: sessionId,
+          todos: [
+            {
+              content: "Keep the retried todo visible",
+              priority: "high",
+              status: "in_progress",
+            },
+          ],
+        });
+        for (let index = 1; index < TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE; index++) {
+          await runtime.executeTurn(`warmup ${index}`);
+        }
       }
       toolSearchEnabled = reminder === "toolsearch";
       const original = await runtime.executeTurn(INPUT);

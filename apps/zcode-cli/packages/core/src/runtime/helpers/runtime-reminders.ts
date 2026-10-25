@@ -79,8 +79,10 @@ const PLAN_MODE_EXIT_REMINDER = [
 ];
 
 export const TODO_REMINDER_CONFIG = Object.freeze({
-  TURNS_SINCE_WRITE: 10,
-  TURNS_BETWEEN_REMINDERS: 10,
+  // 对齐 kimi-code（agent-core-v2 的 todoListReminder 为 5/5）：清单陈旧 5 步后就开始与真实
+  // 进度脱节，继续拿陈旧清单执行（漏标完成、重复做已完成项）的代价高于每 5 步一次提醒的噪音。
+  TURNS_SINCE_WRITE: 5,
+  TURNS_BETWEEN_REMINDERS: 5,
 });
 
 export interface TodoReminderTurnCounts {
@@ -164,17 +166,44 @@ export function getTodoReminderTurnCounts(
   };
 }
 
-export function shouldBuildTodoReminder(entries: readonly RuntimeMessageEntry[]): boolean {
+/**
+ * cadence 到期时返回“距上次 TodoWrite 的 assistant 步数”（一个 assistant turn 通常对应一次
+ * model step），未到期返回 null。返回值直接用于正文的进度播报，调用方不必为拿步数再扫一遍历史。
+ */
+export function getDueTodoReminderTurnsSinceWrite(
+  entries: readonly RuntimeMessageEntry[],
+): number | null {
   const counts = getTodoReminderTurnCounts(entries);
-  return (
-    counts.turnsSinceLastTodoWrite >= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE &&
+  return counts.turnsSinceLastTodoWrite >= TODO_REMINDER_CONFIG.TURNS_SINCE_WRITE &&
     counts.turnsSinceLastReminder >= TODO_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS
-  );
+    ? counts.turnsSinceLastTodoWrite
+    : null;
 }
 
-export function buildTodoReminderBody(todos: readonly TodoItem[]): string {
+/**
+ * 只有清单里还有开放项（非 completed）时提醒才有意义：提醒的目的是推动陈旧清单更新，
+ * 不是催促模型新建清单。空清单与全部 completed 都视为没有开放项而早退
+ * （对齐 kimi-code todoListStaleReminder 的 todoProgress(todos).open === 0 早退）。
+ */
+export function hasOpenTodoItems(todos: readonly TodoItem[]): boolean {
+  return todos.some((todo) => todo.status !== "completed");
+}
+
+export function buildTodoReminderBody(
+  todos: readonly TodoItem[],
+  turnsSinceLastWrite: number,
+): string {
+  const completedCount = todos.filter((todo) => todo.status === "completed").length;
+  const inProgress = todos
+    .filter((todo) => todo.status === "in_progress")
+    .map((todo) => `"${todo.content}"`);
+  const progress = `${completedCount}/${todos.length} done`;
+  const status =
+    inProgress.length === 0
+      ? `${progress}, none in_progress`
+      : `${progress}, ${inProgress.join(", ")} still in_progress`;
   const lines = [
-    "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.",
+    `The TodoWrite tool hasn't been updated in the last ${turnsSinceLastWrite} steps (${status}). If an item is finished, mark it done now; the TodoWrite call can go in the same response as your next tool call. If the list no longer matches the current work, rewrite or clear it. This is just a gentle reminder - ignore if not applicable.`,
   ];
   if (todos.length > 0) {
     const currentTodos = `[${formatTodoListForReminder(todos).join("\n")}]`;
