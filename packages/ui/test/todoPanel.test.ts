@@ -121,4 +121,40 @@ describe("TodoPanel", () => {
     expect(html).toMatch(/<button[^>]*aria-expanded="false"/);
     expect(html).not.toContain('data-slot="plan-header" role="button"');
   });
+
+  it("folds a long list into a +N row and keeps the inProgress item visible", () => {
+    const items = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `pending-${index}`,
+        status: "pending" as const,
+        content: `待处理事项 ${index}`,
+      })),
+      { id: "active", status: "inProgress" as const, content: "正在处理的事项" },
+    ];
+
+    const html = renderWithTooltipProvider(
+      createElement(TodoPanel, { isStreaming: true, plan: planState(items), defaultOpen: true }),
+    );
+
+    // 11 个未完成项 → 展示上限 8 项，折叠成 +3。
+    expect(html).toContain("+3");
+    expect(html).toContain("正在处理的事项");
+    // inProgress 优先进入可见窗口，不会被长清单挤出。
+    expect(html).toContain("待处理事项 0");
+    expect(html).not.toContain("待处理事项 9");
+  });
+
+  it("does not render the +N row when the list fits the window", () => {
+    const html = renderWithTooltipProvider(
+      createElement(TodoPanel, {
+        isStreaming: false,
+        plan: planState([
+          { id: "step-1", status: "inProgress", content: "正在处理的事项" },
+          { id: "step-2", status: "pending", content: "下一步" },
+        ]),
+      }),
+    );
+
+    expect(html).not.toMatch(/\+\d/);
+  });
 });

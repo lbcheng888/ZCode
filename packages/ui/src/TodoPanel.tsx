@@ -28,6 +28,9 @@ const todoStatusIndicatorClasses: Record<PlanItem["status"], string> = {
   completed: "text-success",
 };
 
+// 长清单窗口化上限：超出部分折叠成 +N 计数，避免把 composer 顶出视口。
+const MAX_VISIBLE_ITEMS = 8;
+
 const todoStatusContentClassesStreaming: Record<PlanItem["status"], string> = {
   pending: "text-foreground-subtle",
   inProgress: "animated-gradient-text",
@@ -54,13 +57,16 @@ export function TodoPanel({
   plan,
   isStreaming,
   className,
+  defaultOpen = false,
 }: {
   plan: PlanState | null;
   isStreaming: boolean;
   className?: string;
+  /** 仅用于测试与快照:面板默认收起,生产调用方不传。 */
+  defaultOpen?: boolean;
 }) {
   const { intl } = useZCodeIntl();
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(defaultOpen);
 
   // 数据源换成 v4 投影快照（docs/v4-refactor/11-deletion-plan.md：保留外观、数据源换 projection），
   // 面板不再接受第二份 todo 类型，composer 上方进度条与状态面板消费同一份 snapshot.plan。
@@ -80,6 +86,14 @@ export function TodoPanel({
   // Bugfix: 展开态之前会把 completed 项继续画出来，只是加删除线；完成项越多面板越长。
   // 这里仅保留未完成项，让 todo 面板专注显示还需要关注的后续工作。
   const visibleItems = items.filter((item) => item.status !== "completed");
+  // 清单很长时整列表会把 composer 顶出视口：优先保留 inProgress 项（按原顺序），
+  // 其余按原顺序补足上限，超出部分折叠成一行 +N（计数语言中立，不需要新增 i18n 键）。
+  const prioritizedItems = [
+    ...visibleItems.filter((item) => item.status === "inProgress"),
+    ...visibleItems.filter((item) => item.status !== "inProgress"),
+  ];
+  const shownItems = prioritizedItems.slice(0, MAX_VISIBLE_ITEMS);
+  const hiddenItemCount = prioritizedItems.length - shownItems.length;
   const activeItem =
     items.find((item) => item.status === "inProgress") ??
     items.find((item) => item.status !== "completed") ??
@@ -173,7 +187,7 @@ export function TodoPanel({
       </PlanHeader>
       <PlanContent className="p-1">
         <QueueList className="mt-0">
-          {visibleItems.map((item) => (
+          {shownItems.map((item) => (
             <QueueItem
               key={item.id}
               className="gap-0 w-full rounded-lg px-3 py-2 hover:bg-hover/30"
@@ -192,6 +206,15 @@ export function TodoPanel({
               </div>
             </QueueItem>
           ))}
+          {hiddenItemCount > 0 ? (
+            <QueueItem className="gap-0 w-full rounded-lg px-3 py-2">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="shrink-0 pl-1 font-mono text-ui-base text-foreground-subtlest">
+                  {`+${hiddenItemCount}`}
+                </span>
+              </div>
+            </QueueItem>
+          ) : null}
         </QueueList>
       </PlanContent>
     </Plan>
