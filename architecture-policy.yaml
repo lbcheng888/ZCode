@@ -903,3 +903,9 @@ exceptions:
       - apps/zcode-cli/packages/core/src/runtime/helpers/goal-layer.ts
       - apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts
     reason: The goal-layer gray flag needs one CLI resolver and one runtime reader helper, and flag-off restores the pre-change continuation loop that the redesign had removed (long-horizon-goal-redesign-plan §4.1-§4.3); no existing module boundary moves and adopting the whole zcode-cli runtime needs a separate refactor.
+  - id: composer-status-chips-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - packages/ui/src/v4/composer/ComposerStatusChips.tsx
+      - packages/ui/src/v4/statusPanelTodoWindow.ts
+    reason: The composer status chip row and its todo focus-window helper are new files in the unmanaged ui module; they replace the removed status-panel todo section without moving any existing module boundary, and adopting the whole ui package needs a separate refactor.

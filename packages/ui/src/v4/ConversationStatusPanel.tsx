@@ -1,13 +1,11 @@
 /* oxlint-disable eslint(max-lines) -- 状态面板同时维护收起态摘要、展开态分区、菜单策略和宽度自适应，同文件能保证两种形态共享同一内容优先级。 */
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
 import {
-  forwardRef,
   memo,
   useCallback,
   useEffect,
   useMemo,
   useState,
-  type ComponentPropsWithoutRef,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -17,10 +15,8 @@ import {
   BotIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
-  ChevronLeftIcon,
   ChevronRightIcon,
   CircleCheckBigIcon,
-  CircleIcon,
   EllipsisIcon,
   FileDiffIcon,
   GoalIcon,
@@ -70,7 +66,6 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.js";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card.js";
 import { ControlHintTooltip } from "@/ControlHintTooltip.js";
 import { formatBackgroundTaskElapsedLabel } from "@/BackgroundTaskElapsedLabel.js";
 import { GitActionMenu } from "@/GitActionMenu.js";
@@ -587,231 +582,6 @@ function GoalStatusSection({
   );
 }
 
-function PlanStatusIcon({ status }: { status: PlanState["items"][number]["status"] }) {
-  if (status === "completed") {
-    return (
-      <CheckCircle2Icon
-        aria-hidden
-        className="mt-0.5 size-3.5 shrink-0 text-[var(--color-success)]"
-      />
-    );
-  }
-  if (status === "inProgress") {
-    return (
-      <ArrowRightIcon
-        aria-hidden
-        className="mt-0.5 size-3.5 shrink-0 text-[var(--color-foreground)]"
-      />
-    );
-  }
-  return (
-    <CircleIcon
-      aria-hidden
-      className="mt-0.5 size-3.5 shrink-0 text-[var(--color-foreground-subtlest)]"
-    />
-  );
-}
-
-const COMPACT_TODO_THRESHOLD = 6;
-const TODO_FOCUS_WINDOW_SIZE = 3;
-
-export interface StatusPanelTodoFocusWindow {
-  compact: boolean;
-  precedingItems: PlanState["items"];
-  focusItems: PlanState["items"];
-  followingItems: PlanState["items"];
-}
-
-export function getStatusPanelTodoFocusWindow(
-  items: PlanState["items"],
-): StatusPanelTodoFocusWindow {
-  if (items.length <= COMPACT_TODO_THRESHOLD) {
-    return {
-      compact: false,
-      precedingItems: [],
-      focusItems: items,
-      followingItems: [],
-    };
-  }
-
-  const runningIndex = items.findIndex((item) => item.status === "inProgress");
-  const firstUnfinishedIndex = items.findIndex((item) => item.status !== "completed");
-  const focusIndex =
-    runningIndex >= 0
-      ? runningIndex
-      : firstUnfinishedIndex >= 0
-        ? firstUnfinishedIndex
-        : Math.max(0, items.length - TODO_FOCUS_WINDOW_SIZE);
-  // 只取“当前 + 后两条”会让靠近列表末尾的当前项只剩一两条上下文。
-  // 从前面回补可以让精简窗口在项目数足够时始终保持三条，同时不改变 snapshot 原序。
-  const focusStartIndex = Math.max(0, Math.min(focusIndex, items.length - TODO_FOCUS_WINDOW_SIZE));
-  const focusEndIndex = Math.min(items.length, focusStartIndex + TODO_FOCUS_WINDOW_SIZE);
-
-  return {
-    compact: true,
-    precedingItems: items.slice(0, focusStartIndex),
-    focusItems: items.slice(focusStartIndex, focusEndIndex),
-    followingItems: items.slice(focusEndIndex),
-  };
-}
-
-function PlanStatusItemRows({ items }: { items: PlanState["items"] }) {
-  return items.map((item) => (
-    <li
-      key={item.id}
-      data-plan-status={item.status}
-      className="flex min-h-8 items-start gap-2 rounded-lg px-2 py-1.5 text-ui-base hover:bg-[var(--color-hover)]"
-    >
-      <PlanStatusIcon status={item.status} />
-      <span
-        title={item.content}
-        className={cn(
-          "line-clamp-2 min-w-0 flex-1 break-words leading-5",
-          item.status === "completed"
-            ? "text-[var(--color-foreground-subtlest)] line-through"
-            : "text-[var(--color-foreground)]",
-        )}
-      >
-        {item.content}
-      </span>
-    </li>
-  ));
-}
-
-const TodoPreviewTrigger = forwardRef<
-  HTMLButtonElement,
-  ComponentPropsWithoutRef<"button"> & {
-    group: "preceding" | "following";
-    label: string;
-    open: boolean;
-    onTouchOpen: () => void;
-  }
->(function TodoPreviewTrigger({ group, label, onClick, onTouchOpen, open, ...buttonProps }, ref) {
-  return (
-    <button
-      {...buttonProps}
-      ref={ref}
-      type="button"
-      aria-expanded={open}
-      data-status-todo-preview-trigger={group}
-      className="flex h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-left text-ui-base text-[var(--color-foreground-subtle)] hover:bg-[var(--color-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-input-border-focused)]"
-      onClick={(event) => {
-        onClick?.(event);
-        // HoverCard 在桌面由 hover/focus 驱动；仅无 hover 输入补充点击打开，
-        // 避免桌面点击把已经由 hover 打开的预览反向关闭。
-        if (
-          !event.defaultPrevented &&
-          typeof window !== "undefined" &&
-          window.matchMedia?.("(hover: none)").matches
-        ) {
-          onTouchOpen();
-        }
-      }}
-    >
-      <ChevronLeftIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0 truncate">{label}</span>
-    </button>
-  );
-});
-
-type TodoPreviewGroup = "preceding" | "following";
-
-function TodoHiddenGroupPreview({
-  group,
-  items,
-  onOpenChange,
-  open,
-  popoverSide,
-}: {
-  group: TodoPreviewGroup;
-  items: PlanState["items"];
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-  popoverSide: "bottom" | "left";
-}) {
-  const { intl } = useZCodeIntl();
-  const messageId =
-    group === "preceding"
-      ? items.every((item) => item.status === "completed")
-        ? "chat.statusPanel.todoCompletedFold"
-        : "chat.statusPanel.todoEarlierFold"
-      : items.every((item) => item.status === "pending")
-        ? "chat.statusPanel.todoWaitingFold"
-        : "chat.statusPanel.todoLaterFold";
-  const label = intl.formatMessage({ id: messageId }, { count: String(items.length) });
-
-  return (
-    <HoverCard closeDelay={80} open={open} openDelay={120} onOpenChange={onOpenChange}>
-      <HoverCardTrigger asChild>
-        <TodoPreviewTrigger
-          group={group}
-          label={label}
-          open={open}
-          onTouchOpen={() => onOpenChange(true)}
-        />
-      </HoverCardTrigger>
-      <HoverCardContent
-        align="start"
-        side={popoverSide}
-        sideOffset={4}
-        data-status-todo-preview-content={group}
-        className="w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-xl border border-[var(--color-popover-border)] bg-[var(--color-menu)] p-3 shadow-md ring-0"
-      >
-        <div className="flex max-h-[min(24rem,calc(100dvh-2rem))] min-w-0 flex-col">
-          <p className="flex h-8 shrink-0 items-center px-2 text-ui-base text-[var(--color-foreground-subtle)]">
-            {label}
-          </p>
-          <ul className="min-h-0 space-y-0 overflow-y-auto pr-1">
-            <PlanStatusItemRows items={items} />
-          </ul>
-        </div>
-      </HoverCardContent>
-    </HoverCard>
-  );
-}
-
-function PlanStatusItems({
-  plan,
-  popoverSide,
-}: {
-  plan: NonNullable<ConversationStatusPanelModel["plan"]>;
-  popoverSide: "bottom" | "left";
-}) {
-  const [openPreviewGroup, setOpenPreviewGroup] = useState<TodoPreviewGroup | null>(null);
-  const window = getStatusPanelTodoFocusWindow(plan.displayItems);
-  const handlePreviewOpenChange = (group: TodoPreviewGroup, open: boolean) => {
-    setOpenPreviewGroup((current) => (open ? group : current === group ? null : current));
-  };
-
-  return (
-    <ul className="space-y-0 pb-1">
-      {window.compact && window.precedingItems.length > 0 ? (
-        <li>
-          <TodoHiddenGroupPreview
-            group="preceding"
-            items={window.precedingItems}
-            open={openPreviewGroup === "preceding"}
-            onOpenChange={(open) => handlePreviewOpenChange("preceding", open)}
-            popoverSide={popoverSide}
-          />
-        </li>
-      ) : null}
-      <PlanStatusItemRows items={window.focusItems} />
-      {window.compact && window.followingItems.length > 0 ? (
-        <li>
-          <TodoHiddenGroupPreview
-            group="following"
-            items={window.followingItems}
-            open={openPreviewGroup === "following"}
-            onOpenChange={(open) => handlePreviewOpenChange("following", open)}
-            popoverSide={popoverSide}
-          />
-        </li>
-      ) : null}
-    </ul>
-  );
-}
-
 function SessionPlansStatusSection({
   model,
   onOpenPlanDetail,
@@ -874,47 +644,6 @@ export function buildSessionPlanOpenRequest(
     markdown: item.markdown,
     ...(item.planFilePath ? { planFilePath: item.planFilePath } : {}),
   };
-}
-
-function PlanStatusSection({
-  model,
-  popoverSide,
-  separated,
-}: {
-  model: ConversationStatusPanelModel;
-  popoverSide: "bottom" | "left";
-  separated: boolean;
-}) {
-  const { intl } = useZCodeIntl();
-  const plan = model.plan;
-  if (!plan) return null;
-  const isCompleted = plan.totalCount > 0 && plan.completedCount >= plan.totalCount;
-
-  return (
-    <StatusSection
-      section="plan"
-      separated={separated}
-      title={intl.formatMessage({ id: "chat.statusPanel.todo" })}
-      trailing={() => (
-        <span
-          className={cn(
-            "tabular-nums",
-            isCompleted ? "text-[var(--color-success)]" : "text-[var(--color-foreground-subtle)]",
-          )}
-        >
-          {plan.completedCount}/{plan.totalCount}
-        </span>
-      )}
-    >
-      <PlanStatusItems
-        key={plan.displayItems
-          .map((item) => `${item.id}\u0000${item.content}\u0000${item.status}`)
-          .join("\u0001")}
-        plan={plan}
-        popoverSide={popoverSide}
-      />
-    </StatusSection>
-  );
 }
 
 function RunningWorkCancelButton({
@@ -1958,7 +1687,9 @@ function ConversationStatusPanelImpl({
   const canRenderGit = Boolean(model.git && gitSummary && onRefreshGit);
   const canRenderGoal = Boolean(model.goal);
   const canRenderSessionPlans = Boolean(model.sessionPlans);
-  const canRenderPlan = Boolean(model.plan);
+  // 待办明细已迁到 composer 上方的「当前进度」chip（就地展开），状态面板不再渲染同一份清单；
+  // 保留该变量是为了让下方各分区的 separated 计算不必逐个改写。
+  const canRenderPlan = false;
   const canRenderTerminals = model.runningBashWorks.length > 0;
   // 已结束的 run 也开门（与 canRenderAgents 同判断）：重启后活动数为零，若只按它开门，
   // 通往 run 目录的唯一入口会连带消失。
@@ -2134,13 +1865,6 @@ function ConversationStatusPanelImpl({
                 parentSessionId={parentSessionId}
                 onOpenPlanDetail={onOpenPlanDetail}
                 separated={canRenderGit || canRenderGoal}
-              />
-            ) : null}
-            {canRenderPlan ? (
-              <PlanStatusSection
-                model={model}
-                popoverSide={useVerticalFloatingPanels ? "bottom" : "left"}
-                separated={canRenderGit || canRenderGoal || canRenderSessionPlans}
               />
             ) : null}
             {canRenderTerminals ? (

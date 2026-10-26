@@ -358,7 +358,7 @@ function renderPane({
     createElement(
       ZCodeIntlProvider,
       { initialLocale: "zh-CN" },
-      // TodoPanel 的折叠按钮走共享 ControlHintTooltip；生产环境由 Root 提供 provider，
+      // 状态 chip 行不依赖浮层 provider；此处保留用例确认渲染不抛错，生产环境由 Root 提供。
       // 这里补齐同一上下文，避免 SSR 直接渲染 pane 时缺少 Radix Tooltip Provider。
       createElement(
         TooltipProvider,
@@ -437,9 +437,8 @@ describe("SessionPane v4 chat layout parity", () => {
       expect(dockIndex).toBeGreaterThanOrEqual(0);
       expect(todoIndex).toBeGreaterThan(dockIndex);
       expect(composerIndex).toBeGreaterThan(todoIndex);
-      // 进度条复用 TodoPanel 的 completed/total 计数。
+      // 进度 chip 只给 completed/total；条目文本在 chip 展开面板里（组件测试覆盖）。
       expect(html).toContain("1/2");
-      expect(html).toContain("正在处理的事项");
     });
   }
 
@@ -453,7 +452,7 @@ describe("SessionPane v4 chat layout parity", () => {
     expect(emptyPlanHtml).not.toContain(TID_V4_TODO_PANEL);
   });
 
-  it("passes the pane running state to the todo strip", () => {
+  it("shows a running spinner on the progress chip while the pane is running", () => {
     const runningHtml = renderPane({
       snapshot: makeSnapshot({
         control: {
@@ -468,8 +467,8 @@ describe("SessionPane v4 chat layout parity", () => {
     });
     const idleHtml = renderPane({ snapshot: makeSnapshot({ plan: todoPlan() }) });
 
-    expect(runningHtml).toContain("animated-gradient-text");
-    expect(idleHtml).not.toContain("animated-gradient-text");
+    expect(runningHtml).toContain("animate-spin");
+    expect(idleHtml).not.toContain("animate-spin");
   });
 
   it("anchors the back-to-bottom control to the composer dock above input", () => {

@@ -11,7 +11,7 @@ import type {
   ToolCallRow,
   WorkflowRunState,
 } from "@zcode/shared/zcode-protocol-v4";
-import { getStatusPanelTodoFocusWindow } from "@/v4/ConversationStatusPanel.js";
+import { getStatusPanelTodoFocusWindow } from "@/v4/statusPanelTodoWindow.js";
 
 const statusPanelCapture = vi.hoisted(() => ({
   collapsibles: [] as Array<{
@@ -343,39 +343,6 @@ async function renderStatusPanel(props: Record<string, unknown>) {
 }
 
 describe("ConversationStatusPanel", () => {
-  it("uses vertical viewport-bound overlays only on mobile Web remote control", async () => {
-    const longPlan = planState({
-      items: Array.from({ length: 9 }, (_, index) => ({
-        id: String(index + 1),
-        content: `Todo ${index + 1}`,
-        status: index === 4 ? ("inProgress" as const) : ("pending" as const),
-      })),
-    });
-
-    statusPanelCapture.gitBranchSwitchers = [];
-    const mobileHtml = await renderStatusPanel({
-      isMobileViewport: true,
-      isWebRemoteControl: true,
-      plan: longPlan,
-      summaryPanelVariantOverride: "panel",
-    });
-    expect(statusPanelCapture.gitBranchSwitchers.at(-1)?.popoverSide).toBe("bottom");
-    expect(statusPanelCapture.gitBranchSwitchers.at(-1)?.popoverClassName).toContain(
-      "max-w-[calc(100vw-2rem)]",
-    );
-    expect(mobileHtml).toContain('data-side="bottom"');
-
-    statusPanelCapture.gitBranchSwitchers = [];
-    const desktopHtml = await renderStatusPanel({
-      isMobileViewport: false,
-      isWebRemoteControl: false,
-      plan: longPlan,
-      summaryPanelVariantOverride: "panel",
-    });
-    expect(statusPanelCapture.gitBranchSwitchers.at(-1)?.popoverSide).toBe("left");
-    expect(desktopHtml).toContain('data-side="left"');
-  });
-
   it("goal 计时器只在活动态起一次：投影换一个等值的 goal 对象不重建 interval，暂停即拆掉", async () => {
     // 修订 2026-09-12：此前 effect 以整个 goal 对象为依赖，每个 goal 事件都同步 setNow 并重建
     // interval——落在投影帧的同步提交里，给 React 的嵌套更新计数记一笔（与工作流卡崩溃同形）。
@@ -421,78 +388,6 @@ describe("ConversationStatusPanel", () => {
     }
   });
 
-  it("uses neutral labels for mixed position buckets and keeps previews mutually exclusive", async () => {
-    statusPanelCapture.hoverCards = [];
-    const { ConversationStatusPanel } = await import("@/v4/ConversationStatusPanel.js");
-    const view = render(
-      createElement(ConversationStatusPanel, {
-        workspacePath: "/repo",
-        gitSummary: null,
-        summaryPanelVariantOverride: "panel",
-        plan: planState({
-          items: [
-            { id: "1", content: "Todo 1", status: "completed" },
-            { id: "2", content: "Todo 2", status: "completed" },
-            { id: "3", content: "Todo 3", status: "pending" },
-            { id: "4", content: "Todo 4", status: "pending" },
-            { id: "5", content: "Todo 5", status: "inProgress" },
-            { id: "6", content: "Todo 6", status: "pending" },
-            { id: "7", content: "Todo 7", status: "pending" },
-            { id: "8", content: "Todo 8", status: "pending" },
-            { id: "9", content: "Todo 9", status: "completed" },
-          ],
-        }),
-      }),
-    );
-
-    expect(view.container.textContent).toContain("chat.statusPanel.todoEarlierFold 4");
-    expect(view.container.textContent).toContain("chat.statusPanel.todoLaterFold 2");
-    let previews = statusPanelCapture.hoverCards.slice(-2);
-    expect(previews.map((preview) => preview.open)).toEqual([false, false]);
-
-    await act(async () => previews[0]?.onOpenChange?.(true));
-    previews = statusPanelCapture.hoverCards.slice(-2);
-    expect(previews.map((preview) => preview.open)).toEqual([true, false]);
-
-    await act(async () => previews[1]?.onOpenChange?.(true));
-    previews = statusPanelCapture.hoverCards.slice(-2);
-    expect(previews.map((preview) => preview.open)).toEqual([false, true]);
-    view.unmount();
-  });
-
-  it("renders all six Todos without fold controls at the compact threshold", async () => {
-    const html = await renderStatusPanel({
-      gitSummary: null,
-      gitWorktreeChangeSummary: null,
-      summaryPanelVariantOverride: "panel",
-      plan: planState({
-        items: Array.from({ length: 6 }, (_, index) => ({
-          id: String(index + 1),
-          content: `Todo ${index + 1}`,
-          status: index === 0 ? "completed" : "pending",
-        })),
-      }),
-    });
-
-    expect(html).toContain("Todo 1");
-    expect(html).toContain("Todo 6");
-    expect(html).not.toContain("data-status-todo-preview-trigger");
-  });
-
-  it("keeps the full long Todo content and title", async () => {
-    const content =
-      "检查包含多个测试项目的目录，逐项核对配置文件、依赖安装状态、测试入口和输出目录是否完整";
-    const html = await renderStatusPanel({
-      summaryPanelVariantOverride: "panel",
-      plan: planState({
-        items: [{ id: "long-todo", content, status: "inProgress" }],
-      }),
-    });
-
-    expect(html).toContain(`title="${content}"`);
-    expect(html).toContain(content);
-  });
-
   it("renders terminal plans newest-first and maps a row to the plan detail tab", async () => {
     const html = await renderStatusPanel({
       gitSummary: null,
@@ -534,33 +429,6 @@ describe("ConversationStatusPanel", () => {
     expect(html).toContain('data-state="collapsed"');
     expect(html).toContain("唯一计划");
     expect(html).toContain("chat.summaryPanel.showPanel");
-  });
-
-  it("orders expanded sections as Git, Goal, plans, Todo, terminals, workflows, and Agents", async () => {
-    const html = await renderStatusPanel({
-      summaryPanelVariantOverride: "panel",
-      goal: goalState(),
-      sessionPlans: [sessionPlan(4, "# 会话计划")],
-      plan: planState(),
-      backgroundWorks: [
-        backgroundWork({ kind: "bash" }),
-        backgroundWork({ workId: "dwfrun-1", kind: "workflow" }),
-      ],
-      workflowRuns: [workflowRunProjection()],
-      runningSubagents: [runningSubagent()],
-    });
-    const indexes = [
-      "environment",
-      "goal",
-      "sessionPlans",
-      "plan",
-      "terminal",
-      "workflow",
-      "agent",
-    ].map((section) => html.indexOf(`data-status-section="${section}"`));
-
-    expect(indexes.every((index) => index >= 0)).toBe(true);
-    expect(indexes).toEqual([...indexes].sort((left, right) => left - right));
   });
 
   it("renders the mini shell with one-line git summary", async () => {
@@ -1668,102 +1536,6 @@ describe("ConversationStatusPanel", () => {
       subagentType: "Explore",
       title: "探索渲染逻辑",
     });
-  });
-
-  it("bounds all six long status section types and keeps long Todos behind expansion", async () => {
-    const todoItems = Array.from({ length: 8 }, (_, index) => ({
-      id: `todo-${index + 1}`,
-      content: `Todo 第 ${index + 1} 项`,
-      status: index === 0 ? ("inProgress" as const) : ("pending" as const),
-    }));
-    const html = await renderStatusPanel({
-      summaryPanelVariantOverride: "panel",
-      goal: goalState({
-        iterations: Array.from({ length: 8 }, (_, index) => ({
-          iteration: index + 1,
-          updatedAt: 1_700_000_000_000 + index,
-          items: [],
-        })),
-      }),
-      sessionPlans: Array.from({ length: 8 }, (_, index) =>
-        sessionPlan(index + 1, `# 计划第 ${index + 1} 项`),
-      ),
-      plan: planState({ items: todoItems }),
-      backgroundWorks: [
-        backgroundWork({ workId: "bash-1", kind: "bash", title: "终端任务一" }),
-        backgroundWork({ workId: "bash-2", kind: "bash", title: "终端任务二" }),
-        backgroundWork({ workId: "dwfrun-1", kind: "workflow", title: "工作流一" }),
-      ],
-      workflowRuns: [workflowRunProjection()],
-      runningSubagents: [
-        runningSubagent({ childSessionId: "agent-1", title: "智能体一" }),
-        runningSubagent({ childSessionId: "agent-2", title: "智能体二" }),
-      ],
-      terminalSectionOpen: true,
-      workflowSectionOpen: true,
-      agentSectionOpen: true,
-    });
-
-    for (const section of ["goal", "sessionPlans", "plan", "terminal", "workflow", "agent"]) {
-      expect(html).toContain(`data-status-section-scroll="${section}"`);
-    }
-    expect(html).not.toContain('data-status-section-scroll="environment"');
-    expect(html).toContain("max-h-80 min-h-0 overflow-x-hidden overflow-y-auto pr-1");
-    expect(html).toContain("max-h-48 min-h-0 overflow-x-hidden overflow-y-auto pr-1");
-    expect(html).toContain("max-h-[min(64dvh,32rem)]");
-    expect(html).toContain(
-      "min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto p-2 flex",
-    );
-    for (const item of todoItems) {
-      expect(html).toContain(item.content);
-    }
-    expect(html).toContain('data-status-todo-preview-trigger="following"');
-    expect(html).toContain('data-status-todo-preview-content="following"');
-    expect(html).toContain('data-side="left"');
-    expect(html).toContain('data-align="start"');
-    expect(html).toContain('data-side-offset="4"');
-    expect(html).toContain("flex max-h-[min(24rem,calc(100dvh-2rem))] min-w-0 flex-col");
-    expect(html).toContain("min-h-0 space-y-0 overflow-y-auto pr-1");
-    expect(html).toContain("chat.statusPanel.todoWaitingFold 5");
-    expect(html).toContain(
-      "rounded-lg px-2 text-left text-ui-base text-[var(--color-foreground-subtle)]",
-    );
-    expect(statusPanelCapture.hoverCards).toContainEqual(
-      expect.objectContaining({
-        closeDelay: 80,
-        open: false,
-        openDelay: 120,
-      }),
-    );
-  });
-
-  it("keeps a long Agent viewport bounded beside short Progress and Plans sections", async () => {
-    const agents = Array.from({ length: 5 }, (_, index) =>
-      runningSubagent({
-        childSessionId: `mixed-agent-${index + 1}`,
-        title: `Background sleep agent ${index + 1}`,
-      }),
-    );
-    const html = await renderStatusPanel({
-      gitSummary: null,
-      gitWorktreeChangeSummary: null,
-      summaryPanelVariantOverride: "panel",
-      sessionPlans: [sessionPlan(1, "# 组合场景计划")],
-      plan: planState({
-        items: [{ id: "short-progress", content: "你好", status: "inProgress" }],
-      }),
-      runningSubagents: agents,
-      agentSectionOpen: true,
-    });
-
-    for (const section of ["sessionPlans", "plan", "agent"]) {
-      expect(html).toContain(`data-status-section-scroll="${section}"`);
-    }
-    for (const agent of agents) {
-      expect(html).toContain(agent.title);
-    }
-    expect(html).toContain("max-h-80 min-h-0 overflow-x-hidden overflow-y-auto pr-1");
-    expect(html).toContain("max-h-48 min-h-0 overflow-x-hidden overflow-y-auto pr-1");
   });
 
   it("maps the display mode menu back to nullable shell override", async () => {

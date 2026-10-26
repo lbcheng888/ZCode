@@ -1439,6 +1439,39 @@ export function getV4TodoPanelProjection(): Promise<V4TodoPanelProjection> {
   );
 }
 
+/**
+ * 展开「当前进度」chip、读取就地展开的明细文本，然后恢复收起状态。
+ * chip 只显示完成比，条目文本在展开面板里（与侧栏的待办分区互斥，同一份清单只有一个明细面）。
+ */
+export async function readV4TodoPanelDetailText(): Promise<string> {
+  const chipSelector = `[data-testid="${TID_V4_TODO_PANEL}"]`;
+  await browser.execute((selector) => {
+    const chip = document.querySelector<HTMLElement>(selector);
+    if (chip && chip.getAttribute("aria-expanded") !== "true") chip.click();
+  }, chipSelector);
+  let text = "";
+  try {
+    await browser.waitUntil(
+      async () => {
+        text = await browser.execute(() => {
+          const panel = document.querySelector<HTMLElement>(
+            '[data-composer-status-panel="progress"]',
+          );
+          return (panel?.innerText ?? "").replace(/\u00a0/g, " ");
+        });
+        return text !== "";
+      },
+      { timeout: 10_000, timeoutMsg: "todo 明细面板没有展开" },
+    );
+  } finally {
+    await browser.execute((selector) => {
+      const chip = document.querySelector<HTMLElement>(selector);
+      if (chip && chip.getAttribute("aria-expanded") === "true") chip.click();
+    }, chipSelector);
+  }
+  return text;
+}
+
 /** 等待 todo 面板出现并显示指定 `${completed}/${total}` 进度。 */
 export async function waitForV4TodoPanelRatio(
   ratio: string,

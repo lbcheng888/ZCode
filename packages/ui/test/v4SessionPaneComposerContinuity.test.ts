@@ -492,6 +492,10 @@ function installMinimalDom() {
     addEventListener: () => {},
     createElement: (tagName: string) =>
       createMinimalElement(documentMock as unknown as Document, tagName),
+    // composer 状态 chip 行渲染 lucide 图标（SVG）；极简 DOM 也要能建命名空间元素，
+    // 否则 React 走 createElementNS 时直接崩，与 composer 连续性无关。
+    createElementNS: (_namespace: string, tagName: string) =>
+      createMinimalElement(documentMock as unknown as Document, tagName),
     createTextNode: (nodeValue: string) => ({
       nodeType: 3,
       nodeValue,

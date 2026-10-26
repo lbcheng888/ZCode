@@ -6,6 +6,7 @@ import { restartIntoWorkspacePreservingProfile } from "../helpers/model-provider
 import {
   getV4PaneSnapshot,
   getV4TodoPanelProjection,
+  readV4TodoPanelDetailText,
   prepareV4ConversationE2E,
   selectV4TaskById,
   sendV4Prompt,
@@ -62,8 +63,10 @@ describe("v4 conversation todo 面板", () => {
     );
     expect(livePanel.completed).toBe(0);
     expect(livePanel.total).toBe(2);
-    expect(livePanel.text).toContain(ACTIVE_ITEM);
-    expect(livePanel.text).not.toContain(PENDING_ITEM);
+    // 展开面板给的是「未完成清单」：当前项与待处理项都会出现（这正是明细面存在的意义）。
+    const liveDetail = await readV4TodoPanelDetailText();
+    expect(liveDetail).toContain(ACTIVE_ITEM);
+    expect(liveDetail).toContain(PENDING_ITEM);
     expect(livePanel.inComposerDock).toBe(true);
     expect(livePanel.beforeComposer).toBe(true);
     await waitForV4Pane(
@@ -91,9 +94,11 @@ describe("v4 conversation todo 面板", () => {
     );
     expect(updatedPanel.completed).toBe(2);
     expect(updatedPanel.total).toBe(3);
-    expect(updatedPanel.text).toContain(NEXT_ITEM);
-    expect(updatedPanel.text).not.toContain(ACTIVE_ITEM);
-    expect(updatedPanel.text).not.toContain(PENDING_ITEM);
+    const updatedDetail = await readV4TodoPanelDetailText();
+    expect(updatedDetail).toContain(NEXT_ITEM);
+    // 第二次写入把前两项都标成 completed：未完成清单里只剩新项。
+    expect(updatedDetail).not.toContain(ACTIVE_ITEM);
+    expect(updatedDetail).not.toContain(PENDING_ITEM);
     await waitForV4TimelineContaining("TODO_WRITE_2_OK", 60_000);
     await waitForV4Pane((snapshot) => !snapshot.canStop, "第二个 TodoWrite turn 没有结束", 60_000);
     expect((await getV4PaneSnapshot()).sessionId).toBe(sessionId);
@@ -107,7 +112,7 @@ describe("v4 conversation todo 面板", () => {
       "重启冷恢复后 todo 面板没有恢复 2/3 进度",
       60_000,
     );
-    expect(resumedPanel.text).toContain(NEXT_ITEM);
+    expect(await readV4TodoPanelDetailText()).toContain(NEXT_ITEM);
     expect(resumedPanel.inComposerDock).toBe(true);
     expect(resumedPanel.beforeComposer).toBe(true);
 

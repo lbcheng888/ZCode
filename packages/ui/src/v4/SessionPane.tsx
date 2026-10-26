@@ -191,7 +191,7 @@ import { ConversationDraftEmptyState } from "@/v4/ConversationDraftEmptyState.js
 import { ConversationDraftSuggestedPromptsContainer } from "@/v4/ConversationDraftSuggestedPromptsContainer.js";
 import { ConversationHeader, type PaneWorkspaceBadge } from "@/v4/ConversationHeader.js";
 import { ConversationQueuePanel } from "@/v4/ConversationQueuePanel.js";
-import { TodoPanel } from "@/TodoPanel.js";
+import { ComposerStatusChips } from "@/v4/composer/ComposerStatusChips.js";
 import { projectPendingGuideQueue } from "@/v4/pendingGuideProjection.js";
 import { ConversationQuotaBanner } from "@/v4/ConversationQuotaBanner.js";
 import { PendingCommandRecoveryBanner } from "@/v4/PendingCommandRecoveryBanner.js";
@@ -5628,17 +5628,12 @@ export function SessionPane({
           }
         />
       ) : null}
-      {/* TodoWrite 状态芯片紧贴 composer 上方：桌面 continuous 与手机 replayable 共用同一
-          bottom dock，只消费 snapshot.plan（唯一 todo 投影），不新增第二份 todo 状态。
-          芯片只给「当前任务 + 完成比」，明细统一由会话状态面板的待办分区承担；点击芯片
-          展开状态面板，避免两处同时渲染同一份清单。浮窗/草稿态不挂载。 */}
-      {!isDraft && !isFloatingPresentation && snapshot?.plan ? (
-        <TodoPanel
-          plan={snapshot.plan}
-          isStreaming={isRunning}
-          className="mb-2"
-          onRevealDetail={() => handleSummaryPanelVariantChange("panel")}
-        />
+      {/* composer 上方状态 chip 行（目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度）：
+          桌面 continuous 与手机 replayable 共用同一 bottom dock，数据全部来自状态面板模型
+          （snapshot.plan 是唯一的 todo 投影，没有第二份状态）。每颗 chip 一行摘要，点开
+          就地展开明细；侧栏不再渲染待办分区，避免同一份清单出现两个明细面。 */}
+      {!isDraft && !isFloatingPresentation ? (
+        <ComposerStatusChips model={statusPanelModel} isStreaming={isRunning} className="mb-2" />
       ) : null}
       {composerNode}
       {/* 办公模式显示主动任务推荐；编程模式保留原有小型场景入口。 */}
