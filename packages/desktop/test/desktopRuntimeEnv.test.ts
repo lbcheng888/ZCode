@@ -168,6 +168,10 @@ const originalDesktopUserDataDir = process.env["ZCODE_DESKTOP_USER_DATA_DIR"];
 const originalDesktopSessionDataDir = process.env["ZCODE_DESKTOP_SESSION_DATA_DIR"];
 const originalDesktopUseElectronDefaultUserData =
   process.env["ZCODE_DESKTOP_USE_ELECTRON_DEFAULT_USER_DATA"];
+const originalZCodeHome = process.env["ZCODE_HOME"];
+const originalCuaBundledHelperAppPath = process.env["ZCODE_CUA_BUNDLED_HELPER_APP_PATH"];
+const originalCuaHelperAllowUnsignedLocal = process.env["ZCODE_CUA_HELPER_ALLOW_UNSIGNED_LOCAL"];
+const originalCuaProductHelper = process.env["ZCODE_CUA_PRODUCT_HELPER"];
 const originalCwd = process.cwd();
 const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, "resourcesPath");
 const createdDirs: string[] = [];
@@ -178,6 +182,14 @@ function restoreEnvValue(key: string, value: string | undefined) {
     return;
   }
   process.env[key] = value;
+}
+
+function resetResourcesPath() {
+  if (originalResourcesPathDescriptor) {
+    Object.defineProperty(process, "resourcesPath", originalResourcesPathDescriptor);
+    return;
+  }
+  Reflect.deleteProperty(process, "resourcesPath");
 }
 
 // Bugfix: 开发机 shell（如 ~/.codegeex/mamba profile）常注入 NO_PROXY/SSL_CERT_FILE 等代理证书
@@ -434,6 +446,11 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
     delete process.env["ZCODE_BASE_URL"];
     delete process.env["ZCODE_ENDPOINT_ORIGIN"];
     delete process.env["ZCODE_DYNAMIC_WORKFLOW_MODE"];
+    delete process.env["ZCODE_HOME"];
+    delete process.env["ZCODE_CUA_BUNDLED_HELPER_APP_PATH"];
+    delete process.env["ZCODE_CUA_HELPER_ALLOW_UNSIGNED_LOCAL"];
+    delete process.env["ZCODE_CUA_PRODUCT_HELPER"];
+    resetResourcesPath();
     productFlavorMock.value = "preview";
     process.chdir(originalCwd);
   });
@@ -459,11 +476,11 @@ describe("desktopRuntimeEnv buildHostProcessEnv", () => {
     restoreEnvValue("ZAI_OAUTH_ORIGIN", originalZaiOAuthOrigin);
     restoreEnvValue("ZAI_BUSINESS_BASE_URL", originalZaiBusinessBaseUrl);
     restoreEnvValue("ZAI_OAUTH_CLIENT_ID", originalZaiOAuthClientId);
-    if (originalResourcesPathDescriptor) {
-      Object.defineProperty(process, "resourcesPath", originalResourcesPathDescriptor);
-    } else {
-      Reflect.deleteProperty(process, "resourcesPath");
-    }
+    restoreEnvValue("ZCODE_HOME", originalZCodeHome);
+    restoreEnvValue("ZCODE_CUA_BUNDLED_HELPER_APP_PATH", originalCuaBundledHelperAppPath);
+    restoreEnvValue("ZCODE_CUA_HELPER_ALLOW_UNSIGNED_LOCAL", originalCuaHelperAllowUnsignedLocal);
+    restoreEnvValue("ZCODE_CUA_PRODUCT_HELPER", originalCuaProductHelper);
+    resetResourcesPath();
 
     process.chdir(originalCwd);
     for (const dir of createdDirs.splice(0).reverse()) {
