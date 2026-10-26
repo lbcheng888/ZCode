@@ -1,4 +1,4 @@
-// goal/compact 命令组：compact / sendGoalCommand / pauseGoal / resumeGoal。
+// goal/compact 命令组：compact / sendGoalCommand / pauseGoal / resumeGoal / clearGoal。
 // 语义自旧 server-operations compactSession/goalSession/continueGoalAfterChange 搬运，
 // 决策逻辑（compact 去重 / active turn barrier / goal 续跑）直驱 core，不经旧协议 op。
 //
@@ -388,6 +388,46 @@ async function pauseGoal(
 }
 
 /**
+ * clearGoal：取消目标（旧 goalSession action:"clear"）。
+ *
+ * 破坏性动作，两道约束：
+ * 1. 运行中拒绝而不是 abort——ActiveTurnKind 只有 regular/compact/rewind，无法区分
+ *    goal 续跑与用户消息；abort 会误杀用户主动发送的 turn。旧 clear 同样走
+ *    ensureNoActiveTurn。busy projection 可能早于 controller 登记，因此同时看 inputRouting。
+ * 2. 只 disarm、不 abort：清理后预约/在途写入会因读不到 target 自然落空
+ *    （finishSessionTargetRun 早返回、TargetChanged 仅在 targetID 相等时发）。
+ * 无 target → 幂等成功（旧协议路径返回 "No goal to clear."，不改状态）。
+ */
+async function clearGoal(
+  host: V4CommandCoreHost,
+  envelope: CommandEnvelope,
+): Promise<CommandResult | undefined> {
+  const record = requireRecord(host, envelope.sessionId);
+  const routingMode = host.getInputRoutingMode?.(record.app.sessionId) ?? null;
+  if (
+    record.activeAbortController ||
+    record.app.runtime.getActiveTurnInfo() ||
+    routingMode === "enqueue" ||
+    routingMode === "guide"
+  ) {
+    throw new V4GoalCompactRejectedError(
+      "activeTurn",
+      "Cannot clear the goal while a turn is running",
+    );
+  }
+  const cleared = await record.app.clearTarget();
+  if (!cleared) {
+    host.logger?.info?.("v4 clearGoal without target, noop", {
+      commandId: envelope.commandId,
+      sessionId: record.app.sessionId,
+    });
+    return undefined;
+  }
+  await host.afterLegacyStateMutation?.(record, "goal_cleared");
+  return undefined;
+}
+
+/**
  * resumeGoal：paused → active（stopPausesActiveGoalTarget 的逆操作）。
  * 无 target → 幂等成功（旧协议路径返回 "No goal to resume." 且不改状态，不抛错）。
  */
@@ -497,4 +537,4 @@ async function runGoalContinuationInBackground(
   await host.afterLegacyStateMutation?.(record, mutationReason);
 }
 
-export const goalCompactHandlers = { compact, pauseGoal, resumeGoal, sendGoalCommand };
+export const goalCompactHandlers = { compact, clearGoal, pauseGoal, resumeGoal, sendGoalCommand };

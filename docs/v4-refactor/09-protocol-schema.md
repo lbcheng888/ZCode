@@ -133,6 +133,7 @@ interface SessionActionAvailability {
   queueEdit: ActionAvailability;
   sendQueuedNow: ActionAvailability;
   resumeGoal: ActionAvailability;
+  clearGoal?: ActionAvailability; // additive：旧 CLI 缺省 = 不可用
 }
 
 interface RowActions {

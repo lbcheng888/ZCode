@@ -5723,7 +5723,36 @@ describe("goal 状态机", () => {
     });
     expect(snapshot.plan?.items).toHaveLength(2);
     expect(snapshot.availability.pauseGoal).toEqual({ allowed: true });
+    expect(snapshot.availability.clearGoal).toEqual({ allowed: true });
     expect(() => conversationSnapshotSchema.parse(snapshot)).not.toThrow();
+  });
+
+  it("availability.clearGoal：无目标回 noGoalToClear，目标存在（含 verified）即可清", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    expect(runAll(log.events).projection.getSnapshot().availability.clearGoal).toEqual({
+      allowed: false,
+      reasonCode: "noGoalToClear",
+    });
+
+    log.push(SessionEventType.TargetChanged, {
+      action: "set",
+      source: "command",
+      target: goalTarget("active"),
+    });
+    expect(runAll(log.events).projection.getSnapshot().availability.clearGoal).toEqual({
+      allowed: true,
+    });
+
+    // verified（= 产品态 complete）也必须可清，否则只能靠 replace 覆盖。
+    log.push(SessionEventType.TargetChanged, {
+      action: "status_updated",
+      source: "command",
+      target: goalTarget("verified"),
+    });
+    expect(runAll(log.events).projection.getSnapshot().availability.clearGoal).toEqual({
+      allowed: true,
+    });
   });
 
   it("TodosUpdated：写库事件在 turn 结束后仍收敛 plan，且不自行推进 goal iteration", () => {

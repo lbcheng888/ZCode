@@ -151,6 +151,10 @@ export function computeAvailability(context: AvailabilityContext): SessionAction
       goalStatus === "paused"
         ? ALLOWED
         : denied(goalStatus === null ? "noGoalToResume" : "goalNotPaused"),
+    // clearGoal 是破坏性动作，但没有「不可清」的产品态：active/paused/verifying/verified/
+    // notSatisfied/failed 都允许清（complete 也必须可清，否则只能靠 replace 覆盖）。
+    // 运行中拒绝由 handler 的 activeTurn 闸门回 ACK failed，不在这里按 phase 关闸。
+    clearGoal: goalStatus !== null ? ALLOWED : denied("noGoalToClear"),
   };
 }
 

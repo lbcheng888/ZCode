@@ -662,6 +662,10 @@ export const TID_V4_RENAME_INPUT = "v4-rename-input";
 export const TID_V4_RENAME_SUBMIT = "v4-rename-submit";
 /** v4 goal 状态横幅（objective + status，sendGoalCommand/resumeGoal 效果投影） */
 export const TID_V4_GOAL_BANNER = "v4-goal-banner";
+/** v4 取消目标二次确认弹层（clearGoal 的唯一确认入口） */
+export const TID_V4_GOAL_CLEAR_CONFIRM = "v4-goal-clear-confirm";
+/** v4 取消目标确认按钮（危险色；确认后才 dispatch clearGoal） */
+export const TID_V4_GOAL_CLEAR_CONFIRM_ACCEPT = "v4-goal-clear-confirm-accept";
 /** v4 会话删除按钮（deleteSession 命令；删除后回 draft） */
 export const TID_V4_DELETE_SESSION = "v4-delete-session";
 /** v4 后台工作面板（backgroundWorks 投影） */

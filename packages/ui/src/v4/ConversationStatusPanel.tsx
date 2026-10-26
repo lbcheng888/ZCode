@@ -27,6 +27,7 @@ import {
   PlayIcon,
   SquareIcon,
   SquareTerminalIcon,
+  Trash2Icon,
   Workflow,
 } from "lucide-react";
 import {
@@ -138,6 +139,8 @@ export interface ConversationStatusPanelProps {
   onOpenGitReview?: (sourceId?: GitChangeSourceId) => void;
   onPauseGoal?: () => void;
   onResumeGoal?: () => void;
+  /** 取消目标（破坏性）：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
+  onClearGoal?: () => void;
   onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
   onOpenBackgroundBash?: (work: BackgroundWorkSummary) => void;
   onCancelBackgroundWork?: (workId: string) => void;
@@ -459,11 +462,13 @@ function GoalStatusSection({
   model,
   onPauseGoal,
   onResumeGoal,
+  onClearGoal,
   separated,
 }: {
   model: ConversationStatusPanelModel;
   onPauseGoal?: () => void;
   onResumeGoal?: () => void;
+  onClearGoal?: () => void;
   separated: boolean;
 }) {
   const { intl } = useZCodeIntl();
@@ -523,6 +528,22 @@ function GoalStatusSection({
       className="size-4 shrink-0 text-[var(--color-success)]"
     />
   ) : null;
+  // 取消目标对任何 goal 产品态都可用（含 verified）；是否可点由父层 availability.clearGoal 关闸。
+  const clearAction = onClearGoal ? (
+    <ControlHintTooltip title={intl.formatMessage({ id: "chat.target.cancel" })} side="left">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="size-6 shrink-0 text-[var(--color-danger)] hover:text-[var(--color-danger)]"
+        data-goal-action="clear"
+        aria-label={intl.formatMessage({ id: "chat.target.cancel" })}
+        onClick={onClearGoal}
+      >
+        <Trash2Icon className="size-3.5" />
+      </Button>
+    </ControlHintTooltip>
+  ) : null;
 
   return (
     <StatusSection
@@ -537,8 +558,10 @@ function GoalStatusSection({
           >
             {elapsed}
           </span>
-          {control ? <span className="shrink-0">·</span> : null}
+          {control || clearAction ? <span className="shrink-0">·</span> : null}
           {control}
+          {control && clearAction ? <span className="shrink-0">·</span> : null}
+          {clearAction}
         </>
       )}
     >
@@ -1632,6 +1655,7 @@ function ConversationStatusPanelImpl({
   onOpenGitReview,
   onPauseGoal,
   onResumeGoal,
+  onClearGoal,
   onOpenPlanDetail,
   onOpenBackgroundBash,
   onCancelBackgroundWork,
@@ -1857,6 +1881,7 @@ function ConversationStatusPanelImpl({
                 separated={canRenderGit}
                 onPauseGoal={onPauseGoal}
                 onResumeGoal={onResumeGoal}
+                onClearGoal={onClearGoal}
               />
             ) : null}
             {canRenderSessionPlans ? (

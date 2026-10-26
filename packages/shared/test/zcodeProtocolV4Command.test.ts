@@ -608,6 +608,7 @@ describe("zcode-protocol-v4 command", () => {
         "pauseGoal",
         "reorderQueueItem",
         "resumeGoal",
+        "clearGoal",
         "retryTurn",
         "sendQueuedNow",
         "setAssistantFeedback",
@@ -617,6 +618,24 @@ describe("zcode-protocol-v4 command", () => {
         "switchModelConfig",
       ].sort(),
     );
+  });
+
+  it("clearGoal 是 CAS 命令：缺 baseRevision 的 envelope 被拒", () => {
+    const base = {
+      commandId: "cmd-clear-goal",
+      clientId: "desktop-1",
+      sessionId: "s-1",
+      type: "clearGoal" as const,
+      payload: {},
+      issuedAt: 1000,
+    };
+    expect(parseCommandEnvelope(base).ok).toBe(false);
+    const parsed = parseCommandEnvelope({ ...base, baseRevision: 4 });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.envelope.type).toBe("clearGoal");
+      expect(parsed.envelope.payload).toEqual({});
+    }
   });
 
   it("parses persisted Highspeed completion metrics", () => {

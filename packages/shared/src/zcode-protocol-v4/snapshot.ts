@@ -162,6 +162,9 @@ export const sessionActionAvailabilitySchema = z.object({
   sendQueuedNow: actionAvailabilitySchema,
   pauseGoal: actionAvailabilitySchema,
   resumeGoal: actionAvailabilitySchema,
+  // additive（optional 兼容）：旧 CLI 的快照没有该键，客户端必须按「不可用」处理，
+  // 而不是解析失败或乐观显示取消入口。
+  clearGoal: actionAvailabilitySchema.optional(),
 });
 export type SessionActionAvailability = z.infer<typeof sessionActionAvailabilitySchema>;
 

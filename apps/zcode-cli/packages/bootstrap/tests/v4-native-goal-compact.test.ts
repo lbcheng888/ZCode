@@ -31,6 +31,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
     updateTargetStatus: vi
       .fn()
       .mockResolvedValue({ targetID: "g1", objective: "旧目标", status: "active" }),
+    clearTarget: vi.fn().mockResolvedValue(false),
     continueActiveTarget: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
@@ -509,9 +510,85 @@ describe("v4 原生 pauseGoal", () => {
   });
 });
 
+describe("v4 原生 clearGoal", () => {
+  it("正路径：clearTarget + goal_cleared，不 abort 也不续跑", async () => {
+    const app = makeApp({
+      readTarget: vi
+        .fn()
+        .mockResolvedValue({ targetID: "g1", objective: "旧目标", status: "active" }),
+      clearTarget: vi.fn().mockResolvedValue(true),
+    });
+    const record = makeRecord({ app });
+    const host = makeHost(record);
+
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("clearGoal", {})),
+    ).resolves.toBeUndefined();
+
+    expect(app.clearTarget).toHaveBeenCalledTimes(1);
+    expect(app.updateTargetStatus).not.toHaveBeenCalled();
+    expect(app.continueActiveTarget).not.toHaveBeenCalled();
+    expect(record.activeAbortController).toBeUndefined();
+    expect(host.legacyMutations).toEqual(["goal_cleared"]);
+  });
+
+  it("无 target：幂等成功，不广播", async () => {
+    const app = makeApp({ clearTarget: vi.fn().mockResolvedValue(false) });
+    const host = makeHost(makeRecord({ app }));
+
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("clearGoal", {})),
+    ).resolves.toBeUndefined();
+
+    expect(app.clearTarget).toHaveBeenCalledTimes(1);
+    expect(host.legacyMutations).toEqual([]);
+  });
+
+  it("active turn 存在：activeTurn 拒绝，不删 target", async () => {
+    const app = makeApp({ clearTarget: vi.fn().mockResolvedValue(true) });
+    const record = makeRecord({ app, activeAbortController: new AbortController() });
+
+    await expect(
+      new V4CommandExecutor(makeHost(record)).execute(envelope("clearGoal", {})),
+    ).rejects.toMatchObject({ reasonCode: "activeTurn" });
+
+    expect(app.clearTarget).not.toHaveBeenCalled();
+  });
+
+  it("runtime 已登记 active turn（controller 尚未登记）：同样拒绝", async () => {
+    const app = makeApp({
+      clearTarget: vi.fn().mockResolvedValue(true),
+      runtime: {
+        getActiveTurnInfo: vi.fn().mockReturnValue({ kind: "regular" }),
+        setExecutionState: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await expect(
+      new V4CommandExecutor(makeHost(makeRecord({ app }))).execute(envelope("clearGoal", {})),
+    ).rejects.toMatchObject({ reasonCode: "activeTurn" });
+
+    expect(app.clearTarget).not.toHaveBeenCalled();
+  });
+
+  it("goal verifier busy routing（无 steerable turn）：按 activeTurn 拒绝，不 abort", async () => {
+    const app = makeApp({ clearTarget: vi.fn().mockResolvedValue(true) });
+    const record = makeRecord({ app });
+    const host = makeHost(record, { getInputRoutingMode: () => "enqueue" });
+
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("clearGoal", {})),
+    ).rejects.toMatchObject({ reasonCode: "activeTurn" });
+
+    expect(app.clearTarget).not.toHaveBeenCalled();
+    expect(host.legacyMutations).toEqual([]);
+  });
+});
+
 describe("supports 分流（goal/compact 组）", () => {
-  it("pauseGoal 已原生", () => {
+  it("pauseGoal / clearGoal 已原生", () => {
     const executor = new V4CommandExecutor(makeHost(makeRecord()));
     expect(executor.supports("pauseGoal")).toBe(true);
+    expect(executor.supports("clearGoal")).toBe(true);
   });
 });

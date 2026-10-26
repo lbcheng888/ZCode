@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GoalState, PlanItem } from "@zcode/shared/zcode-protocol-v4";
 import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
 import type { ConversationStatusPanelModel } from "../src/v4/conversationStatusPanelModel.js";
@@ -58,6 +60,8 @@ function model(overrides: Partial<ConversationStatusPanelModel> = {}): Conversat
 }
 
 describe("ComposerStatusChips", () => {
+  afterEach(cleanup);
+
   it("renders the progress chip with completed/total and no item text", () => {
     const html = renderToStaticMarkup(createElement(ComposerStatusChips, { model: model() }));
 
@@ -120,6 +124,38 @@ describe("ComposerStatusChips", () => {
     expect(html).toContain('data-composer-status-panel="goal"');
     expect(html).toContain("完成竖切目标");
     expect(html).toContain("2m");
+  });
+
+  it("goal panel offers cancel (callback only) and close (view only)", () => {
+    const onCancelGoal = vi.fn();
+    const { container } = render(
+      createElement(ComposerStatusChips, {
+        model: model({ goal: goal("active") }),
+        defaultOpenChip: "goal",
+        onCancelGoal,
+      }),
+    );
+    expect(container.querySelector('[data-composer-status-panel="goal"]')).not.toBeNull();
+    // 关闭只收起就地展开的面板：不发命令，也不触发取消目标。
+    fireEvent.click(container.querySelector('[data-goal-action="close"]')!);
+    expect(container.querySelector('[data-composer-status-panel="goal"]')).toBeNull();
+    expect(onCancelGoal).not.toHaveBeenCalled();
+
+    // 再点 chip 展开后，取消目标只把意图交给父层（父层负责二次确认与 dispatch）。
+    fireEvent.click(screen.getByText("chat.statusPanel.goal").closest("button")!);
+    fireEvent.click(container.querySelector('[data-goal-action="clear"]')!);
+    expect(onCancelGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the goal cancel entry when no handler is provided (old CLI availability)", () => {
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, {
+        model: model({ goal: goal("active") }),
+        defaultOpenChip: "goal",
+      }),
+    );
+    expect(html).not.toContain('data-goal-action="clear"');
+    expect(html).toContain('data-goal-action="close"');
   });
 
   it("counts running background bash and agents, and hides them at zero", () => {

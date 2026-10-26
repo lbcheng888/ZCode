@@ -5828,6 +5828,14 @@ const enUS: Record<string, string> = {
   "chat.target.pause": "Pause goal",
   "chat.target.resume": "Resume goal",
   "chat.target.clear": "Clear goal",
+  "chat.target.cancel": "Cancel goal",
+  "chat.target.cancelTitle": "Cancel this goal?",
+  "chat.target.cancelDescription":
+    "The goal's progress and budget will be removed and cannot be restored. Conversation history is kept.",
+  "chat.target.cancelFailed": "Failed to cancel goal: {reason}",
+  "chat.target.cancelLockedByTurn":
+    "A turn is running. Finish or stop it before canceling the goal.",
+  "chat.target.closePanel": "Close goal panel",
   "chat.summaryPanel.title": "Status",
   "chat.summaryPanel.duration.hours": "h",
   "chat.summaryPanel.duration.minutes": "m",

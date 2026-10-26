@@ -1,5 +1,14 @@
 import { useMemo, useState } from "react";
-import { Bot, FileText, ListTodo, LoaderIcon, Target, TerminalSquare } from "lucide-react";
+import {
+  Bot,
+  FileText,
+  ListTodo,
+  LoaderIcon,
+  Target,
+  TerminalSquare,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { cn } from "@/components/lib/utils.js";
 import {
@@ -44,6 +53,7 @@ export function ComposerStatusChips({
   model,
   isStreaming = false,
   defaultOpenChip = null,
+  onCancelGoal,
   className,
 }: {
   model: ConversationStatusPanelModel;
@@ -51,12 +61,16 @@ export function ComposerStatusChips({
   isStreaming?: boolean;
   /** 仅测试与快照:初始展开某颗 chip，生产调用方不传（默认全收起）。 */
   defaultOpenChip?: ChipId | null;
+  /** 取消目标：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
+  onCancelGoal?: () => void;
   className?: string;
 }) {
   const { intl } = useZCodeIntl();
   const [openChip, setOpenChip] = useState<ChipId | null>(defaultOpenChip);
   const progress = useMemo(() => buildProgress(model.plan), [model.plan]);
-  const chips = buildChips({ model, progress, isStreaming, intl });
+  // 关闭 chip 面板是纯视图动作：只收掉就地展开的面板，不发任何命令、不改目标状态。
+  const closeGoalPanel = useMemo(() => () => setOpenChip(null), []);
+  const chips = buildChips({ model, progress, isStreaming, intl, onCancelGoal, closeGoalPanel });
   if (chips.length === 0) {
     return null;
   }
@@ -127,11 +141,15 @@ function buildChips({
   progress,
   isStreaming,
   intl,
+  onCancelGoal,
+  closeGoalPanel,
 }: {
   model: ConversationStatusPanelModel;
   progress: ProgressSummary | null;
   isStreaming: boolean;
   intl: ReturnType<typeof useZCodeIntl>["intl"];
+  onCancelGoal?: () => void;
+  closeGoalPanel: () => void;
 }): Chip[] {
   const chips: Chip[] = [];
 
@@ -155,6 +173,30 @@ function buildChips({
               { elapsed: formatElapsed(goal.timeUsedSeconds), iteration: goal.iteration },
             )}
           </span>
+          <div className="mt-1 flex items-center gap-1">
+            {onCancelGoal ? (
+              <button
+                type="button"
+                data-goal-action="clear"
+                onClick={onCancelGoal}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-sm text-[var(--color-danger)] hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+              >
+                <Trash2 className="size-3.5 shrink-0" />
+                {intl.formatMessage({ id: "chat.target.cancel" })}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              data-goal-action="close"
+              aria-label={intl.formatMessage({ id: "chat.target.closePanel" })}
+              title={intl.formatMessage({ id: "chat.target.closePanel" })}
+              onClick={closeGoalPanel}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-sm text-foreground-subtle hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+            >
+              <X className="size-3.5 shrink-0" />
+              {intl.formatMessage({ id: "chat.target.closePanel" })}
+            </button>
+          </div>
         </div>
       ),
     });

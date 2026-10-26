@@ -1401,6 +1401,38 @@ describe("ConversationStatusPanel", () => {
     expect(verified).not.toContain("data-goal-action=");
   });
 
+  it("renders a destructive clear control for every goal state, and only when a handler exists", async () => {
+    const active = await renderStatusPanel({
+      gitSummary: null,
+      gitWorktreeChangeSummary: null,
+      summaryPanelVariantOverride: "panel",
+      onPauseGoal: vi.fn(),
+      onClearGoal: vi.fn(),
+      goal: goalState({ status: "active" }),
+    });
+    expect(active).toContain('data-goal-action="clear"');
+    expect(active).toContain("chat.target.cancel");
+
+    // complete(verified) 也必须可清：否则只能靠 replace 覆盖。
+    const verified = await renderStatusPanel({
+      gitSummary: null,
+      gitWorktreeChangeSummary: null,
+      summaryPanelVariantOverride: "panel",
+      onClearGoal: vi.fn(),
+      goal: goalState({ status: "verified" }),
+    });
+    expect(verified).toContain('data-goal-action="clear"');
+
+    // 旧 CLI 没有 availability.clearGoal：父层不传 handler，面板不出现取消入口。
+    const withoutHandler = await renderStatusPanel({
+      gitSummary: null,
+      gitWorktreeChangeSummary: null,
+      summaryPanelVariantOverride: "panel",
+      goal: goalState({ status: "active" }),
+    });
+    expect(withoutHandler).not.toContain('data-goal-action="clear"');
+  });
+
   it("does not append verifier reason cards after visible iteration actions", async () => {
     const html = await renderStatusPanel({
       gitSummary: null,

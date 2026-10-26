@@ -197,6 +197,7 @@ import { ConversationQuotaBanner } from "@/v4/ConversationQuotaBanner.js";
 import { PendingCommandRecoveryBanner } from "@/v4/PendingCommandRecoveryBanner.js";
 import { WorkspaceHookPendingBanner } from "@/v4/WorkspaceHookPendingBanner.js";
 import { ConversationStatusPanel } from "@/v4/ConversationStatusPanel.js";
+import { GoalClearConfirmDialog } from "@/v4/ConversationGoalBanner.js";
 import { SessionSubscriptionErrorPanel } from "@/v4/SessionSubscriptionErrorPanel.js";
 import { ConversationTimeline } from "@/v4/ConversationTimeline.js";
 import type { ConversationLatestTurnSummary } from "@/v4/conversationTimelineLiveTail.js";
@@ -4601,6 +4602,37 @@ export function SessionPane({
     });
   }, [dispatchCommand, sessionId]);
 
+  // clearGoal 是破坏性动作：侧栏与 composer chip 共用这一处确认弹层，
+  // 打开前再读一次 availability（旧 CLI 没有该键 → 不可用，不弹确认）。
+  const [clearGoalConfirmOpen, setClearGoalConfirmOpen] = useState(false);
+
+  const handleRequestClearGoal = useCallback(() => {
+    const current = snapshotRef.current;
+    if (!sessionId || current?.availability.clearGoal?.allowed !== true) return;
+    setClearGoalConfirmOpen(true);
+  }, [sessionId]);
+
+  const handleConfirmClearGoal = useCallback(() => {
+    setClearGoalConfirmOpen(false);
+    const current = snapshotRef.current;
+    if (!sessionId || current?.availability.clearGoal?.allowed !== true) return;
+    void dispatchCommand("clearGoal", {}, sessionId, current.revision).then((ack) => {
+      if (ack.status === "accepted" || ack.status === "noop") return;
+      logger.warn(`[v4-pane] clearGoal 被拒绝: ${ack.status} ${ack.reasonCode ?? ""}`);
+      toast(
+        intl.formatMessage(
+          { id: "chat.target.cancelFailed" },
+          {
+            reason:
+              ack.reasonCode === "activeTurn"
+                ? intl.formatMessage({ id: "chat.target.cancelLockedByTurn" })
+                : (ack.message ?? ack.reasonCode ?? ack.status),
+          },
+        ),
+      );
+    });
+  }, [dispatchCommand, intl, sessionId]);
+
   // 主、辅对话可同时 focused（各自布局的可见态），不能据此争抢窗口 Esc。
   // 面板打开时按 DOM 归属隔离；关闭时由 Shell 授权主区接收对话外 Esc，避免焦点离开输入框后无法停止。
   // 保留窗口冒泡阶段，让 mention/slash 的 preventDefault 和 dialog 优先处理。
@@ -5633,7 +5665,23 @@ export function SessionPane({
           （snapshot.plan 是唯一的 todo 投影，没有第二份状态）。每颗 chip 一行摘要，点开
           就地展开明细；侧栏不再渲染待办分区，避免同一份清单出现两个明细面。 */}
       {!isDraft && !isFloatingPresentation ? (
-        <ComposerStatusChips model={statusPanelModel} isStreaming={isRunning} className="mb-2" />
+        <ComposerStatusChips
+          model={statusPanelModel}
+          isStreaming={isRunning}
+          onCancelGoal={
+            !readOnly && !selectionSideChat && snapshot?.availability.clearGoal?.allowed === true
+              ? handleRequestClearGoal
+              : undefined
+          }
+          className="mb-2"
+        />
+      ) : null}
+      {!readOnly && !selectionSideChat ? (
+        <GoalClearConfirmDialog
+          open={clearGoalConfirmOpen}
+          onOpenChange={setClearGoalConfirmOpen}
+          onConfirm={handleConfirmClearGoal}
+        />
       ) : null}
       {composerNode}
       {/* 办公模式显示主动任务推荐；编程模式保留原有小型场景入口。 */}
@@ -5804,6 +5852,13 @@ export function SessionPane({
               onResumeGoal={
                 !readOnly && !selectionSideChat && snapshot?.availability.resumeGoal.allowed
                   ? handleResumeGoal
+                  : undefined
+              }
+              onClearGoal={
+                !readOnly &&
+                !selectionSideChat &&
+                snapshot?.availability.clearGoal?.allowed === true
+                  ? handleRequestClearGoal
                   : undefined
               }
               onOpenPlanDetail={onOpenPlanDetail ? handleOpenPlanDetail : undefined}
