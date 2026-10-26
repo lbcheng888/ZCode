@@ -909,3 +909,8 @@ exceptions:
       - packages/ui/src/v4/composer/ComposerStatusChips.tsx
       - packages/ui/src/v4/statusPanelTodoWindow.ts
     reason: The composer status chip row and its todo focus-window helper are new files in the unmanaged ui module; they replace the removed status-panel todo section without moving any existing module boundary, and adopting the whole ui package needs a separate refactor.
+  - id: cli-vitest-serial-config-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/vitest.serial.config.ts
+    reason: The CLI workspace needs its own serial project config for the two fault-matrix files whose exact request-count assertions break under parallel workers; mirroring the root forkIsolatedTests precedent without moving any module boundary.

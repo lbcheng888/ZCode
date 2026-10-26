@@ -7,6 +7,12 @@ export default defineConfig({
   root: import.meta.dirname,
   test: {
     name: "zcode-cli",
+    // Bugfix: 本配置以 project 路径挂载时,根 vitest.config.ts 的 test 配置不参与合并(Vitest 只注入
+    // CLI 覆盖项),未显式设置会回落到 5s/10s。CLI 单测同样会启动真实子进程与定时器,低配/高负载
+    // 机器上默认时限易被提前打穿;与根配置及 packages/zcode-server-cli/vitest.config.ts 一致放宽到
+    // 30s,保留原断言与时限口径。
+    hookTimeout: 30_000,
+    testTimeout: 30_000,
     // Bugfix: 外部 zcode-cli 历史里同时存在 test/ 和 tests/ 目录；合入 apps 后需要同时保留两种约定，避免新增包测试被根 include 规则过滤掉。
     include: [
       "test/**/*.test.ts",
@@ -37,6 +43,11 @@ export default defineConfig({
       "packages/bootstrap/tests/visualize-skill-gate.test.ts",
       "packages/core/tests/browser-client.test.ts",
       "packages/core/tests/browser-manifest.test.ts",
+      // Bugfix: 故障矩阵用例会真实启动 provider 服务、缩放时钟与子进程;批量并发下调度延迟会让
+      // 精确请求计数断言多出重试请求(两个文件单独运行均通过)。改由 vitest.serial.config.ts 的
+      // 串行 project 执行,这里排除以避免双跑并保留原断言。
+      "packages/bootstrap/tests/fault-matrix-harness.test.ts",
+      "packages/bootstrap/tests/workflow-fault-matrix.lifecycle.test.ts",
       "**/node_modules/**",
     ],
     // 根单测入口已有 unit(0)/fork-isolated(1)/cua(2) 三个串行分组;CLI 单测放独立的最后一组,

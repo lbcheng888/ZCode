@@ -55,6 +55,9 @@ const forkIsolatedTests = [
   // 波及面收敛到本文件，其余测试结果可完整收集；崩溃根因见
   // docs/windows-test-compatibility.md。
   "packages/ui/test/pdfJsCMapSupport.test.ts",
+  // Bugfix: afterEach 清理临时 HOME 时后台服务仍可能重建文件,批量并发下偶发 ENOTEMPTY;
+  // 测试体末尾已等待 dispose 回收,单独运行通过,串行只是保留真实装配与清理路径。
+  "packages/server/test/stdioDesktopPresentationSurface.test.ts",
 ];
 
 export default defineConfig({
@@ -143,6 +146,9 @@ export default defineConfig({
       // UT 套件与 affected 选择范围内;按 zcode-cua 先例以 project 引用接入。该配置排除了
       // node:test 文件与插件集成测试,只收集运行时包的 vitest 单测。
       "apps/zcode-cli/vitest.config.ts",
+      // 故障矩阵用例需要真实定时器/子进程,且用精确请求计数断言;单独成串行 project 放最后一组,
+      // 避免与 zcode-cli 的 4-worker 池并发。两个文件已从上面的 CLI 配置 exclude。
+      "apps/zcode-cli/vitest.serial.config.ts",
     ],
     coverage: {
       provider: "v8",
