@@ -757,9 +757,40 @@ export class ProductProjection {
           : [],
       ),
     );
-    const running = seed.running.filter((item) => allowed.has(item.childSessionId));
+    // v3 查询不携带模型事实；cold 恢复时 row 与 running 必须双向补齐，否则模型会在
+    // 重启后消失：row→running 补 seed 缺省值，running(seed 由 child session 的
+    // model_selection 回填)→row 保证下一次 live 重建 running 时不丢。
+    const modelByChildSessionId = new Map<string, string>();
+    for (const row of this.snapshot.rows.window) {
+      if (row.kind === "subagent" && row.childSessionId && row.model) {
+        modelByChildSessionId.set(row.childSessionId, row.model);
+      }
+    }
+    const running = seed.running
+      .filter((item) => allowed.has(item.childSessionId))
+      .map((item) => {
+        if (item.model) return item;
+        const model = modelByChildSessionId.get(item.childSessionId);
+        return model ? { ...item, model } : item;
+      });
+    const seedModelByChildSessionId = new Map<string, string>();
+    for (const item of running) {
+      if (item.model) seedModelByChildSessionId.set(item.childSessionId, item.model);
+    }
+    const window =
+      seedModelByChildSessionId.size === 0
+        ? this.snapshot.rows.window
+        : this.snapshot.rows.window.map((row) => {
+            if (row.kind !== "subagent" || !row.childSessionId || row.model) return row;
+            const model = seedModelByChildSessionId.get(row.childSessionId);
+            return model ? { ...row, model } : row;
+          });
     this.snapshot = {
       ...this.snapshot,
+      rows:
+        window === this.snapshot.rows.window
+          ? this.snapshot.rows
+          : { ...this.snapshot.rows, window },
       subagents: {
         // 非空 cold manifest 必须至少从 1 开始；renderer 用 0 区分尚未建立权威态，
         // 否则旧 session 的 stateRevision=0 会让 child tab 失效同步被永久跳过。
@@ -4383,6 +4414,7 @@ export class ProductProjection {
         agentId: row.entityId,
         ...(row.parentToolCallId ? { toolCallId: row.parentToolCallId } : {}),
         subagentType: row.subagentType,
+        ...(row.model ? { model: row.model } : {}),
         title,
         status: waitingChildIds.has(childSessionId)
           ? "waiting"
@@ -4479,17 +4511,20 @@ export class ProductProjection {
     if (existing) this.subagentRowIdByAgentId.set(agentId, existing.rowId);
     const childSessionId = this.stringPayload(payload, "childSessionId");
     const parentToolCallId = this.stringPayload(payload, "parentToolCallId");
+    const model = this.stringPayload(payload, "model");
     const resumedBackgroundWork = this.resumedSubagentBackgroundWorkDelta(
       event,
       payload,
       agentId,
       childSessionId,
     );
+    // 模型不同不能按重复 spawn 丢弃：resume 重新选模后 row 必须跟随本次实际选择。
     if (
       existing?.status === "running" &&
       (!childSessionId || childSessionId === existing.childSessionId) &&
       (!parentToolCallId || parentToolCallId === existing.parentToolCallId) &&
-      (payload.background !== true || existing.backgrounded === true)
+      (payload.background !== true || existing.backgrounded === true) &&
+      (!model || model === existing.model)
     ) {
       return resumedBackgroundWork ? [resumedBackgroundWork] : [];
     }
@@ -4505,6 +4540,8 @@ export class ProductProjection {
         // 已存在的锚点不能作为生命周期字段被覆盖，否则 UI 无法再关联原 Agent 行。
         ...(!existing.parentToolCallId && parentToolCallId ? { parentToolCallId } : {}),
         ...(childSessionId ? { childSessionId } : {}),
+        // 旧事件没有 model 时保留已有值；有值时以本次 spawn 的实际选择为准。
+        ...(model ? { model } : {}),
         ...(payload.background === true ? { backgrounded: true as const } : {}),
         ...(payload.background === true ? { workId: agentId } : {}),
         startedAt: this.ms(event),
@@ -4523,6 +4560,7 @@ export class ProductProjection {
         : {}),
       subagentType: this.stringPayload(payload, "agentType") ?? "subagent",
       status: "running",
+      ...(model ? { model } : {}),
       summaryText:
         this.stringPayload(payload, "description") ??
         this.stringPayload(payload, "summaryText") ??
@@ -4616,6 +4654,9 @@ export class ProductProjection {
           endedAt: this.ms(event),
           // resumed child 的终态同样属于原 Agent row，只在旧 row 缺失锚点时补齐。
           ...(!existing.parentToolCallId && parentToolCallId ? { parentToolCallId } : {}),
+          ...(this.stringPayload(payload, "model")
+            ? { model: this.stringPayload(payload, "model") }
+            : {}),
           ...(this.stringPayload(payload, "childSessionId")
             ? { childSessionId: this.stringPayload(payload, "childSessionId") }
             : {}),
@@ -4630,6 +4671,9 @@ export class ProductProjection {
             : {}),
           subagentType: this.stringPayload(payload, "agentType") ?? "subagent",
           status,
+          ...(this.stringPayload(payload, "model")
+            ? { model: this.stringPayload(payload, "model") }
+            : {}),
           summaryText,
           ...(this.stringPayload(payload, "childSessionId")
             ? { childSessionId: this.stringPayload(payload, "childSessionId") }

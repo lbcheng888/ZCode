@@ -124,6 +124,7 @@ describe("buildConversationStatusPanelModel", () => {
         {
           childSessionId: "child-1",
           subagentType: "Explore",
+          model: "custom-openai/glm-5.2$high",
           title: "探索代码",
           status: "running",
           startedAt: 1_700_000_000_000,
@@ -146,6 +147,9 @@ describe("buildConversationStatusPanelModel", () => {
     });
     expect(model.runningBashWorks.map((work) => work.workId)).toEqual(["work-bash"]);
     expect(model.runningSubagentWorks.map((work) => work.childSessionId)).toEqual(["child-1"]);
+    expect(model.runningSubagentWorks[0]).toMatchObject({
+      model: "custom-openai/glm-5.2$high",
+    });
   });
 
   // 回归：dwf run 的停止入口在任何投影形态下都不许消失——面板的停止是 spec 里三个取消入口

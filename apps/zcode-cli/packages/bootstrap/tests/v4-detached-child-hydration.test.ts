@@ -32,7 +32,7 @@ import type {
   TraceId,
   TurnId,
 } from "@zcode/contracts";
-import { SessionEventType } from "@zcode/contracts";
+import { SESSION_ENTRY_MODEL_SELECTION, SessionEventType } from "@zcode/contracts";
 import { createConversationV4Gateway } from "../src/zcode-protocol/v4-bridge.js";
 import type {
   ZCodeProtocolAgentServerContext,
@@ -127,6 +127,32 @@ async function saveAssistantTextMessage(
   });
 }
 
+/**
+ * 父会话里仍在运行的 Agent tool part：v3 冷查询靠它把 child 认成 running。
+ * childSessionId 走 metadata（真实 launch 也会写这里），不依赖 tool output 形状。
+ */
+async function saveRunningAgentToolPart(
+  store: TestSessionStore,
+  parentSessionId: SessionId,
+  messageId: MessageId,
+  childSessionId: SessionId,
+): Promise<void> {
+  await store.savePart({
+    id: `${messageId}_agent` as MessagePart["id"],
+    sessionID: parentSessionId,
+    messageID: messageId,
+    type: "tool",
+    callID: "call_cold_subagent",
+    tool: "Agent",
+    state: {
+      status: "running",
+      input: { description: "探索冷恢复", prompt: "检查模型回填", subagent_type: "Explore" },
+      time: { start: 3 },
+    },
+    metadata: { agentId: "agent_cold_model", childSessionId },
+  });
+}
+
 /** amend-resume 的播种形态：前驱 transcript 前缀被直接复制进新 actor 会话的 store。 */
 async function seedActorTranscriptPrefix(
   store: TestSessionStore,
@@ -165,7 +191,9 @@ function makeBackingRecord(eventStore: SessionEventStorePort): ZCodeProtocolSess
         // 这里没有 subagent，返回空投影即可。
         // readSessionContextUsage（staging 6d4c3cc571 起在 loadPersistedEvents 里同步读容量种子）要读
         // projection.contextWindow / contextUsed；给一份最小投影即可，子代理投影本就为空。
-        getProjection: async () => ({ contextUsed: 0, contextWindow: 200_000 }) as never,
+        // listSessionSubagents 还会读 activeToolCalls/backgroundTasks 判断 running 状态。
+        getProjection: async () =>
+          ({ activeToolCalls: [], backgroundTasks: [], contextUsed: 0, contextWindow: 200_000 }) as never,
       },
       sessionId: PARENT_SESSION_ID,
     },
@@ -354,5 +382,72 @@ describe("v4 detached live child 的首次订阅 hydration", () => {
     expect(texts).toContain("self 播种提问");
     expect(texts).toContain("live 增量");
     expect(texts.join("")).not.toContain("父 record 污染");
+  });
+
+  it("父会话 cold hydrate：running subagent 的模型从 child session 的 model_selection 回填", async () => {
+    const subagentChildId = "sess_subagent_cold_model" as SessionId;
+    const parentUserId = "msg_parent_cold_model_user" as MessageId;
+    const parentAssistantId = "msg_parent_cold_model_assistant" as MessageId;
+    await createSessionRow(PARENT_SESSION_ID);
+    await store.createSession({
+      id: subagentChildId,
+      parentID: PARENT_SESSION_ID,
+      projectID: "project_detached_child" as ProjectId,
+      slug: `slug-${subagentChildId}`,
+      directory: WORKSPACE_PATH,
+      path: WORKSPACE_PATH,
+      taskType: "subagent_child",
+      title: `session ${subagentChildId}`,
+      version: "test-version",
+      time: { created: 1, updated: 4 },
+    });
+    await saveUserTextMessage(store, PARENT_SESSION_ID, parentUserId, "派个 Explore", 1);
+    await saveAssistantTextMessage(
+      store,
+      PARENT_SESSION_ID,
+      parentAssistantId,
+      parentUserId,
+      "",
+      2,
+    );
+    await saveRunningAgentToolPart(
+      store,
+      PARENT_SESSION_ID,
+      parentAssistantId,
+      subagentChildId,
+    );
+    // child runtime 在 onSessionReady 前写入的执行选型：cold 恢复时它是唯一模型事实。
+    await store.saveSessionEntry({
+      id: `${subagentChildId}:runtime-model-selection`,
+      sessionID: subagentChildId,
+      type: SESSION_ENTRY_MODEL_SELECTION,
+      touchSession: false,
+      time: { created: 1, updated: 1 },
+      data: {
+        providerId: "custom-openai",
+        modelId: "glm-5.2",
+        options: { reasoningLevel: "high" },
+      },
+    });
+
+    const eventStore = createInMemorySessionEventStore();
+    const sessions = new Map<string, ZCodeProtocolSessionRecord>([
+      [PARENT_SESSION_ID, makeBackingRecord(eventStore)],
+    ]);
+    const context = makeContext({ sessions, store });
+    const gateway = createConversationV4Gateway(context);
+    context.v4Gateway = gateway;
+
+    const result = await gateway.subscribe({
+      topic: conversationTopic(PARENT_SESSION_ID),
+      connectionId: "conn-parent-cold-model",
+      clientMode: "desktop-continuous",
+    });
+    const payload = result.initialFrame?.payload;
+    if (payload?.kind !== "snapshot") throw new Error("Expected snapshot initial frame");
+    // 修复前 v3 查询不带模型，seed 整份替换 running 后 chip 在重启期间丢模型。
+    expect(payload.snapshot.subagents?.running).toMatchObject([
+      { childSessionId: subagentChildId, model: "custom-openai/glm-5.2$high" },
+    ]);
   });
 });

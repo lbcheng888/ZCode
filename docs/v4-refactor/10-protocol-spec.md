@@ -1038,6 +1038,7 @@ interface SubagentRow extends RowBase {
   parentToolCallId?: string; // 触发它的 Agent/Task toolCallId；新投影必须携带
   subagentType: string;
   status: "running" | "success" | "failed" | "cancelled";
+  model?: string; // spawn 时实际生效的初始选择；规范串 providerId/modelId[$reasoningLevel]，与 workflow subagentModel 同一展示词汇（非通用可逆序列化）；缺席 = 来源未上报
   summaryText: string; // 流式：path="summaryText"（仅 continuous 档）
   childSessionId?: string; // 存在 → UI 可下钻订阅 conversation/<childSessionId>
   backgrounded?: true;

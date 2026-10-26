@@ -48,6 +48,7 @@ import type {
 } from "../zcode-protocol-v4/commands/types.js";
 import type {
   ConversationRowTargetResolution,
+  SessionSubagentsSeed,
   SessionUsageSeed,
 } from "../zcode-protocol-v4/product-projection.js";
 import { PersistentCommandIndex } from "../zcode-protocol-v4/persistent-command-index.js";
@@ -93,6 +94,8 @@ import type {
   TurnId,
   WorkspaceId,
 } from "@zcode/contracts";
+import { formatModelPickerValue } from "@zcode/shared/model-selection";
+import { readSessionModelSelection } from "../app/session-store.js";
 import { HYDRATION_TRACE_ID } from "../zcode-protocol-v4/projection-state.js";
 import { cloneModelSelection, derivedSessionModelSelection } from "./fork-model-selection.js";
 import { resolveWorkspaceRefFromId } from "./mapper.js";
@@ -141,6 +144,36 @@ function sessionUsageSeedFromRuntimeContextUsage(
       ...(contextUsage.breakdown ? { breakdown: contextUsage.breakdown } : {}),
     },
   };
+}
+
+type RunningSubagentSeed = SessionSubagentsSeed["running"][number];
+
+// 冷恢复的 running 来自 v3 查询，后者只读 transcript/事件，不带模型事实。child session
+// 自己的 model_selection entry 是它落到 runtime 的执行选型（spawn 时写入、resume 时更新），
+// 因此在生成 seed 处补齐；读不到就保持缺席，UI 只是不渲染这一段，不报错。
+async function enrichRunningSubagentModels(
+  store: SessionStorePort | undefined,
+  running: readonly RunningSubagentSeed[],
+  onReadError: (childSessionId: string, error: unknown) => void,
+): Promise<RunningSubagentSeed[]> {
+  const entriesStore = store?.sessionEntries ? store : undefined;
+  if (!entriesStore) return [...running];
+  return await Promise.all(
+    running.map(async (item) => {
+      if (item.model) return item;
+      try {
+        const selection = await readSessionModelSelection(
+          entriesStore,
+          item.childSessionId as SessionId,
+        );
+        const model = formatModelPickerValue(selection);
+        return model.length > 0 ? { ...item, model } : item;
+      } catch (error) {
+        onReadError(item.childSessionId, error);
+        return item;
+      }
+    }),
+  );
 }
 
 const STABLE_FORK_MODES = new Set<CollaborationMode>([
@@ -2141,6 +2174,19 @@ export function createConversationV4Gateway(
         { sessionId, endedLimit: 1 },
         persistedMessages,
       );
+      const runningSubagents = await enrichRunningSubagentModels(
+        store,
+        subagents.running,
+        (childSessionId, error) => {
+          context.logger?.warn("ZCode Protocol v4 cold subagent model read failed", {
+            childSessionId,
+            error: error instanceof Error ? error.message : String(error),
+            event: "zcode_protocol.v4.cold_subagent_model_read_failed",
+            module: "bootstrap.zcode_protocol",
+            sessionId,
+          });
+        },
+      );
       return {
         events: merged.events,
         // 与合成事件共用本次查询结果；不在后续回填阶段重新读取另一份容量。
@@ -2151,7 +2197,7 @@ export function createConversationV4Gateway(
         subagentsSeed: {
           revision: subagents.revision,
           childSessionIds: subagents.childSessionIds,
-          running: subagents.running,
+          running: runningSubagents,
         },
         ...(source.sharedContextImport ? { sharedContextImport: source.sharedContextImport } : {}),
         sourceEventSeq,

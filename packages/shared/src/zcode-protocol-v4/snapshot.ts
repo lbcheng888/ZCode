@@ -391,6 +391,10 @@ export const runningSubagentSummarySchema = z.object({
   agentId: z.string().optional(),
   toolCallId: z.string().optional(),
   subagentType: z.string(),
+  // 与 subagent row 同词汇（workflow subagentModel 的展示规范串）：
+  // spawn 时实际生效的初始选择 providerId/modelId[$reasoningLevel]；
+  // 缺席 = 运行期模型事实未上报。
+  model: z.string().optional(),
   title: z.string(),
   summary: z.string().optional(),
   status: z.enum(["running", "waiting", "blocked"]),

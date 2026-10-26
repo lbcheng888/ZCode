@@ -23,6 +23,7 @@ import {
   type AgentCompletedOutput,
   type AgentOutput,
   type Logger,
+  type ModelSelection,
   type ModelUsage,
   type SessionEvent,
   type SessionId,
@@ -41,6 +42,7 @@ import {
   type SubagentWaitOptions,
   type TraceContext,
 } from "@zcode/contracts";
+import { formatModelPickerValue } from "@zcode/shared/model-selection";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -76,8 +78,12 @@ export interface ExploreSubagentRuntimeRequest {
   sessionId: SessionId;
   description: string;
   maxTurns?: number;
-  /** child session 已持久化且可被 projection/query 读取后、首次模型执行前调用。 */
-  onSessionReady?: () => Promise<void>;
+  /**
+   * child session 已持久化且可被 projection/query 读取后、首次模型执行前调用。
+   * 实现方应把 child runtime 真正生效的 ModelSelection 一并交出：profile 声明值在
+   * 继承/override 场景都不是执行事实，spawn 事件只能记录解析后的选择。
+   */
+  onSessionReady?: (selection?: ModelSelection) => Promise<void>;
   permissionMode?: AgentProfile["permissionMode"];
   prompt: string;
   profile: AgentProfile;
@@ -235,7 +241,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           reportActivity: activityWatchdog.reportActivity,
         },
         {
-          onSessionReady: async () => {
+          onSessionReady: async (selection) => {
             await emitSubagentEvent(
               options,
               SessionEventType.SubagentSpawned,
@@ -250,9 +256,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
                 parentToolCallId: request.parentToolCallId,
                 status: "running",
                 allowedTools: [...resolveAllowedTools(profile, options)],
-                model: profile.modelSelection
-                  ? `${profile.modelSelection.providerId}/${profile.modelSelection.modelId}`
-                  : undefined,
+                model: subagentModelPayload(selection ?? profile.modelSelection),
               },
             );
             readyGate.resolve();
@@ -482,7 +486,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           ...(startOptions?.modelOverride ? { modelOverride: startOptions.modelOverride } : {}),
         },
         {
-          onSessionReady: async () => {
+          onSessionReady: async (selection) => {
             await emitSubagentEvent(
               options,
               SessionEventType.SubagentSpawned,
@@ -499,9 +503,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
                 status: "running",
                 allowedTools: [...resolveAllowedTools(profile, options)],
                 outputFile: lifecycle.outputFile,
-                model: profile.modelSelection
-                  ? `${profile.modelSelection.providerId}/${profile.modelSelection.modelId}`
-                  : undefined,
+                model: subagentModelPayload(selection ?? profile.modelSelection),
               },
             );
             readyGate.resolve();
@@ -1031,7 +1033,7 @@ async function resumeTerminalAgentInBackground(
     },
     {
       resumeFromStore: true,
-      onSessionReady: async () => {
+      onSessionReady: async (selection) => {
         await emitSubagentEvent(
           options,
           SessionEventType.SubagentSpawned,
@@ -1043,6 +1045,8 @@ async function resumeTerminalAgentInBackground(
             background: true,
             childSessionId: lifecycle.childSessionId,
             description: resumeRequest.description,
+            // resume 可能换了模型：spawn 事件必须带本次实际选择，投影才能覆盖旧值。
+            model: subagentModelPayload(selection ?? lifecycle.profile.modelSelection),
             outputFile: lifecycle.outputFile,
             parentToolCallId: resumeRequest.parentToolCallId,
             prompt: resumeRequest.prompt,
@@ -1134,9 +1138,9 @@ async function runAgentToCompletion(
   executionOptions: SubagentExecutionOptions = {},
 ): Promise<{ events: SessionEvent[]; output: AgentCompletedOutput }> {
   let sessionReady = false;
-  const notifySessionReady = async () => {
+  const notifySessionReady = async (selection?: ModelSelection) => {
     if (sessionReady) return;
-    await executionOptions.onSessionReady?.();
+    await executionOptions.onSessionReady?.(selection);
     sessionReady = true;
   };
   const childResult = await options.runExploreAgent(
@@ -1358,8 +1362,8 @@ async function runBackgroundAgent(
       {},
       {
         ...executionOptions,
-        onSessionReady: async () => {
-          await executionOptions.onSessionReady?.();
+        onSessionReady: async (selection) => {
+          await executionOptions.onSessionReady?.(selection);
           sessionReady = true;
         },
       },
@@ -1378,7 +1382,7 @@ async function runBackgroundAgent(
 
 interface SubagentExecutionOptions {
   resumeFromStore?: boolean;
-  onSessionReady?: () => Promise<void>;
+  onSessionReady?: (selection?: ModelSelection) => Promise<void>;
   onSessionStartFailed?: (error: unknown) => void;
 }
 
@@ -1915,6 +1919,15 @@ function traceContextFromRuntimeTask(task: RuntimeTaskSnapshot): TraceContext {
       turnId: task.turnId,
     }
   );
+}
+
+// spawn 事件只记录真正落到 child runtime 的选择；解析结果缺席时退回 profile 声明值，
+// 兼容尚未回传 selection 的测试桩与旧注入实现。
+function subagentModelPayload(
+  selection: ModelSelection | undefined,
+): string | undefined {
+  const canonical = formatModelPickerValue(selection);
+  return canonical.length > 0 ? canonical : undefined;
 }
 
 async function emitSubagentEvent(

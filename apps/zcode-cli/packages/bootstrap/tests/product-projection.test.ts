@@ -3207,6 +3207,184 @@ describe("ProductProjection 黄金测试（L1）", () => {
     });
   });
 
+  it("subagent row/running 记录 spawn 模型；无 model 的旧事件不伪造字段", () => {
+    const turnId = "turn-subagent-model";
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TurnStarted, { turnNumber: 1, input: "派子代理" }, { turnId });
+    log.push(
+      SessionEventType.SubagentSpawned,
+      {
+        agentId: "agent-model",
+        agentType: "Explore",
+        childSessionId: "sess-model",
+        description: "带模型",
+        model: "custom-openai/glm-5.2$high",
+        status: "running",
+      },
+      { turnId },
+    );
+    log.push(
+      SessionEventType.SubagentSpawned,
+      {
+        agentId: "agent-legacy",
+        agentType: "Explore",
+        childSessionId: "sess-legacy",
+        description: "旧事件",
+        status: "running",
+      },
+      { turnId },
+    );
+
+    const projection = new ProductProjection("session-1", "epoch-1");
+    for (const event of log.events) projection.applyEvent(event);
+    const snapshot = projection.getSnapshot();
+    expect(
+      snapshot.rows.window.find(
+        (row) => row.kind === "subagent" && row.childSessionId === "sess-model",
+      ),
+    ).toMatchObject({ model: "custom-openai/glm-5.2$high" });
+    expect(
+      snapshot.subagents.running.find((item) => item.childSessionId === "sess-model"),
+    ).toMatchObject({ model: "custom-openai/glm-5.2$high" });
+
+    const legacyRow = snapshot.rows.window.find(
+      (row) => row.kind === "subagent" && row.childSessionId === "sess-legacy",
+    );
+    expect(legacyRow && "model" in legacyRow).toBe(false);
+    const legacyRunning = snapshot.subagents.running.find(
+      (item) => item.childSessionId === "sess-legacy",
+    );
+    expect(legacyRunning && "model" in legacyRunning).toBe(false);
+
+    // running 中重新选模的 resume 必须覆盖旧值，不能被 {...existing} 保留。
+    projection.applyEvent(
+      log.push(
+        SessionEventType.SubagentSpawned,
+        {
+          agentId: "agent-model",
+          agentType: "Explore",
+          childSessionId: "sess-model",
+          description: "换模恢复",
+          model: "custom-openai/gpt-5.5$low",
+          resumed: true,
+          status: "running",
+        },
+        { turnId },
+      ),
+    );
+    const resumed = projection.getSnapshot();
+    expect(
+      resumed.rows.window.find(
+        (row) => row.kind === "subagent" && row.childSessionId === "sess-model",
+      ),
+    ).toMatchObject({ model: "custom-openai/gpt-5.5$low" });
+    expect(
+      resumed.subagents.running.find((item) => item.childSessionId === "sess-model"),
+    ).toMatchObject({ model: "custom-openai/gpt-5.5$low" });
+  });
+
+  it("cold seed 与 rehydrate row 双向补齐模型", () => {
+    const turnId = "turn-cold-seed-model";
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TurnStarted, { turnNumber: 1, input: "历史派生" }, { turnId });
+    log.push(
+      SessionEventType.SubagentSpawned,
+      {
+        agentId: "agent-cold",
+        agentType: "Explore",
+        childSessionId: "sess-cold",
+        description: "冷恢复 child",
+        model: "custom-openai/glm-5.2$high",
+        status: "running",
+      },
+      { turnId },
+    );
+    // 旧会话合成出来的 spawn 没有 model：row→running 方向补不了，必须由 seed 反向回填。
+    log.push(
+      SessionEventType.SubagentSpawned,
+      {
+        agentId: "agent-rowless",
+        agentType: "Explore",
+        childSessionId: "sess-rowless",
+        description: "合成 spawn 无模型",
+        status: "running",
+      },
+      { turnId },
+    );
+
+    const projection = new ProductProjection("session-1", "epoch-1");
+    for (const event of log.events) projection.applyEvent(event);
+    projection.seedSubagents({
+      revision: 3,
+      childSessionIds: ["sess-cold", "sess-rowless", "sess-seeded"],
+      running: [
+        {
+          agentId: "agent-cold",
+          childSessionId: "sess-cold",
+          status: "running",
+          subagentType: "Explore",
+          title: "冷恢复 child",
+        },
+        {
+          // bridge 从 child session 的 model_selection 回填到 seed；row 也要跟着落下，
+          // 否则下一次 live 事件重建 running 时模型再次消失。
+          agentId: "agent-rowless",
+          childSessionId: "sess-rowless",
+          model: "custom-openai/gpt-5.5$low",
+          status: "running",
+          subagentType: "Explore",
+          title: "seed 回填 row",
+        },
+        {
+          agentId: "agent-seeded",
+          childSessionId: "sess-seeded",
+          model: "custom-openai/gpt-5.5",
+          status: "running",
+          subagentType: "Explore",
+          title: "seed 自带模型",
+        },
+      ],
+    });
+
+    const snapshot = projection.getSnapshot();
+    const running = snapshot.subagents.running;
+    expect(running.find((item) => item.childSessionId === "sess-cold")).toMatchObject({
+      model: "custom-openai/glm-5.2$high",
+    });
+    // seed 自己带模型时以 seed 为准，row 派生值只补空缺。
+    expect(running.find((item) => item.childSessionId === "sess-seeded")).toMatchObject({
+      model: "custom-openai/gpt-5.5",
+    });
+    expect(
+      snapshot.rows.window.find(
+        (row) => row.kind === "subagent" && row.childSessionId === "sess-rowless",
+      ),
+    ).toMatchObject({ model: "custom-openai/gpt-5.5$low" });
+
+    // 回填后的 row 必须能独立重建 running：后续无关 spawn 不得抹掉模型。
+    projection.applyEvent(
+      log.push(
+        SessionEventType.SubagentSpawned,
+        {
+          agentId: "agent-later",
+          agentType: "Explore",
+          childSessionId: "sess-later",
+          description: "后续 spawn",
+          model: "custom-openai/glm-5.2",
+          status: "running",
+        },
+        { turnId },
+      ),
+    );
+    expect(
+      projection
+        .getSnapshot()
+        .subagents.running.find((item) => item.childSessionId === "sess-rowless"),
+    ).toMatchObject({ model: "custom-openai/gpt-5.5$low" });
+  });
+
   // ── M 组：turn steer 队列 ──
 
   it("M：steer 入队/注入 —— queue.items 生命周期", () => {

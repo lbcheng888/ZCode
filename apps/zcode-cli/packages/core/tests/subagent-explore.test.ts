@@ -171,6 +171,64 @@ describe("Explore subagent", () => {
     },
   );
 
+  it("records the resolved child selection (with reasoning level) on the spawn event", async () => {
+    const sessionId = createSessionId("parent-spawn-model");
+    const traceId = createTraceId();
+    const outputRootDir = await mkdtemp(join(tmpdir(), "zcode-subagent-spawn-model-"));
+    const emitSpawn = async (selection?: {
+      providerId: string;
+      modelId: string;
+      options?: { reasoningLevel: string };
+    }) => {
+      const emittedEvents: any[] = [];
+      const port = createExploreSubagentPort({
+        outputRootDir,
+        async emitParentEvent(event) {
+          emittedEvents.push(event);
+        },
+        async runExploreAgent(request) {
+          await request.onSessionReady?.(selection);
+          return {
+            response: "done",
+            traceId,
+            events: [
+              createSessionEvent(SessionEventType.ModelComplete, request.sessionId, {
+                content: "done",
+                stopReason: "stop",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              }),
+            ],
+          };
+        },
+      });
+      await port.run({
+        agentType: "Explore",
+        description: "Spawn model",
+        prompt: "Inspect spawn payload",
+        sessionId,
+        trace: { traceId, sessionId },
+        workingDirectory: outputRootDir,
+        workspaceRoot: outputRootDir,
+      });
+      return emittedEvents.find((event) => event.type === SessionEventType.SubagentSpawned);
+    };
+
+    const spawnWithSelection = await emitSpawn({
+      providerId: "custom-openai",
+      modelId: "glm-5.2",
+      options: { reasoningLevel: "high" },
+    });
+    expect(spawnWithSelection?.payload).toMatchObject({
+      model: "custom-openai/glm-5.2$high",
+    });
+
+    // 未回传 selection 且 profile 未声明模型时，spawn 事件不得凭空编造模型。
+    const spawnWithoutSelection = await emitSpawn();
+    expect((spawnWithoutSelection?.payload as { model?: string } | undefined)?.model).toBe(
+      undefined,
+    );
+  });
+
   it("fails a foreground run after the child runner stays inactive", async () => {
     const outputRootDir = await mkdtemp(join(tmpdir(), "zcode-subagent-inactive-"));
     const emittedEvents: any[] = [];
@@ -3419,6 +3477,12 @@ describe("Explore subagent", () => {
       providerId: "custom-openai",
       modelId: "gpt-5.4",
     });
+    // spawn 事件必须记录 child runtime 实际生效的选型，而不是调用级旧值 haiku。
+    const spawnEvent = (await eventStore.getEvents(sessionId)).find(
+      (event) => event.type === SessionEventType.SubagentSpawned,
+    );
+    const spawnPayload = spawnEvent?.payload as { model?: string } | undefined;
+    expect(spawnPayload?.model).toMatch(/^custom-openai\/gpt-5\.4(?:\$|$)/u);
   });
 
   it("ignores a legacy call model and uses the built-in Explore override for child request, spawn event, and tool branch capability", async () => {

@@ -147,6 +147,53 @@ describe("ComposerStatusChips", () => {
     expect(idle).not.toContain("chat.composerChips.agents");
   });
 
+  it("shows the running agent model with effort, and degrades when either part is absent", () => {
+    const render = (agent: {
+      childSessionId: string;
+      subagentType: string;
+      title: string;
+      status: "running";
+      model?: string;
+    }) =>
+      renderToStaticMarkup(
+        createElement(ComposerStatusChips, {
+          model: model({ runningSubagentWorks: [agent] }),
+          defaultOpenChip: "agents",
+        }),
+      );
+
+    const withEffort = render({
+      childSessionId: "c1",
+      subagentType: "coder",
+      title: "修 um_main",
+      status: "running",
+      model: "custom-openai/glm-5.2$high",
+    });
+    expect(withEffort).toContain("glm-5.2 · chat.toolbar.thoughtLevel.value.high");
+
+    // 规范串没有档位：只显示模型名，不补默认档位词。
+    const modelOnly = render({
+      childSessionId: "c1",
+      subagentType: "coder",
+      title: "修 um_main",
+      status: "running",
+      model: "custom-openai/glm-5.2",
+    });
+    expect(modelOnly).toContain("glm-5.2");
+    expect(modelOnly).not.toContain("chat.toolbar.thoughtLevel");
+
+    // 旧会话/旧 CLI 没有 model 字段：维持原样，不渲染空段。
+    const legacy = render({
+      childSessionId: "c1",
+      subagentType: "coder",
+      title: "修 um_main",
+      status: "running",
+    });
+    expect(legacy).not.toContain("glm-5.2");
+    expect(legacy).not.toContain("chat.toolbar.thoughtLevel");
+    expect(legacy).toContain("修 um_main");
+  });
+
   it("shows a running spinner on the progress chip only while streaming", () => {
     const running = renderToStaticMarkup(
       createElement(ComposerStatusChips, { model: model(), isStreaming: true }),

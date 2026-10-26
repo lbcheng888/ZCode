@@ -270,6 +270,11 @@ export const subagentRowSchema = z.object({
   parentToolCallId: z.string().optional(),
   subagentType: z.string(),
   status: z.enum(["running", "success", "failed", "cancelled"]),
+  // spawn 时实际生效的初始模型选择，规范串 providerId/modelId[$reasoningLevel]。
+  // 这是与 workflow subagentModel 共用的**展示词汇**（formatModelPickerValue），
+  // 不是通用可逆序列化：modelId 内含 `$` 时按最后一个分隔符解析会截断。
+  // 缺席表示来源未上报（旧会话/旧 CLI），消费方不得据此推断模型。
+  model: z.string().optional(),
   summaryText: z.string(),
   // 存在 → UI 可下钻订阅 conversation/<childSessionId>（不内嵌 child rows）。
   childSessionId: z.string().optional(),

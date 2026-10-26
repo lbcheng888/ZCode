@@ -262,7 +262,9 @@ export function createDefaultSubagentPort(
         let sessionReadyNotified = false;
         const notifySessionReady = async () => {
           if (sessionReadyNotified) return;
-          await request.onSessionReady?.();
+          // childSelection 是 override > profile > 父会话继承解析后的执行事实；
+          // profile 声明值在继承/override 场景都会把 spawn 事件记错模型。
+          await request.onSessionReady?.(childSelection);
           sessionReadyNotified = true;
         };
         this.logger?.debug("Starting subagent child runtime", {

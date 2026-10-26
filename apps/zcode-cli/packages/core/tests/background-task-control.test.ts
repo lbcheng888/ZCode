@@ -707,7 +707,12 @@ describe("background task control", () => {
       outputRootDir,
       runtimeTaskRegistry: registry,
       async runExploreAgent(request, options) {
-        await request.onSessionReady?.();
+        // resume 也走同一条 readiness → SubagentSpawned 链路：回传本次 child 选择。
+        await request.onSessionReady?.({
+          providerId: "custom-openai",
+          modelId: "glm-5.2",
+          options: { reasoningLevel: "high" },
+        });
         return await new Promise((_, reject) => {
           options?.signal?.addEventListener(
             "abort",
@@ -759,6 +764,8 @@ describe("background task control", () => {
         agentId: "agent_resume",
         background: true,
         childSessionId,
+        // resume spawn 携带本次解析后的选择（含档位），不能退回 profile 旧值。
+        model: "custom-openai/glm-5.2$high",
         resumed: true,
         status: "running",
       });

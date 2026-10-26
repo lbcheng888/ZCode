@@ -2,6 +2,10 @@ import { useMemo, useState } from "react";
 import { Bot, FileText, ListTodo, LoaderIcon, Target, TerminalSquare } from "lucide-react";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { cn } from "@/components/lib/utils.js";
+import {
+  describeWorkflowSubagentModel,
+  type WorkflowSubagentModelLabel,
+} from "@/components/workflow-timeline/subagent-model-label.js";
 import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
 import type { GoalState, PlanItem } from "@zcode/shared/zcode-protocol-v4";
 import type { ConversationStatusPanelModel } from "../conversationStatusPanelModel.js";
@@ -93,6 +97,20 @@ export function ComposerStatusChips({
       </div>
     </div>
   );
+}
+
+/**
+ * 运行中 Agent 行的模型词。规范串缺席（旧会话/旧 CLI）返回 undefined，调用方不渲染
+ * 这一段；档位只从规范串的 `$level` 来，不动 row 的其它字段。
+ */
+function describeRunningAgentModel(
+  canonical: string | undefined,
+  intl: ReturnType<typeof useZCodeIntl>["intl"],
+): WorkflowSubagentModelLabel | undefined {
+  if (!canonical) return undefined;
+  return describeWorkflowSubagentModel(canonical, {
+    formatMessage: (descriptor, values) => intl.formatMessage(descriptor, values),
+  });
 }
 
 interface Chip {
@@ -189,17 +207,31 @@ function buildChips({
       trailing: <ChipCount count={model.runningSubagentWorks.length} active />,
       panel: (
         <ul className="flex flex-col gap-1.5">
-          {model.runningSubagentWorks.map((agent) => (
-            <li key={agent.childSessionId} className="flex items-center gap-2">
-              <RunningDot />
-              <span className="min-w-0 flex-1 truncate text-ui-base text-foreground-subtle">
-                {agent.title}
-              </span>
-              <span className="shrink-0 text-ui-sm text-foreground-subtlest">
-                {agent.subagentType}
-              </span>
-            </li>
-          ))}
+          {model.runningSubagentWorks.map((agent) => {
+            const agentModel = describeRunningAgentModel(agent.model, intl);
+            return (
+              <li key={agent.childSessionId} className="flex items-center gap-2">
+                <RunningDot />
+                <span className="min-w-0 flex-1 truncate text-ui-base text-foreground-subtle">
+                  {agent.title}
+                </span>
+                {agentModel ? (
+                  // 旧会话/旧 CLI 没有 model 字段，此时保持 title · subagentType 两段。
+                  <span
+                    className="shrink-0 text-ui-sm text-foreground-subtlest"
+                    title={agent.model}
+                  >
+                    {agentModel.level === undefined
+                      ? agentModel.name
+                      : `${agentModel.name} · ${agentModel.level}`}
+                  </span>
+                ) : null}
+                <span className="shrink-0 text-ui-sm text-foreground-subtlest">
+                  {agent.subagentType}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       ),
     });
