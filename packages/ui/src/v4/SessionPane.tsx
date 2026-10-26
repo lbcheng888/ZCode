@@ -5628,11 +5628,17 @@ export function SessionPane({
           }
         />
       ) : null}
-      {/* TodoWrite 进度条紧贴 composer 上方：桌面 continuous 与手机 replayable 共用同一
+      {/* TodoWrite 状态芯片紧贴 composer 上方：桌面 continuous 与手机 replayable 共用同一
           bottom dock，只消费 snapshot.plan（唯一 todo 投影），不新增第二份 todo 状态。
-          浮窗形态只露出输入区，草稿态没有会话 todo，二者都不挂载。 */}
+          芯片只给「当前任务 + 完成比」，明细统一由会话状态面板的待办分区承担；点击芯片
+          展开状态面板，避免两处同时渲染同一份清单。浮窗/草稿态不挂载。 */}
       {!isDraft && !isFloatingPresentation && snapshot?.plan ? (
-        <TodoPanel plan={snapshot.plan} isStreaming={isRunning} className="mb-2" />
+        <TodoPanel
+          plan={snapshot.plan}
+          isStreaming={isRunning}
+          className="mb-2"
+          onRevealDetail={() => handleSummaryPanelVariantChange("panel")}
+        />
       ) : null}
       {composerNode}
       {/* 办公模式显示主动任务推荐；编程模式保留原有小型场景入口。 */}

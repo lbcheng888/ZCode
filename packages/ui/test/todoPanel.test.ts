@@ -67,19 +67,25 @@ describe("TodoPanel", () => {
     expect(html).not.toContain("已经完成的事项");
   });
 
-  it("does not render completed items in the expanded todo list", () => {
+  it("renders only the active item, never the todo list itself", () => {
     const html = renderWithTooltipProvider(
       createElement(TodoPanel, {
         isStreaming: false,
         plan: planState([
           { id: "step-1", status: "completed", content: "已经完成的事项" },
-          { id: "step-2", status: "pending", content: "还要处理的事项" },
+          { id: "step-2", status: "inProgress", content: "正在处理的事项" },
+          { id: "step-3", status: "pending", content: "还要处理的事项" },
         ]),
       }),
     );
 
+    // 芯片只给当前任务与完成比；明细由会话状态面板承担，避免两处重复渲染同一份清单。
+    expect(html).toContain("正在处理的事项");
     expect(html).not.toContain("已经完成的事项");
-    expect(html).toContain("还要处理的事项");
+    expect(html).not.toContain("还要处理的事项");
+    expect(html).not.toMatch(/\+\d/);
+    // 芯片本身可点，用于展开状态面板的待办分区。
+    expect(html).toContain("chat.longRunning.expand");
   });
 
   it("keeps the streaming gradient only while the turn is running", () => {
@@ -118,43 +124,9 @@ describe("TodoPanel", () => {
       }),
     );
 
-    expect(html).toMatch(/<button[^>]*aria-expanded="false"/);
+    expect(html).toMatch(/<button[^>]*aria-label="chat\.longRunning\.expand"/);
+    // 芯片不再展开清单，因此不带展开态语义；plan header 也不能整体成为按钮。
+    expect(html).not.toContain("aria-expanded");
     expect(html).not.toContain('data-slot="plan-header" role="button"');
-  });
-
-  it("folds a long list into a +N row and keeps the inProgress item visible", () => {
-    const items = [
-      ...Array.from({ length: 10 }, (_, index) => ({
-        id: `pending-${index}`,
-        status: "pending" as const,
-        content: `待处理事项 ${index}`,
-      })),
-      { id: "active", status: "inProgress" as const, content: "正在处理的事项" },
-    ];
-
-    const html = renderWithTooltipProvider(
-      createElement(TodoPanel, { isStreaming: true, plan: planState(items), defaultOpen: true }),
-    );
-
-    // 11 个未完成项 → 展示上限 8 项，折叠成 +3。
-    expect(html).toContain("+3");
-    expect(html).toContain("正在处理的事项");
-    // inProgress 优先进入可见窗口，不会被长清单挤出。
-    expect(html).toContain("待处理事项 0");
-    expect(html).not.toContain("待处理事项 9");
-  });
-
-  it("does not render the +N row when the list fits the window", () => {
-    const html = renderWithTooltipProvider(
-      createElement(TodoPanel, {
-        isStreaming: false,
-        plan: planState([
-          { id: "step-1", status: "inProgress", content: "正在处理的事项" },
-          { id: "step-2", status: "pending", content: "下一步" },
-        ]),
-      }),
-    );
-
-    expect(html).not.toMatch(/\+\d/);
   });
 });

@@ -1408,9 +1408,8 @@ export function getV4TodoPanelProjection(): Promise<V4TodoPanelProjection> {
       const composer =
         pane?.querySelector<HTMLElement>(`[data-testid="${composerTestId}"]`) ?? null;
       const text = (panel?.innerText ?? "").replace(/\u00a0/g, " ");
-      // 计数只在头部按钮内渲染；展开态列表内容里的数字不能被误读成进度。
-      const headerText =
-        panel?.querySelector<HTMLElement>("button[aria-expanded]")?.innerText ?? text;
+      // 计数渲染在芯片按钮内；芯片不再展开清单，整个面板文本也可作为兜底。
+      const headerText = panel?.querySelector<HTMLElement>("button")?.innerText ?? text;
       const ratioMatch = headerText.match(/(\d+)\s*\/\s*(\d+)/);
       const panelDock = panel?.closest('[data-v4-composer-dock="true"]') ?? null;
       const composerDock = composer?.closest('[data-v4-composer-dock="true"]') ?? null;
