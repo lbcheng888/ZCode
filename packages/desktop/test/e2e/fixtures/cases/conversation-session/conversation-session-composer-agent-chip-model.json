@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "caseName": "conversation-session-composer-agent-chip-model",
+  "spec": "./test/e2e/conversation-session/conversation-session-composer-agent-chip-model.test.ts",
+  "providerFixtures": [
+    "./test/e2e/fixtures/upstream/common.json",
+    "./test/e2e/fixtures/upstream/conversation-session/conversation-session-composer-agent-chip-model.json"
+  ],
+  "fileFixtures": [],
+  "requests": [
+    {
+      "id": "composer-agent-chip-model-title",
+      "kind": "common",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "标题生成不属于本 case，只需稳定返回以免误匹配业务 fixture。"
+    },
+    {
+      "id": "composer-agent-chip-model-parent-launch",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-tool-use",
+      "syntheticReason": "只有固定 tool_use 才能稳定创建真实的 background Agent(run_in_background=true)，供断言 composer 运行态 chip。"
+    },
+    {
+      "id": "composer-agent-chip-model-parent-launch-ack",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "让父会话先回 idle，再断言运行中子代理的 composer chip，最后才由 completed notification 唤醒。"
+    },
+    {
+      "id": "composer-agent-chip-model-child-held",
+      "kind": "subagent",
+      "source": "synthetic",
+      "timingPolicy": "controlled-stream",
+      "syntheticReason": "运行态 chip 只在子代理 running 期间存在；受控流把 child 固定在这一窗口内，释放后用于证明 chip 会随终态隐藏。"
+    },
+    {
+      "id": "composer-agent-chip-model-parent-notification",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "task-notification",
+      "syntheticReason": "证明子代理终态经 task notification 回到父模型，并与 composer chip 的隐藏时机对齐。"
+    }
+  ]
+}

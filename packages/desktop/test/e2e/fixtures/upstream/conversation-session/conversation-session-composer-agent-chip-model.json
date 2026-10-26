@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "caseName": "conversation-session-composer-agent-chip-model",
+  "spec": "./test/e2e/conversation-session/conversation-session-composer-agent-chip-model.test.ts",
+  "fixtures": [
+    {
+      "id": "composer-agent-chip-model-title",
+      "description": "composer Agent chip 用例的固定标题响应。",
+      "metadata": {
+        "kind": "common",
+        "timingPolicy": "fast-text",
+        "source": "synthetic",
+        "syntheticReason": "标题生成不属于本 case，只需稳定返回以免误匹配业务 fixture。"
+      },
+      "match": {
+        "method": "POST",
+        "pathIncludes": "/messages",
+        "bodyIncludes": [
+          "Generate a concise title",
+          "E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT"
+        ]
+      },
+      "response": {
+        "statusCode": 200,
+        "statusMessage": "OK",
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "body": "{\"id\":\"upstream-e2e-composer-agent-chip-model-title\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"title\\\":\\\"Composer Agent chip\\\"}\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":125,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":24,\"service_tier\":\"standard\"}}"
+      }
+    },
+    {
+      "id": "composer-agent-chip-model-parent-launch",
+      "description": "父模型启动一个 background Agent。",
+      "metadata": {
+        "kind": "main",
+        "timingPolicy": "fast-tool-use",
+        "source": "synthetic",
+        "syntheticReason": "只有固定 tool_use 才能稳定创建真实的 background Agent(run_in_background=true)，供断言 composer 运行态 chip。"
+      },
+      "maxMatches": 1,
+      "match": {
+        "method": "POST",
+        "pathIncludes": "/messages",
+        "lastUserMessageIncludes": ["E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT"],
+        "bodyIncludes": [
+          "E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT",
+          "E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT_DONE"
+        ],
+        "bodyExcludes": [
+          "Async agent launched successfully",
+          "Generate a concise title",
+          "CRITICAL: Respond with TEXT ONLY"
+        ]
+      },
+      "response": {
+        "statusCode": 200,
+        "toolUse": {
+          "id": "toolu_e2e_composer_agent_chip_model",
+          "name": "Agent",
+          "input": {
+            "description": "Composer chip model probe",
+            "prompt": "E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD: reply with E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD_DONE.",
+            "run_in_background": true,
+            "subagent_type": "general-purpose"
+          }
+        }
+      }
+    },
+    {
+      "id": "composer-agent-chip-model-parent-launch-ack",
+      "description": "父模型在 background Agent launch ACK 后结束当前 turn。",
+      "metadata": {
+        "kind": "main",
+        "timingPolicy": "fast-text",
+        "source": "synthetic",
+        "syntheticReason": "让父会话先回 idle，再断言运行中子代理的 composer chip，最后才由 completed notification 唤醒。"
+      },
+      "maxMatches": 1,
+      "match": {
+        "method": "POST",
+        "pathIncludes": "/messages",
+        "bodyIncludes": [
+          "E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT",
+          "Async agent launched successfully",
+          "toolu_e2e_composer_agent_chip_model"
+        ],
+        "bodyExcludes": [
+          "Generate a concise title",
+          "CRITICAL: Respond with TEXT ONLY"
+        ],
+        "lastUserMessageExcludes": ["<task-notification>"]
+      },
+      "response": {
+        "statusCode": 200,
+        "text": {
+          "id": "upstream-e2e-composer-agent-chip-model-launch-ack",
+          "text": "composer-agent-chip-model-launched-ok"
+        }
+      }
+    },
+    {
+      "id": "composer-agent-chip-model-child-held",
+      "description": "子代理响应被受控流挂住，直到 chip 断言完成后由测试释放。",
+      "metadata": {
+        "kind": "subagent",
+        "timingPolicy": "controlled-stream",
+        "source": "synthetic",
+        "syntheticReason": "运行态 chip 只在子代理 running 期间存在；受控流把 child 固定在这一窗口内，释放后用于证明 chip 会随终态隐藏。"
+      },
+      "maxMatches": 1,
+      "match": {
+        "method": "POST",
+        "pathIncludes": "/messages",
+        "lastUserMessageIncludes": ["E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD"],
+        "bodyIncludes": ["E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD"],
+        "bodyExcludes": [
+          "Async agent launched successfully",
+          "Generate a concise title",
+          "CRITICAL: Respond with TEXT ONLY"
+        ]
+      },
+      "response": {
+        "statusCode": 200,
+        "statusMessage": "OK",
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "releaseAfterChunks": 2,
+        "chunks": [
+          {
+            "offsetMs": 0,
+            "text": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"composer-agent-chip-model-child-held\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":120,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\n"
+          },
+          {
+            "offsetMs": 100,
+            "text": "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+          },
+          {
+            "offsetMs": 200,
+            "text": "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD_DONE\"}}\n\n"
+          },
+          {
+            "offsetMs": 300,
+            "text": "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+          },
+          {
+            "offsetMs": 400,
+            "text": "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":120,\"output_tokens\":4,\"service_tier\":\"standard\"}}\n\n"
+          },
+          {
+            "offsetMs": 500,
+            "text": "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+          }
+        ],
+        "text": {
+          "id": "composer-agent-chip-model-child-held",
+          "inputTokens": 120,
+          "outputTokens": 4,
+          "text": "E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD_DONE"
+        }
+      }
+    },
+    {
+      "id": "composer-agent-chip-model-parent-notification",
+      "description": "父模型消费 completed background Agent notification。",
+      "metadata": {
+        "kind": "main",
+        "timingPolicy": "task-notification",
+        "source": "synthetic",
+        "syntheticReason": "证明子代理终态经 task notification 回到父模型，并与 composer chip 的隐藏时机对齐。"
+      },
+      "maxMatches": 1,
+      "match": {
+        "method": "POST",
+        "pathIncludes": "/messages",
+        "lastUserMessageIncludes": [
+          "<task-notification>",
+          "<status>completed</status>"
+        ],
+        "bodyIncludes": [
+          "<tool-use-id>toolu_e2e_composer_agent_chip_model</tool-use-id>",
+          "E2E_COMPOSER_AGENT_CHIP_MODEL_CHILD_DONE"
+        ],
+        "bodyExcludes": [
+          "Generate a concise title",
+          "CRITICAL: Respond with TEXT ONLY"
+        ]
+      },
+      "response": {
+        "statusCode": 200,
+        "text": {
+          "id": "upstream-e2e-composer-agent-chip-model-parent-done",
+          "text": "E2E_COMPOSER_AGENT_CHIP_MODEL_PARENT_DONE"
+        }
+      }
+    }
+  ]
+}
