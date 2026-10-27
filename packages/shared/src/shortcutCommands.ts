@@ -36,6 +36,7 @@ export type ShortcutCommandId =
   | "zoomOut"
   | "resetZoom"
   | "composerSend"
+  | "composerSendNow"
   | "composerInsertNewline";
 
 /**
@@ -92,6 +93,14 @@ export const SHORTCUT_COMMANDS: readonly ShortcutCommandEntry[] = [
   // composer 作用域：由输入框 Lexical 插件消费，不进 useAppKeyboard / 菜单。
   // channel 仅作类型占位（渲染进程行为），分发方按 scope 识别。
   { id: "composerSend", channel: "window", scope: "composer", defaultBindings: ["Enter"] },
+  // 立即提交：忙时引导当前轮（guide），空闲时与普通发送等价。与 composerSend 分开，
+  // 避免 Enter 的排队/反向投递语义被「立即」意图改写。
+  {
+    id: "composerSendNow",
+    channel: "window",
+    scope: "composer",
+    defaultBindings: ["CmdOrCtrl+s"],
+  },
   {
     id: "composerInsertNewline",
     channel: "window",

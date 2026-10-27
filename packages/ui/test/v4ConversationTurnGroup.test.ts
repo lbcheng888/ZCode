@@ -1174,6 +1174,29 @@ describe("ConversationTurnGroup assistant history status", () => {
 
     expect(html).toContain("已工作 5 秒");
     expect(html).not.toContain("工作中 5 秒");
+    // 纯 reasoning 段没有工具调用，不追加计数段。
+    expect(html).not.toContain("data-history-tool-call-count");
+  });
+
+  it("summarizes the work segment with its tool-call count", () => {
+    const first = toolCallRow(10, "Read", { file_path: "AGENTS.md" });
+    const second = toolCallRow(11, "Bash", { command: "pnpm test" });
+    const html = renderUnit(
+      baseUnit({
+        key: "turn-tools:1",
+        turnId: "turn-tools",
+        isLastTurn: false,
+        workStatus: { state: "completed", durationMs: 5_000 },
+        assistantWorkRows: [first, second],
+        assistantHistoryRows: [first, second],
+        renderRows: [first, second],
+      }),
+      { locale: "zh-CN" },
+    );
+
+    expect(html).toContain("已工作 5 秒");
+    expect(html).toContain("2 次工具调用");
+    expect(html).toContain('data-history-tool-call-count="2"');
   });
 
   it("labels an authoritative topic interruption separately from a manual stop", () => {

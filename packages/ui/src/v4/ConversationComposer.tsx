@@ -153,6 +153,7 @@ import {
   shouldReverseFollowupDeliveryForPointer,
 } from "@/v4/composer/followupModeSettings.js";
 import { isAppleKeyboardPlatform } from "@/lib/keyboardShortcuts.js";
+import { hasChatLoadingBlockingActiveWork } from "@/v4/chatLoadingVisibility.js";
 import { usePrimaryFollowupModifier } from "@/v4/composer/usePrimaryFollowupModifier.js";
 import {
   consumeV4ComposerDraftAttachments,
@@ -431,6 +432,12 @@ export interface ConversationComposerProps {
    */
   workingDurationMs?: number;
   /**
+   * composerSendNow 的生效键位展示串（宿主用 useShortcutCommandLabel 读取）。
+   * 仅在可 steer 的忙碌态（当前轮运行中且不是 compact/goalVerifier）且无附件时，
+   * 作为发送键 tooltip 的补充说明展示。
+   */
+  immediateSendShortcutLabel?: string;
+  /**
    * v4 bottom dock 阻塞交互 id。存在时 composer 只隐藏不卸载，保留草稿、附件与编辑器实例。
    */
   blockingRequestId?: string | null;
@@ -560,6 +567,7 @@ function ConversationComposerImpl({
   centered = false,
   layout = "stacked",
   workingDurationMs,
+  immediateSendShortcutLabel,
   blockingRequestId = null,
   disabled: disabledProp = false,
   onRetryInitialization,
@@ -1294,6 +1302,11 @@ function ConversationComposerImpl({
     isWebRemoteControl,
   });
   const canStop = Boolean(snapshot?.control.canStop);
+  // compact / goalVerifier 是 completion-blocking active work，但不是可 steer 的 assistant
+  // active turn；CLI 对这两种状态刻意 enqueue（computeInputRouting 的 compacting/
+  // goalVerifying 分支）。此时下发显式 guide 会绕过该保护，输入既不进 queue 也不进历史。
+  const canSteerImmediately =
+    canStop && !hasChatLoadingBlockingActiveWork(snapshot?.control.activeWorks ?? []);
   const modifiedEnterReversesDelivery = modifiedEnterSubmits && canStop;
   const hasText = text.trim().length > 0;
   const hasDraftToSubmit =
@@ -1798,6 +1811,24 @@ function ConversationComposerImpl({
     [submit],
   );
 
+  // composerSendNow：可 steer 的忙碌态只做「引导当前轮」（guide = 真插入，不中止当前
+  // turn）；空闲或 compact/goalVerifier 运行时省略 requestedDelivery，让 CLI 按
+  // inputRouting 自行判定（idle→startNow，维护态→queue）。显式 startNow 是抢占并中止
+  // 当前轮，与「插入」相反，因此不能用在忙碌分支。
+  const handleImmediateEditorSubmit = useCallback(
+    (value: string) => {
+      textRef.current = value;
+      void submit(
+        undefined,
+        undefined,
+        undefined,
+        canSteerImmediately ? "guide" : undefined,
+      );
+      return false;
+    },
+    [canSteerImmediately, submit],
+  );
+
   const handleClearQueueSend = useCallback(() => {
     if (!heldQueueConfirmation) return;
     void submit(
@@ -1898,6 +1929,15 @@ function ConversationComposerImpl({
     ? intl.formatMessage({ id: modifierTooltip.titleId })
     : sendTooltipTitle;
   const resolvedSendTooltipShortcut = modifierTooltip?.shortcut ?? sendShortcut;
+  // 带附件时 CLI 会把 guide 降级为 queue（guide.attachmentsUnsupported），
+  // 这里不展示「引导当前轮」的错误承诺。
+  const resolvedSendTooltipDescription =
+    canSteerImmediately && !hasAttachments && immediateSendShortcutLabel
+      ? intl.formatMessage(
+          { id: "chat.followup.steerNow" },
+          { shortcut: immediateSendShortcutLabel },
+        )
+      : undefined;
   const stopTooltipTitle = intl.formatMessage({ id: "chat.stop" });
   const visibleError = error && !shouldSuppressChatErrorBanner(error) ? error : null;
 
@@ -2400,6 +2440,7 @@ function ConversationComposerImpl({
         ) : (
           <ControlHintTooltip
             title={resolvedSendTooltipTitle}
+            description={resolvedSendTooltipDescription}
             shortcut={resolvedSendTooltipShortcut}
             open={Boolean(modifierTooltip) || sendTooltipOpen}
             onOpenChange={setSendTooltipOpen}
@@ -2450,6 +2491,7 @@ function ConversationComposerImpl({
       pending,
       provider,
       modifierTooltip,
+      resolvedSendTooltipDescription,
       resolvedSendTooltipShortcut,
       resolvedSendTooltipTitle,
       sendTooltipOpen,
@@ -2661,6 +2703,7 @@ function ConversationComposerImpl({
           }
           enterSubmits={enterSubmits}
           onModifiedSubmit={modifiedEnterSubmits ? handleModifiedEditorSubmit : undefined}
+          onImmediateSubmit={handleImmediateEditorSubmit}
           submitLabel={sendTooltipTitle}
           showSlashButton
           // @ 是 Plugin / 文件 / 对话 / 画板主入口；# 会话与 $ / ¥ / ￥ Skills

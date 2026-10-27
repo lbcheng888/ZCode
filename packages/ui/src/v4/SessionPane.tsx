@@ -168,6 +168,7 @@ import { projectSessionConfigToTaskConfigOptions } from "@/v4/composer/sessionCo
 import { useDraftRuntimeRebuildGate } from "@/v4/composer/useDraftRuntimeRebuildGate.js";
 import { useDraftModelReadinessGate } from "@/v4/composer/useDraftModelReadinessGate.js";
 import { useSettings } from "@/hooks/useSettingService.js";
+import { useShortcutCommandLabel } from "@/shortcuts/useShortcutBindings.js";
 import { useZCodeStoreWithDefault } from "@/store/StoreProvider.js";
 import { useZCodeSessionStore } from "@/store/zcodeSessionStore.js";
 import {
@@ -2022,6 +2023,8 @@ export function SessionPane({
     ],
   );
   const { settings: sharedSettings } = useSettings();
+  // composerSendNow 的生效键位：由宿主读取，composer 只负责在忙碌时展示。
+  const immediateSendShortcutLabel = useShortcutCommandLabel("composerSendNow");
   const readPlanIdentitySnapshot = usePlanIdentitySnapshot(
     sharedSettings?.providerFamilyDomain,
     sharedSettings?.providerFamilyDomain
@@ -5461,6 +5464,7 @@ export function SessionPane({
       workingDurationMs={
         floatingTurnRunning ? floatingLatestTurnSummary?.workDurationMs : undefined
       }
+      immediateSendShortcutLabel={immediateSendShortcutLabel}
       blockingRequestId={blockingInteractionId}
       listenAddToChatEvents={focused}
       externalTextInsertRequest={focused && sessionId === null ? composerTextInsertRequest : null}
@@ -5663,7 +5667,9 @@ export function SessionPane({
       {/* composer 上方状态 chip 行（目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度）：
           桌面 continuous 与手机 replayable 共用同一 bottom dock，数据全部来自状态面板模型
           （snapshot.plan 是唯一的 todo 投影，没有第二份状态）。每颗 chip 一行摘要，点开
-          就地展开明细；侧栏不再渲染待办分区，避免同一份清单出现两个明细面。 */}
+          就地展开明细；侧栏不再渲染待办分区，避免同一份清单出现两个明细面。
+          计划行是可点入口：与状态面板复用 buildSessionPlanOpenRequest，跳到计划详情侧 tab
+          （parentSessionId 由宿主补齐，chip 不感知 scope/远程身份）。 */}
       {!isDraft && !isFloatingPresentation ? (
         <ComposerStatusChips
           model={statusPanelModel}
@@ -5673,6 +5679,8 @@ export function SessionPane({
               ? handleRequestClearGoal
               : undefined
           }
+          parentSessionId={sessionId ?? undefined}
+          onOpenPlanDetail={onOpenPlanDetail ? handleOpenPlanDetail : undefined}
           className="mb-2"
         />
       ) : null}

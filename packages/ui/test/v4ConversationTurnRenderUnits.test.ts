@@ -15,6 +15,7 @@ import {
   resolveNextHighspeedExpiryMs,
 } from "@/v4/conversationTurnRenderUnits.js";
 import { resolveAssistantCopyText } from "@/v4/ConversationTurnRow.js";
+import { countSegmentToolCalls } from "@/v4/conversationTurnWorkSegments.js";
 
 function baseRow<T extends ConversationRow>(
   row: Omit<T, "createdAt" | "createdAtSeq" | "rowId" | "turnId"> & {
@@ -427,6 +428,30 @@ describe("buildConversationTurnRenderUnits", () => {
       "assistantText",
     ]);
     expect(units[0]?.renderRows.map((row) => row.kind)).not.toContain("turnHeader");
+    expect(units[0]?.workSegments?.[0]?.toolCallCount).toBe(1);
+  });
+
+  it("counts tool calls per visual work segment (guide splits the count)", () => {
+    const units = buildConversationTurnRenderUnits([
+      turnHeader(1, { turnId: "turn-1", activeMs: 9_000 }),
+      userInput(2, "先查目录", { turnId: "turn-1" }),
+      toolCall(3, "Bash", { turnId: "turn-1" }),
+      userInput(4, "改成读文件", { turnId: "turn-1", guided: true }),
+      toolCall(5, "Read", { turnId: "turn-1" }),
+      toolCall(6, "Read", { turnId: "turn-1" }),
+    ]);
+
+    expect(units[0]?.workSegments?.map((segment) => segment.toolCallCount)).toEqual([1, 2]);
+  });
+
+  it("excludes the internal EnterPlanMode boundary from the tool-call summary", () => {
+    const rows = [
+      toolCall(3, "Bash", { turnId: "turn-1" }),
+      toolCall(4, "EnterPlanMode", { turnId: "turn-1" }),
+      toolCall(5, "Read", { turnId: "turn-1" }),
+    ];
+
+    expect(countSegmentToolCalls(rows)).toBe(2);
   });
 
   it("hides completed reasoning rows whose text is empty or whitespace-only", () => {

@@ -22,6 +22,7 @@
 - assistant 轮尾动作栏的“复制”按本轮聚合：先复制全部 assistant 正文段，再追加同轮所有 `ExitPlanMode` 的完整 Markdown；不读取卡片裁切 DOM，也不包含其他工具结果。卡片自身的复制按钮仍只复制该计划。
 - 右上角摘要新增独立“计划”分区，只列出当前有效 conversation 分支中已经进入 `success`、`error` 或 `cancelled` 终态且含有正文的 `ExitPlanMode`；流式、运行中和等待审批状态不进入目录。
 - 计划目录按 `rowId` 从新到旧排序。点击目录项与点击时间线卡片一致，复用同一个 `(workspaceKey, parentSessionId, toolCallId)` Side Pane tab。
+- composer 上方状态 chip 的“计划”面板复用同一入口：展开后的每条计划行点击时，与状态面板/时间线卡片打开同一个 Side Pane tab（`buildSessionPlanOpenRequest` 请求形状一致，scope 由宿主补齐）。宿主未注入 `onOpenPlanDetail` 时，计划行保持纯文本，不跳转。
 - 手机端沿用既有 Side Pane 抽屉；核心入口不因窄屏消失。
 - 手机远控专用 `V4ChatPane` 必须与桌面 `V4WorkspaceChatArea` 一样接收
   `onOpenPlanDetail`；点击卡片或“查看完整计划”后只更新 renderer Side Pane 状态，

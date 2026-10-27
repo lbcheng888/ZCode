@@ -466,6 +466,16 @@ describe("快捷键冲突检测（拒绝 + 标红）", () => {
     expect(checkShortcutBindingConflict("composerSend", "CmdOrCtrl+Enter")).toBeNull();
   });
 
+  it("CmdOrCtrl+S 保留键只拦 global：composerSendNow 默认键可绑定（spec §12.1）", () => {
+    expect(RESERVED_BINDINGS.has("CmdOrCtrl+s")).toBe(true);
+    // 浏览器/编辑原生保存键对 global 重绑仍保留；composer 作用域的命令默认键不受限
+    expect(checkShortcutBindingConflict("toggleSidebar", "CmdOrCtrl+s")).toEqual({
+      kind: "reserved",
+      binding: "CmdOrCtrl+s",
+    });
+    expect(checkShortcutBindingConflict("composerSendNow", "CmdOrCtrl+s")).toBeNull();
+  });
+
   it("冲突检测作用域隔离：composer 与 global 同键互不冲突（spec §12.2）", () => {
     // CmdOrCtrl+k 是 openCommandCenter（global）默认绑定；composer 命令绑它不算冲突
     expect(checkShortcutBindingConflict("composerSend", "CmdOrCtrl+k")).toBeNull();

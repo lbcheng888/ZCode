@@ -64,6 +64,7 @@ turn actions 逐行消费 `row.actions`。任何带 action 的 assistant row 都
 - assistant work history 的状态标签必须区分运行中、正常完成和中断：运行中显示“工作中 N 秒”，正常结束显示“已工作 N 秒”，`completedInterrupted` 的末段只显示“已停止”/`Stopped`，不得附带耗时。guide turn 优先消费 `turnHeader.workSegments` 的权威分段时间；无分段事实的普通/旧 snapshot 才回退到 turn 级 `activeMs`、`endedAt - startedAt` 或运行时 UI 时钟。
 - `turnHeader.executionKind` 是是否存在 Agent 工作生命周期的权威事实。`controlOnly` 轮只承载可见控制输入，不产生 work status；字段缺失的旧 snapshot 只在有真实 work row、running 或正工时时兼容派生。
 - `lightBoundary`（例如 model change）先从 assistant work rows 分离，再计算 work status；边界行本身不能把 control-only query 推成“工作中/已工作”。
+- 每段状态标签后追加本段工具调用数（“已工作 N 秒 · 3 次工具调用”）。计数是纯投影派生：只数本段 `assistantWorkRows` 中 `kind === "toolCall"` 的行，排除内部 `EnterPlanMode` 边界；浏览器自动截图在进入 work segment 前已拆到轮尾，不计入。计数为 0 时不渲染该段。
 
 ```text
 turn
@@ -86,11 +87,13 @@ ConversationSnapshot.rows
   -> buildConversationTurnRenderUnits(rows, nowMs)
   -> split leadingBoundaryRows / assistantWorkRows
   -> unit.workSegments[].workStatus { state, durationMs } | undefined
+  -> unit.workSegments[].toolCallCount（段内 toolCall 行现算，排除 EnterPlanMode）
   -> each segment AssistantHistoryStatus
        state=running   => "工作中 N 秒"
        state=completed => "已工作 N 秒"
        state=interrupted => "已停止"
        undefined       => 不渲染工作状态
+       toolCallCount>0 => 追加“N 次工具调用”
 ```
 
 `/goal` 的可见 query 与真实 continuation 是两个产品 turn，但只有后者执行 Agent：

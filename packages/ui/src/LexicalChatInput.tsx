@@ -510,6 +510,7 @@ function selectAfterPromptMentionById(mentionId: string): boolean {
 function KeyboardPlugin({
   onSubmit,
   onModifiedSubmit,
+  onImmediateSubmit,
   disabled,
   submitDisabled,
   allowSubmitWhenEmpty,
@@ -517,6 +518,7 @@ function KeyboardPlugin({
 }: {
   onSubmit: (text: string) => LexicalSubmitResult;
   onModifiedSubmit?: (text: string) => LexicalSubmitResult;
+  onImmediateSubmit?: (text: string) => LexicalSubmitResult;
   disabled?: boolean;
   submitDisabled?: boolean;
   allowSubmitWhenEmpty?: boolean;
@@ -527,10 +529,12 @@ function KeyboardPlugin({
   const effectiveShortcutBindings = useEffectiveShortcutBindings();
   const composerEffectiveRef = useRef({
     composerSend: effectiveShortcutBindings.composerSend ?? [],
+    composerSendNow: effectiveShortcutBindings.composerSendNow ?? [],
     composerInsertNewline: effectiveShortcutBindings.composerInsertNewline ?? [],
   });
   composerEffectiveRef.current = {
     composerSend: effectiveShortcutBindings.composerSend ?? [],
+    composerSendNow: effectiveShortcutBindings.composerSendNow ?? [],
     composerInsertNewline: effectiveShortcutBindings.composerInsertNewline ?? [],
   };
 
@@ -559,6 +563,32 @@ function KeyboardPlugin({
         const scopedAction = resolveComposerKeyAction(event, composerEffective);
         if (scopedAction === "newline") {
           return false;
+        }
+        // 立即提交（忙时引导当前轮）：用户把 composerSendNow 改绑到 Enter 时也必须在这里生效，
+        // 否则改绑是死绑定。它是显式意图，不让位反转投递；没有处理器（如消息编辑态）时
+        // 只吞掉这次按键，绝不回退成普通发送。
+        if (scopedAction === "sendNow") {
+          const modifiedScopedEnter = event.shiftKey || event.ctrlKey || event.metaKey;
+          if (submitDisabled || (!modifiedScopedEnter && !enterSubmits)) {
+            return false;
+          }
+          event.preventDefault();
+          if (!onImmediateSubmit) {
+            return true;
+          }
+          if (
+            shouldSubmitLexicalEnter({
+              allowSubmitWhenEmpty,
+              enterSubmits: modifiedScopedEnter ? true : enterSubmits,
+              text,
+            })
+          ) {
+            const submitResult = onImmediateSubmit(text);
+            if (shouldResetLexicalEditorAfterSubmit(submitResult)) {
+              resetEditor(editor);
+            }
+          }
+          return true;
         }
         if (scopedAction === "send") {
           const modifiedScopedEnter = event.shiftKey || event.ctrlKey || event.metaKey;
@@ -750,12 +780,24 @@ function KeyboardPlugin({
         return;
       }
       if (submitDisabled) {
+        // sendNow 的默认键是 CmdOrCtrl+S：即使暂时不可提交也要吞掉按键，
+        // 否则焦点在编辑器里按 Cmd+S 会落到浏览器「保存网页」。
+        if (scopedAction === "sendNow") {
+          event.preventDefault();
+        }
         return;
       }
       event.preventDefault();
+      // 立即提交：由调用方决定忙碌语义（主 composer 仅在可 steer 的忙碌态传 guide）；
+      // 没有处理器时只消费按键，不回退成普通发送，避免把消息编辑态表单一并提交。
+      if (scopedAction === "sendNow" && !onImmediateSubmit) {
+        return;
+      }
       const text = getEditorMarkdown(editor.getEditorState());
       if (shouldSubmitLexicalEnter({ allowSubmitWhenEmpty, enterSubmits: true, text })) {
-        const submitResult = onSubmit(text);
+        // 只有 sendNow 动作才走立即提交；send 动作即使宿主注入了处理器也必须走普通发送。
+        const submitResult =
+          scopedAction === "sendNow" && onImmediateSubmit ? onImmediateSubmit(text) : onSubmit(text);
         if (shouldResetLexicalEditorAfterSubmit(submitResult)) {
           resetEditor(editor);
         }
@@ -795,6 +837,7 @@ function KeyboardPlugin({
     disabled,
     editor,
     enterSubmits,
+    onImmediateSubmit,
     onModifiedSubmit,
     onSubmit,
     submitDisabled,
@@ -1315,6 +1358,8 @@ interface LexicalChatInputProps {
   enterSubmits?: boolean;
   onSubmit: (text: string) => LexicalSubmitResult;
   onModifiedSubmit?: (text: string) => LexicalSubmitResult;
+  /** composerSendNow：立即提交（主 composer 忙时解释为引导当前轮）。 */
+  onImmediateSubmit?: (text: string) => LexicalSubmitResult;
   onChange?: (text: string) => void;
   onFocus?: () => void;
   triggerPanelContainer?: HTMLElement | null;
@@ -1349,6 +1394,7 @@ export function LexicalChatInput({
   enterSubmits = true,
   onSubmit,
   onModifiedSubmit,
+  onImmediateSubmit,
   onChange,
   onFocus,
   triggerPanelContainer,
@@ -1494,6 +1540,7 @@ export function LexicalChatInput({
           <KeyboardPlugin
             onSubmit={handleSubmit}
             onModifiedSubmit={onModifiedSubmit}
+            onImmediateSubmit={onImmediateSubmit}
             disabled={disabled}
             submitDisabled={submitDisabled}
             allowSubmitWhenEmpty={allowSubmitWhenEmpty}

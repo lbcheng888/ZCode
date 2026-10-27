@@ -230,6 +230,52 @@ describe("ComposerStatusChips", () => {
     expect(legacy).toContain("修 um_main");
   });
 
+  it("plan rows open the plan detail side tab when the host wires the handler", () => {
+    const onOpenPlanDetail = vi.fn();
+    const planItem = {
+      rowId: 11,
+      toolCallId: "tool-plan-1",
+      markdown: "## 计划\n- 第一步",
+      title: "实施计划",
+      planFilePath: "/workspace/plan.md",
+    };
+    const { container } = render(
+      createElement(ComposerStatusChips, {
+        model: model({ sessionPlans: { items: [planItem] } }),
+        parentSessionId: "session-1",
+        onOpenPlanDetail,
+        defaultOpenChip: "plans",
+      }),
+    );
+
+    fireEvent.click(container.querySelector('[data-plan-directory-tool-call-id="tool-plan-1"]')!);
+
+    // 复用状态面板的请求形状：chip 只交意图，scope 由宿主补齐。
+    expect(onOpenPlanDetail).toHaveBeenCalledWith({
+      parentSessionId: "session-1",
+      toolCallId: "tool-plan-1",
+      markdown: "## 计划\n- 第一步",
+      planFilePath: "/workspace/plan.md",
+    });
+  });
+
+  it("plan rows stay plain text when no host handler is provided", () => {
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, {
+        model: model({
+          sessionPlans: {
+            items: [{ rowId: 11, toolCallId: "tool-plan-1", markdown: "## 计划", title: "实施计划" }],
+          },
+        }),
+        parentSessionId: "session-1",
+        defaultOpenChip: "plans",
+      }),
+    );
+
+    expect(html).toContain("实施计划");
+    expect(html).not.toContain("data-plan-directory-tool-call-id");
+  });
+
   it("shows a running spinner on the progress chip only while streaming", () => {
     const running = renderToStaticMarkup(
       createElement(ComposerStatusChips, { model: model(), isStreaming: true }),

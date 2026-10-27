@@ -873,6 +873,10 @@ exceptions:
       - packages/ui/src/lib/providerFamilyConnectionTransition.ts
       - packages/ui/src/prompt-editor/useComposerToolbarFit.ts
     reason: Composer model, provider and toolbar files reached staging without the MR architecture gate running; adopting the packages/ui composer toolbar needs a separate module boundary refactor.
+  - id: composer-send-now-shortcut-unmanaged-edit
+    rule: unmanaged-new-file
+    paths: [packages/ui/src/shortcuts/composerShortcuts.ts]
+    reason: 已准入的 composer 快捷键解析器只新增 composerSendNow 动作与匹配优先序（立即提交在忙时引导当前轮）；键位知识仍收敛在 shortcuts 内核，未新增依赖或跨模块边。接管整个 packages/ui/src/shortcuts 需要单独的模块边界梳理，不在本次交互改动内。
   - id: provider-endpoint-routing-unmanaged-edit
     rule: unmanaged-new-file
     paths:

@@ -22,12 +22,30 @@ function enterEvent(patch: Partial<ShortcutBindingEvent> = {}): ShortcutBindingE
   };
 }
 
-/** 默认生效表（无用户覆盖）：composerSend=Enter、composerInsertNewline=Shift+Enter。 */
+/**
+ * 默认生效表（无用户覆盖）：composerSend=Enter、composerSendNow=CmdOrCtrl+S、
+ * composerInsertNewline=Shift+Enter。
+ */
 function defaultEffective(): ComposerEffectiveBindings {
   return {
     composerSend: getDefaultShortcutBindings("composerSend"),
+    composerSendNow: getDefaultShortcutBindings("composerSendNow"),
     composerInsertNewline: getDefaultShortcutBindings("composerInsertNewline"),
   };
+}
+
+/** 构造非 Enter 的字母键事件（composerSendNow 默认绑定 CmdOrCtrl+S）。 */
+function sendNowEvent(
+  patch: Partial<ShortcutBindingEvent> = {},
+  modifier: "meta" | "ctrl" = "meta",
+): ShortcutBindingEvent {
+  return enterEvent({
+    key: "s",
+    code: "KeyS",
+    metaKey: modifier === "meta",
+    ctrlKey: modifier === "ctrl",
+    ...patch,
+  });
 }
 
 /** Ctrl+Enter 党：把发送改绑为 CmdOrCtrl+Enter（整组替换，裸 Enter 移除）。 */
@@ -94,9 +112,43 @@ describe("composer 作用域键位解析（spec §12.3）", () => {
     ).toBe("newline");
   });
 
+  it("composerSendNow 默认 CmdOrCtrl+S 命中 sendNow（mac Cmd / win·linux Ctrl）", () => {
+    expect(resolveComposerKeyAction(sendNowEvent({}, "meta"), defaultEffective(), MAC)).toBe(
+      "sendNow",
+    );
+    expect(resolveComposerKeyAction(sendNowEvent({}, "ctrl"), defaultEffective(), WIN)).toBe(
+      "sendNow",
+    );
+    expect(resolveComposerKeyAction(sendNowEvent({}, "ctrl"), defaultEffective(), LINUX)).toBe(
+      "sendNow",
+    );
+    // mac 显式 Ctrl 是独立修饰（系统编辑保留区），未绑定就不命中；裸 s 也不命中
+    expect(resolveComposerKeyAction(sendNowEvent({}, "ctrl"), defaultEffective(), MAC)).toBeNull();
+    expect(
+      resolveComposerKeyAction(enterEvent({ key: "s", code: "KeyS" }), defaultEffective(), MAC),
+    ).toBeNull();
+  });
+
+  it("composerSendNow 与 composerSend 同键时 sendNow 优先（否则该命令是死绑定）", () => {
+    const effective: ComposerEffectiveBindings = {
+      ...defaultEffective(),
+      composerSend: ["CmdOrCtrl+s"],
+    };
+    expect(resolveComposerKeyAction(sendNowEvent({}, "meta"), effective, MAC)).toBe("sendNow");
+  });
+
+  it("composerSendNow 改绑到 Enter 时解析为 sendNow，不等价于普通发送", () => {
+    const effective: ComposerEffectiveBindings = {
+      ...defaultEffective(),
+      composerSendNow: ["Enter"],
+    };
+    expect(resolveComposerKeyAction(enterEvent(), effective)).toBe("sendNow");
+  });
+
   it("未绑定（显式空数组）时解析器全部未命中，主链前置检查落换行", () => {
     const effective: ComposerEffectiveBindings = {
       composerSend: [],
+      composerSendNow: [],
       composerInsertNewline: [],
     };
     expect(resolveComposerKeyAction(enterEvent(), effective)).toBeNull();

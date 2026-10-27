@@ -389,6 +389,94 @@ describe("ConversationComposer error banner", () => {
     expect(captured.chatPromptEditorProps?.onModifiedSubmit).toEqual(expect.any(Function));
   });
 
+  it("composerSendNow steers (guide) while running and sends normally when idle", async () => {
+    const draftOverrides = {
+      composerDraft: { text: "", updatedAt: 0 },
+      updateComposerContent: vi.fn(),
+      replaceComposerDraft: vi.fn(),
+    };
+
+    // 空闲：省略 requestedDelivery，交给 CLI 默认 startNow（显式 startNow 会抢占当前轮）。
+    const idleSend = vi.fn(async () => {});
+    renderComposerWithSnapshot(makeSnapshot(), { ...draftOverrides, onSendText: idleSend });
+    const idleImmediateSubmit = captured.chatPromptEditorProps?.onImmediateSubmit;
+    expect(idleImmediateSubmit).toEqual(expect.any(Function));
+    expect((idleImmediateSubmit as (value: string) => boolean)("空闲草稿")).toBe(false);
+    await vi.waitFor(() => expect(idleSend).toHaveBeenCalledTimes(1));
+    expect(idleSend).toHaveBeenCalledWith(
+      expect.stringContaining("空闲草稿"),
+      expect.not.objectContaining({ requestedDelivery: expect.anything() }),
+    );
+
+    // 运行中且目标可 steer：必须用 guide（真插入）；startNow 会中止当前轮。
+    const runningSnapshot = makeSnapshot();
+    runningSnapshot.control = {
+      ...runningSnapshot.control,
+      phase: "running",
+      sessionEnded: false,
+      canStop: true,
+      stopTargetKind: "assistant",
+      activeWorks: [{ kind: "primaryTurn", startedAt: 1 }],
+    };
+    runningSnapshot.config.followupMode = "queue";
+    const runningSend = vi.fn(async () => {});
+    renderComposerWithSnapshot(runningSnapshot, {
+      ...draftOverrides,
+      onSendText: runningSend,
+    });
+    const runningImmediateSubmit = captured.chatPromptEditorProps?.onImmediateSubmit;
+    expect((runningImmediateSubmit as (value: string) => boolean)("引导草稿")).toBe(false);
+    await vi.waitFor(() => expect(runningSend).toHaveBeenCalledTimes(1));
+    expect(runningSend).toHaveBeenCalledWith(
+      expect.stringContaining("引导草稿"),
+      expect.objectContaining({ requestedDelivery: "guide" }),
+    );
+  });
+
+  it("composerSendNow does not force guide during compact / goalVerifier maintenance", async () => {
+    const draftOverrides = {
+      composerDraft: { text: "", updatedAt: 0 },
+      updateComposerContent: vi.fn(),
+      replaceComposerDraft: vi.fn(),
+    };
+    const maintenanceStates = [
+      {
+        kind: "compact" as const,
+        reasonCode: "compactingAcceptsFutureInput",
+      },
+      {
+        kind: "goalVerifier" as const,
+        reasonCode: "goalVerifierAcceptsFutureInput",
+      },
+    ];
+
+    for (const [index, state] of maintenanceStates.entries()) {
+      // CLI 对这两种 completion-blocking work 刻意 enqueue；显式 guide 会绕过
+      // computeInputRouting 的保护（输入既不进 queue 也不进历史），所以必须省略
+      // requestedDelivery，由 CLI 按路由判定。
+      const snapshot = makeSnapshot();
+      snapshot.control = {
+        ...snapshot.control,
+        phase: "running",
+        sessionEnded: false,
+        canStop: true,
+        stopTargetKind: state.kind,
+        activeWorks: [{ kind: state.kind, startedAt: 1 }],
+      };
+      snapshot.inputRouting = { mode: "enqueue", reasonCode: state.reasonCode };
+      const onSendText = vi.fn(async () => {});
+      renderComposerWithSnapshot(snapshot, { ...draftOverrides, onSendText });
+
+      const immediateSubmit = captured.chatPromptEditorProps?.onImmediateSubmit;
+      expect((immediateSubmit as (value: string) => boolean)(`维护态草稿${index}`)).toBe(false);
+      await vi.waitFor(() => expect(onSendText).toHaveBeenCalledTimes(1));
+      expect(onSendText).toHaveBeenCalledWith(
+        expect.stringContaining(`维护态草稿${index}`),
+        expect.not.objectContaining({ requestedDelivery: expect.anything() }),
+      );
+    }
+  });
+
   it("keeps the composer mounted but hidden while a blocking request is active", () => {
     const html = renderBlockedComposer();
 

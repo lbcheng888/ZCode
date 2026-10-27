@@ -107,6 +107,7 @@ import type {
   ConversationTurnWorkSegment,
 } from "@/v4/conversationTurnRenderUnits.js";
 import { formatConversationWorkDuration } from "@/v4/conversationWorkDuration.js";
+import { countSegmentToolCalls } from "@/v4/conversationTurnWorkSegments.js";
 import { ConversationTurnRow, resolveAssistantCopyText } from "@/v4/ConversationTurnRow.js";
 import { ConversationHookDetailsAction } from "@/v4/ConversationHookDetailsAction.js";
 import { toolCallRowToLegacyNode } from "@/v4/toolCallRowAdapter.js";
@@ -688,6 +689,17 @@ function AssistantHistoryStatus({
           >
             {label}
           </span>
+          {segment.toolCallCount > 0 ? (
+            <span
+              className="shrink-0 text-ui-sm tabular-nums text-[var(--color-foreground-subtlest)]"
+              data-history-tool-call-count={segment.toolCallCount}
+            >
+              {intl.formatMessage(
+                { id: "chat.history.toolCallCount" },
+                { count: segment.toolCallCount },
+              )}
+            </span>
+          ) : null}
           {!segment.assistantHistoryDefaultOpen ? (
             <ChevronRightIcon
               aria-hidden
@@ -972,6 +984,7 @@ function ConversationTurnFlow({
             assistantHistoryRows: unit.assistantHistoryRows,
             assistantFollowingRows: unit.assistantFollowingRows,
             assistantHistoryDefaultOpen: unit.assistantHistoryDefaultOpen,
+            toolCallCount: countSegmentToolCalls(unit.assistantWorkRows),
             ...(unit.workStatus ? { workStatus: unit.workStatus } : {}),
           },
         ];

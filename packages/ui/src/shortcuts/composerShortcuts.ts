@@ -6,21 +6,24 @@
 import type { ShortcutBindingEvent } from "./bindings.js";
 import { matchesShortcutBinding } from "./bindings.js";
 
-/** composer 作用域命令在生效表中的切片（只关心这两条，避免拉全量表的类型依赖）。 */
+/** composer 作用域命令在生效表中的切片（只关心这三条，避免拉全量表的类型依赖）。 */
 export interface ComposerEffectiveBindings {
   readonly composerSend: readonly string[];
+  readonly composerSendNow: readonly string[];
   readonly composerInsertNewline: readonly string[];
 }
 
-/** Enter 族事件在 composer 内的最终动作。 */
-export type ComposerKeyAction = "send" | "newline";
+/** composer 内命中的最终动作。 */
+export type ComposerKeyAction = "send" | "sendNow" | "newline";
 
 /**
  * 按生效表解析 composer 动作（改绑层，统一开放策略）。
  *
- * 对 `composerInsertNewline` / `composerSend` 的全部生效绑定做匹配（newline 先判：
- * 编辑操作误发送代价更高）——**不限定 Enter 族**：用户可把发送绑成 F9 等任意键，
- * 与其他命令的开放策略一致；命中返回动作，全部未命中返回 null（调用方走既有主链）。
+ * 对 `composerInsertNewline` / `composerSendNow` / `composerSend` 的全部生效绑定做匹配
+ * （newline 先判：编辑操作误发送代价更高；sendNow 先于 send：用户把同一个键同时绑给两者时，
+ * 更具体的「立即提交」意图必须生效，否则 composerSendNow 会成为死绑定）——**不限定 Enter 族**：
+ * 用户可把发送绑成 F9 等任意键，与其他命令的开放策略一致；命中返回动作，
+ * 全部未命中返回 null（调用方走既有主链）。
  *
  * 发送动作的运行时门禁（submitDisabled / 手机视口 enterSubmits / 空输入 /
  * 反转投递让位）由调用方执行，本函数只回答"键位表说了算"的部分。
@@ -33,6 +36,11 @@ export function resolveComposerKeyAction(
   for (const binding of effective.composerInsertNewline ?? []) {
     if (matchesShortcutBinding(event, binding, platformInfo)) {
       return "newline";
+    }
+  }
+  for (const binding of effective.composerSendNow ?? []) {
+    if (matchesShortcutBinding(event, binding, platformInfo)) {
+      return "sendNow";
     }
   }
   for (const binding of effective.composerSend ?? []) {

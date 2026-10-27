@@ -65,7 +65,10 @@ import {
   type ConversationTurnRenderUnit,
 } from "@/v4/conversationTurnRenderUnits.js";
 import type { AssistantWorkRow, ConversationTurnFlowItem } from "@/v4/conversationTurnFlowItems.js";
-import type { ConversationTurnWorkSegment } from "@/v4/conversationTurnWorkSegments.js";
+import {
+  countSegmentToolCalls,
+  type ConversationTurnWorkSegment,
+} from "@/v4/conversationTurnWorkSegments.js";
 import { formatConversationWorkDuration } from "@/v4/conversationWorkDuration.js";
 import { normalizeConversationShareMarkdown } from "@/v4/conversationShareMarkdown.js";
 import {
@@ -939,6 +942,7 @@ function fallbackWorkSegment(unit: ConversationTurnRenderUnit): ConversationTurn
     assistantHistoryRows: unit.assistantHistoryRows,
     assistantFollowingRows: unit.assistantFollowingRows,
     assistantHistoryDefaultOpen: unit.assistantHistoryDefaultOpen,
+    toolCallCount: countSegmentToolCalls(unit.assistantWorkRows),
     ...(unit.workStatus ? { workStatus: unit.workStatus } : {}),
   };
 }

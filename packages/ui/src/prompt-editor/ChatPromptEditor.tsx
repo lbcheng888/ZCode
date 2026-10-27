@@ -81,6 +81,7 @@ export function ChatPromptEditor({
   onChange,
   onSubmit,
   onModifiedSubmit,
+  onImmediateSubmit,
   onCancel,
   onFocus,
   onWhiteboardMentionSelected,
@@ -148,6 +149,8 @@ export function ChatPromptEditor({
   // 适配：返回 false 表示业务层拒绝/延迟本次提交，Lexical 不自行 reset（草稿保留）。
   onSubmit: (value: string) => boolean | void;
   onModifiedSubmit?: (value: string) => boolean | void;
+  /** composerSendNow：立即提交；缺省时该键只被消费、不回退成普通发送。 */
+  onImmediateSubmit?: (value: string) => boolean | void;
   onCancel?: () => void;
   onFocus?: () => void;
   onWhiteboardMentionSelected?: (boardId: string) => void | Promise<void>;
@@ -258,6 +261,12 @@ export function ChatPromptEditor({
     [onSubmit],
   );
 
+  const handleImmediateEditorSubmit = useCallback(
+    // 与 Enter 同一返回约定；缺省不注入，Lexical 侧据此只消费按键而不发送。
+    (value: string) => onImmediateSubmit?.(value),
+    [onImmediateSubmit],
+  );
+
   const handleDragOver: DragEventHandler<HTMLDivElement> = useCallback(
     (event) => {
       const hasWorkspaceFilePayload =
@@ -355,6 +364,7 @@ export function ChatPromptEditor({
         enterSubmits={enterSubmits}
         onSubmit={handleEditorSubmit}
         onModifiedSubmit={onModifiedSubmit}
+        onImmediateSubmit={onImmediateSubmit ? handleImmediateEditorSubmit : undefined}
         onChange={handleTextChange}
         onFocus={onFocus}
         triggerPanelContainer={resolvedTriggerPanelContainer}

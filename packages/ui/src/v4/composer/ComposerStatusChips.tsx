@@ -17,7 +17,9 @@ import {
 } from "@/components/workflow-timeline/subagent-model-label.js";
 import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
 import type { GoalState, PlanItem } from "@zcode/shared/zcode-protocol-v4";
+import { buildSessionPlanOpenRequest } from "../ConversationStatusPanel.js";
 import type { ConversationStatusPanelModel } from "../conversationStatusPanelModel.js";
+import type { OpenPlanDetailSideTabRequest } from "@/lib/workspaceSidePane.js";
 import { getStatusPanelTodoFocusWindow } from "../statusPanelTodoWindow.js";
 
 type ChipId = "goal" | "plans" | "bash" | "agents" | "progress";
@@ -45,7 +47,9 @@ function formatElapsed(seconds: number): string {
 /**
  * composer 上方的状态 chip 行（对齐 Kimi Code 桌面版的信息层级）：
  * 目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度。每颗 chip 只带一行摘要，
- * 点开在**同一位置**就地展开明细（限高滚动），不跳侧栏、不新增第二个明细面。
+ * 点开在**同一位置**就地展开明细（限高滚动）。计划面板里的每条计划行是
+ * 「跳到计划详情侧 tab」的入口（与状态面板同一个 buildSessionPlanOpenRequest），
+ * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。
  *
  * 计数语义与 kimi 一致：后台类 chip 的数字是「运行中」数量，为 0 时整颗隐藏。
  */
@@ -54,6 +58,8 @@ export function ComposerStatusChips({
   isStreaming = false,
   defaultOpenChip = null,
   onCancelGoal,
+  parentSessionId,
+  onOpenPlanDetail,
   className,
 }: {
   model: ConversationStatusPanelModel;
@@ -63,6 +69,10 @@ export function ComposerStatusChips({
   defaultOpenChip?: ChipId | null;
   /** 取消目标：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
   onCancelGoal?: () => void;
+  /** 计划详情 tab 的 parent session；缺省时计划行保持纯文本。 */
+  parentSessionId?: string;
+  /** 打开计划详情侧 tab；缺省时计划行保持纯文本（不跳转、不可点）。 */
+  onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
   className?: string;
 }) {
   const { intl } = useZCodeIntl();
@@ -70,7 +80,16 @@ export function ComposerStatusChips({
   const progress = useMemo(() => buildProgress(model.plan), [model.plan]);
   // 关闭 chip 面板是纯视图动作：只收掉就地展开的面板，不发任何命令、不改目标状态。
   const closeGoalPanel = useMemo(() => () => setOpenChip(null), []);
-  const chips = buildChips({ model, progress, isStreaming, intl, onCancelGoal, closeGoalPanel });
+  const chips = buildChips({
+    model,
+    progress,
+    isStreaming,
+    intl,
+    onCancelGoal,
+    closeGoalPanel,
+    parentSessionId,
+    onOpenPlanDetail,
+  });
   if (chips.length === 0) {
     return null;
   }
@@ -143,6 +162,8 @@ function buildChips({
   intl,
   onCancelGoal,
   closeGoalPanel,
+  parentSessionId,
+  onOpenPlanDetail,
 }: {
   model: ConversationStatusPanelModel;
   progress: ProgressSummary | null;
@@ -150,6 +171,8 @@ function buildChips({
   intl: ReturnType<typeof useZCodeIntl>["intl"];
   onCancelGoal?: () => void;
   closeGoalPanel: () => void;
+  parentSessionId?: string;
+  onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
 }): Chip[] {
   const chips: Chip[] = [];
 
@@ -203,6 +226,7 @@ function buildChips({
   }
 
   if (model.sessionPlans && model.sessionPlans.items.length > 0) {
+    const canOpenPlanDetail = Boolean(parentSessionId && onOpenPlanDetail);
     chips.push({
       id: "plans",
       label: intl.formatMessage({ id: "chat.statusPanel.sessionPlans" }),
@@ -210,11 +234,29 @@ function buildChips({
       trailing: <ChipCount count={model.sessionPlans.items.length} />,
       panel: (
         <ul className="flex flex-col gap-1.5">
-          {model.sessionPlans.items.map((item) => (
-            <li key={item.rowId} className="truncate text-ui-base text-foreground-subtle">
-              {item.title ?? item.markdown.slice(0, 120)}
-            </li>
-          ))}
+          {model.sessionPlans.items.map((item) => {
+            const title = item.title ?? item.markdown.slice(0, 120);
+            return (
+              <li key={item.rowId} className="min-w-0 truncate text-ui-base text-foreground-subtle">
+                {canOpenPlanDetail ? (
+                  <button
+                    type="button"
+                    data-plan-directory-tool-call-id={item.toolCallId}
+                    aria-label={intl.formatMessage({ id: "chat.statusPanel.openPlan" }, { title })}
+                    onClick={() => {
+                      if (!parentSessionId) return;
+                      onOpenPlanDetail?.(buildSessionPlanOpenRequest(parentSessionId, item));
+                    }}
+                    className="flex w-full min-w-0 items-center rounded-md px-1 py-0.5 text-left hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+                  >
+                    <span className="truncate">{title}</span>
+                  </button>
+                ) : (
+                  title
+                )}
+              </li>
+            );
+          })}
         </ul>
       ),
     });

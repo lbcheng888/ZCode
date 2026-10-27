@@ -32,6 +32,13 @@ export interface ConversationTurnWorkSegment {
   assistantFollowingRows: AssistantWorkRow[];
   assistantHistoryDefaultOpen: boolean;
   workStatus?: ConversationTurnWorkStatus;
+  /** 本段工具调用数（按行现算，不读快照；EnterPlanMode 是内部模式边界，不计入）。 */
+  toolCallCount: number;
+}
+
+/** 工作段活动摘要的计数口径：与「已工作」折叠区展示的工具行一致，排除内部 EnterPlanMode。 */
+export function countSegmentToolCalls(rows: readonly AssistantWorkRow[]): number {
+  return rows.filter((row) => row.kind === "toolCall" && row.toolName !== "EnterPlanMode").length;
 }
 
 export function resolveConversationTurnWorkStatus(
@@ -225,6 +232,7 @@ export function buildConversationTurnWorkSegments(options: {
       assistantWorkRows: segmentAssistantRows,
       assistantHistoryRows: segmentHistoryRows,
       assistantFollowingRows: segmentFollowingRows,
+      toolCallCount: countSegmentToolCalls(segmentAssistantRows),
       assistantHistoryDefaultOpen:
         !options.timelineOnly &&
         (options.forceOpenHistory ||

@@ -260,10 +260,24 @@ e2e（packages/desktop/test/e2e/，涉及 App 交互按仓库要求必须有 e2e
 
 首批 composer 作用域命令（组件内部固定键位审计结果，见下表）：
 
-| 命令                    | 默认绑定      | 说明     |
-| ----------------------- | ------------- | -------- |
-| `composerSend`          | `Enter`       | 发送消息 |
-| `composerInsertNewline` | `Shift+Enter` | 插入换行 |
+| 命令                    | 默认绑定      | 说明                                                         |
+| ----------------------- | ------------- | ------------------------------------------------------------ |
+| `composerSend`          | `Enter`       | 发送消息（忙碌时按输入路由入队/引导）                        |
+| `composerSendNow`       | `CmdOrCtrl+S` | 立即提交：忙碌时引导当前轮（guide），空闲时等同普通发送      |
+| `composerInsertNewline` | `Shift+Enter` | 插入换行                                                     |
+
+`composerSendNow` 的语义由调用方解释：主 composer 只在**可 steer 的忙碌态**（`canStop`
+且 `activeWorks` 不含 `compact` / `goalVerifier`）以 `requestedDelivery: "guide"` 提交，
+由 CLI 真插入当前轮。`compact` 与 `goalVerifier` 是 completion-blocking active work，
+CLI 的 `computeInputRouting` 对它们刻意返回 `enqueue`（此时没有 steerable activeTurn），
+显式 guide 会绕过该保护，让输入既不进 queue 也不进历史；因此这两种状态与空闲一样省略
+`requestedDelivery`，由 CLI 按 `inputRouting` 自行判定。空闲时 CLI 默认 `startNow`；
+显式 `startNow` 会抢占并中止当前轮，与「立即引导」相反，不能用于忙碌分支。带附件时
+CLI 会把 guide 降级为 queue（`guide.attachmentsUnsupported`），发送键 tooltip 不展示
+「引导当前轮」提示。未注入 `onImmediateSubmit` 的 composer（如消息行内编辑表单）只消费
+该键，不回退成普通发送；`submitDisabled` 时 Cmd+S 仍被 preventDefault，不落到浏览器保存。
+CmdOrCtrl+S 在 `RESERVED_BINDINGS` 中仅拦截 global 作用域，composer 作用域默认可绑定
+（`conflicts.ts` 按 scope 跳过保留键检查）。
 
 审计中**不**入表的作用域候选（登记备忘）：TaskFindDialog 的 G/数字/⏎ 与 GitActionMenu 的 ⏎
 （对话框内部导航键，未来可扩 `taskFindDialog` 作用域）；工具条 Ctrl+M / Ctrl+Shift+M / Ctrl+T
@@ -285,15 +299,24 @@ keydown（composer Lexical KEY_ENTER_COMMAND，COMMAND_PRIORITY_HIGH）
   ① disabled / isComposing ──▶ 现状（整体拦截 / 放行 IME 候选确认）
   ② 改绑层 resolveComposerKeyAction（shortcuts/composerShortcuts.ts，读生效表 composer 命令）
        ├─ 命中 composerInsertNewline ──▶ 放行 Lexical 插段落（换行）
+       ├─ 命中 composerSendNow ──▶ 立即提交分支（显式意图，不让位反转投递）：
+             未注入 onImmediateSubmit ──▶ 只消费按键（preventDefault），不回退普通发送
+             无修饰键组合 ──▶ 受 submitDisabled / enterSubmits（手机视口）门禁
        └─ 命中 composerSend ──▶ 发送分支（复用现有语义函数）：
              无修饰键组合 ──▶ 受 submitDisabled / enterSubmits（手机视口）门禁，与现状裸 Enter 等价
              带 Ctrl/Meta 修饰且反转投递开启（onModifiedSubmit 已注入）──▶ 让位：放行主链，
              Ctrl+Enter 仍表达"反向 delivery"运行时功能（交付语义比键位更具体）
   ③ 未命中（含全部默认状态下的修饰组合）──▶ 现有主链原样执行
+
+非 Enter 键（root keydown capture）走同一 resolveComposerKeyAction：newline 插换行、
+send 调 onSubmit、sendNow 调 onImmediateSubmit（缺省时同样只消费按键）。
+解析优先序固定为 newline → sendNow → send：同一键同时绑给 sendNow 与 send 时，
+更具体的「立即提交」必须生效，否则 composerSendNow 是死绑定。
 ```
 
-默认（无用户覆盖）状态下 ② 与 ③ 行为逐分支等价（单测锁定矩阵：桌面/手机视口 ×
-Enter/Shift+Enter/Ctrl+Enter × 反转投递开关），保证零回归。整组替换语义不变：用户把
+默认（无用户覆盖）状态下，Enter 族的 ② 与 ③ 行为逐分支等价（单测锁定矩阵：桌面/手机视口 ×
+Enter/Shift+Enter/Ctrl+Enter × 反转投递开关），保证零回归；`composerSendNow` 的默认
+`CmdOrCtrl+S` 是新增键位，不在 Enter 族矩阵内，按下时走 sendNow 分支。整组替换语义不变：用户把
 `composerSend` 改绑为 `CmdOrCtrl+Enter` 后裸 Enter 未绑定 → ③ 主链中 shift/ctrl/meta 均
 false 且 `enterSubmits` 为真时会走默认发送——为使"Ctrl+Enter 党"的裸 Enter 落到换行，
 主链裸 Enter 分支前置一条作用域检查：`composerSend` 的生效绑定不含裸 Enter（即用户已
@@ -319,7 +342,15 @@ false 且 `enterSubmits` 为真时会走默认发送——为使"Ctrl+Enter 党"
 - shared：`Enter` 族 parse/serialize 往返；`scope` 字段；composer 命令表项。
 - ui 内核：`RESERVED_BINDINGS` 含 `Enter` 且仅拦 global；冲突检测作用域隔离；
   `resolveComposerKeyAction` 矩阵（默认/改绑/反转投递让位/未绑定回退）；
-  默认状态 ②≡③ 等价性矩阵。
+  默认状态 ②≡③ 等价性矩阵；`composerSendNow` 的 CmdOrCtrl+S 三平台命中、
+  sendNow 先于 send 的优先序、改绑到 Enter 时仍解析为 sendNow。
+- composer 提交语义：`composerSendNow` 在可 steer 的忙碌态（`canStop` 且 `activeWorks` 不含
+  `compact`/`goalVerifier`）以 `requestedDelivery: "guide"` 调用 `onSendText`；空闲与
+  compact/goalVerifier 维护态省略 `requestedDelivery`
+  （`v4ConversationComposerErrorBanner.test.ts`）。
+- Lexical 分发（DOM）：root keydown 命中 `composerSendNow` → 调 `onImmediateSubmit`；
+  未注入处理器时只消费按键；`submitDisabled` 时 Cmd+S 被 preventDefault
+  （`lexicalComposerSendNow.test.ts`）。
 - e2e（SC-09）：设置页把 composerSend 录制为 `CmdOrCtrl+Enter` → composer 内裸 Enter
   不发送（输入保留）、`CmdOrCtrl+Enter` 发送（草稿清空或用户消息上屏）。注意落盘 ≠
   renderer 生效表即时刷新（SettingsChanged 广播有亚秒级异步窗口），用例在落盘断言后
