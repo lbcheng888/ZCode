@@ -10,7 +10,7 @@
  */
 
 import { AiSdkModelAdapter, type AiSdkModelRetryOptions } from "@zcode/adapters/model";
-import type { ModelStatusSink } from "@zcode/contracts";
+import { DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS, type ModelStatusSink } from "@zcode/contracts";
 import {
   ModelConfig,
   ModelInputFormatConfig,
@@ -50,14 +50,24 @@ const FAULT_RETRY_OPTIONS: AiSdkModelRetryOptions = {
   maxDelayMs: 50,
 };
 
-/** hang 判决靠它变成一次 stream_idle_timeout 重试。注意：每次重试 +30s（stream-idle-timeout.ts 的增量）。 */
-const FAULT_STREAM_IDLE_TIMEOUT_MS = 300;
+/**
+ * B6（hang 判决）靠它变成一次 stream_idle_timeout 重试；注意每次重试 +30s（stream-idle-timeout.ts 的增量）。
+ * 它本身就是被判决的故障，所以只有 hang 格显式传它；其余格沿用生产缺省 {@link DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS}。
+ *
+ * 修复依据：此前所有格共用这 300ms，而它是**墙钟**计时——批量跑单测时事件循环一次调度延迟就能让
+ * 正常流的两条 chunk 间隔越过它，adapter 会按 stream_idle_timeout 重发一次，B1 的精确请求计数随之
+ * 漂移（单文件跑不复现、高负载下多 1–2 个请求）；该机制是诊断证据指向的最强解释，未直接观测到
+ * 失败格的 stall 事件，所以非 hang 格另由 assertCommonInvariants 断言 model_stream_stalled === 0。
+ * 生产链路的空闲上限是 10 分钟，测试不该用 2000 倍小的值把调度延迟伪造成模型故障。
+ */
+export const FAULT_HANG_STREAM_IDLE_TIMEOUT_MS = 300;
 
 export interface FaultProviderModelOptions {
   baseURL: string;
   apiFormat: WireFormat;
   statusSink?: ModelStatusSink;
   retry?: AiSdkModelRetryOptions;
+  /** 流空闲超时（真实毫秒）；缺省生产值 {@link DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS}。 */
   streamIdleTimeoutMs?: number;
 }
 
@@ -109,7 +119,7 @@ function createFaultModelAdapter(options: FaultProviderModelOptions): AiSdkModel
   return new AiSdkModelAdapter({
     env: {},
     retry: options.retry ?? FAULT_RETRY_OPTIONS,
-    streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? FAULT_STREAM_IDLE_TIMEOUT_MS,
+    streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS,
     ...(options.statusSink === undefined ? {} : { statusSink: options.statusSink }),
   });
 }

@@ -477,7 +477,9 @@ describe("MCP OAuth cross-process end-to-end", () => {
   it("completes authorization that outlasts the caller budget (incident timeline replay)", async () => {
     // 现场:2026-08-11 真人授权耗时约 74 秒,而 session 预算只有 15 秒。旧实现 15 秒后
     // 关闭 listener,授权必败;新实现预算只约束 caller 等待,事务继续存活。
-    // 按比例缩放:caller 预算 100ms,「用户」1500ms 后才完成授权。
+    // 按比例缩放：caller 预算 1000ms，「用户」5000ms 后才完成授权（与现场 15s / 74s 同为「预算远短于
+    // 用户」）。修复依据：原先 100ms 预算在批量单测里短于 discovery + DCR 这一步的调度延迟，预算到点
+    // 时状态快照还没带上 authorizationUrl（实测 undefined）；放宽的是 caller 等待预算，断言不变。
     const stack = await startFakeStack();
     const { credentialStore, credentialsPath } = await createCredentials("cross-process-budget");
     const secret = "cross-process-budget";
@@ -486,7 +488,7 @@ describe("MCP OAuth cross-process end-to-end", () => {
       mcpOAuth: {
         credentialStore,
         openAuthorizationUrl: async ({ authorizationUrl }) => {
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await new Promise((resolve) => setTimeout(resolve, 5000));
           const response = await fetch(authorizationUrl, { redirect: "manual" });
           const location = response.headers.get("location");
           if (location) await fetch(location);
@@ -498,7 +500,7 @@ describe("MCP OAuth cross-process end-to-end", () => {
       const budgeted = await adapter.connectServer(
         "budget",
         { type: "http", url: stack.mcpUrl, oauth: { type: "authorization_code", scope: MCP_SCOPE } },
-        { oauthAuthorizationTimeoutMs: 100 },
+        { oauthAuthorizationTimeoutMs: 1000 },
       );
       // 预算到点只返回快照:connecting + 授权 URL,事务没有被杀。
       expect(budgeted.status).toBe("connecting");

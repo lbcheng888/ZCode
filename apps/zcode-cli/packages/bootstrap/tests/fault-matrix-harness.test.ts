@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import { collectSites, createWorkflowProgram } from "@zcode/dynamic-workflow";
-import { startFakeProviderServer } from "./helpers/fake-provider-server.js";
+import { requestLedger, startFakeProviderServer } from "./helpers/fake-provider-server.js";
 import { healthy } from "./helpers/fault-programs.js";
 import {
   FAULT_CELL_TURNS,
@@ -46,7 +46,7 @@ describe("fault matrix harness — B1 healthy @ W2", () => {
         await pause(200);
         assertCommonInvariants(cell, { status: "completed", server });
         expect(cell.logicalRequests).toBe(2 * (FAULT_CELL_TURNS + 1));
-        expect(server.requests.length).toBe(cell.logicalRequests);
+        expect(server.requests.length, requestLedger(server)).toBe(cell.logicalRequests);
         expect(statusCount(cell.statusEvents, "model_request_completed")).toBe(cell.logicalRequests);
         expect(statusCount(cell.statusEvents, "model_request_failed")).toBe(0);
         // 闸门真的在管事：governor 见过这个 key（桶已建）。
@@ -82,7 +82,7 @@ describe("fault matrix harness — B1 healthy @ W2", () => {
           },
           { status: "completed", server },
         );
-        expect(server.requests.length).toBe(2 * (FAULT_CELL_TURNS + 1));
+        expect(server.requests.length, requestLedger(server)).toBe(2 * (FAULT_CELL_TURNS + 1));
         expect(harness.eventsOf(runId).some((event) => event.type === "run-settled")).toBe(true);
       } finally {
         await harness.dispose();

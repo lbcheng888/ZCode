@@ -43,9 +43,10 @@ export default defineConfig({
       "packages/bootstrap/tests/visualize-skill-gate.test.ts",
       "packages/core/tests/browser-client.test.ts",
       "packages/core/tests/browser-manifest.test.ts",
-      // Bugfix: 故障矩阵用例会真实启动 provider 服务、缩放时钟与子进程;批量并发下调度延迟会让
-      // 精确请求计数断言多出重试请求(两个文件单独运行均通过)。改由 vitest.serial.config.ts 的
-      // 串行 project 执行,这里排除以避免双跑并保留原断言。
+      // 这两个文件在 vitest.serial.config.ts 的串行 project 里执行（真实 provider 服务 + 子进程，
+      // 需限压）；这里排除以免双跑。retry / stop 不排除——它们留在本 project，包级 test /
+      // test:fault-matrix 才能收集到；计数漂移由流空闲超时改回生产缺省 + 非 hang 格零 stall 断言处理。
+      // exclude 与 serial include 必须成对维护。
       "packages/bootstrap/tests/fault-matrix-harness.test.ts",
       "packages/bootstrap/tests/workflow-fault-matrix.lifecycle.test.ts",
       "**/node_modules/**",

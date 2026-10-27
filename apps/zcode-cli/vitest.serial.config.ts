@@ -5,10 +5,13 @@ export default defineConfig({
   root: import.meta.dirname,
   test: {
     name: "zcode-cli-serial",
-    // Bugfix: 故障矩阵用例会真实启动 provider 服务、缩放时钟与子进程;批量并发下调度延迟会让
-    // 精确请求计数断言多出重试请求(两个文件单独运行均通过)。单独成串行 project 放最后一组,
-    // 保留真实装配、原时限与精确计数断言。这两个文件已从 vitest.config.ts 的 include 中排除,
-    // 避免双跑。
+    // 故障矩阵用例真实启动 provider 服务、缩放时钟与子进程，并对成功请求数做精确断言；harness 与
+    // lifecycle 单独成串行 project 放最后一组，限制同机压力。串行不是计数漂移的修复手段（harness 在
+    // 本组唯一文件时仍复现过 9 vs 8）：漂移只在高负载下出现，诊断证据指向格子把 adapter 的流空闲
+    // 超时压到 300ms——调度延迟被当成 stream_idle_timeout 后 adapter 重发一次；其余格已改回生产
+    // 缺省，非 hang 格的零 stall 由 assertCommonInvariants 断言（helpers/fault-provider-model.ts）。
+    // retry / stop 不在此收集：它们留在 zcode-cli project，包级 test / test:fault-matrix 才能收集到。
+    // include 与 vitest.config.ts 的 exclude 必须成对维护。
     include: [
       "packages/bootstrap/tests/fault-matrix-harness.test.ts",
       "packages/bootstrap/tests/workflow-fault-matrix.lifecycle.test.ts",

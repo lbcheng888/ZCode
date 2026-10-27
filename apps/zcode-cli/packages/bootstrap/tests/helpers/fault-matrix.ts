@@ -87,6 +87,12 @@ interface FaultCellOptions {
   defaultConcurrency?: number;
   /** stall 窗，**真实**毫秒，缺省 {@link FAULT_CELL_STALL_AFTER_MS}。 */
   stallAfterMs?: number;
+  /**
+   * 模型 adapter 的流空闲超时，**真实**毫秒；缺省生产值（contracts 的
+   * `DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS`）。只有 hang 格显式压小它（见
+   * `FAULT_HANG_STREAM_IDLE_TIMEOUT_MS`）——其余格用小时级预算，调度延迟才不会被伪造成模型故障。
+   */
+  streamIdleTimeoutMs?: number;
   /** driver 时钟缩放，缺省 {@link FAULT_CELL_CLOCK_SCALE}。 */
   clockScale?: number;
   timeoutMs?: number;
@@ -180,6 +186,7 @@ function wireCell(options: Omit<FaultCellOptions, "shape">): CellWiring {
       apiFormat: options.apiFormat,
       baseURL: options.server.baseURL,
       statusSink,
+      streamIdleTimeoutMs: options.streamIdleTimeoutMs,
     }),
     fileSystemPort: fakeFileSystemPort({}),
     scale,
@@ -398,6 +405,11 @@ interface CommonInvariantExpectation {
   defaultConcurrency?: number;
   /** 罐头模型的提交载荷（completed 格逐节点比对）；缺省 `{ note: "done" }`。 */
   submitPayload?: unknown;
+  /**
+   * hang 格：流空闲超时是被判决的故障本身，允许 `model_stream_stalled`。其余格一律不允许——
+   * 那条事件是 adapter 重发请求的来源，出现即意味着格子的墙钟预算低于运行环境的调度延迟。
+   */
+  streamStallExpected?: boolean;
 }
 
 /** 该 run 的 ask 节点行。 */
@@ -485,6 +497,10 @@ export function assertCommonInvariants(
   );
   if (!(expectation.status === "stopped" && expectation.stopReason === "provider")) {
     expect(terminalFailed).toEqual([]);
+  }
+  // 4b 非 hang 格不允许流空闲超时：它会让 adapter 重发同一次请求，精确请求计数随之漂移。
+  if (expectation.streamStallExpected !== true) {
+    expect(statusCount(statusEvents, "model_stream_stalled")).toBe(0);
   }
 
   // 5 停下后零请求。引擎 stop() 先 abort 在飞节点再结算，但假服务器与客户端共用一个事件循环：

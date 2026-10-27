@@ -146,8 +146,10 @@ export default defineConfig({
       // UT 套件与 affected 选择范围内;按 zcode-cua 先例以 project 引用接入。该配置排除了
       // node:test 文件与插件集成测试,只收集运行时包的 vitest 单测。
       "apps/zcode-cli/vitest.config.ts",
-      // 故障矩阵用例需要真实定时器/子进程,且用精确请求计数断言;单独成串行 project 放最后一组,
-      // 避免与 zcode-cli 的 4-worker 池并发。两个文件已从上面的 CLI 配置 exclude。
+      // 故障矩阵用例需要真实定时器/子进程,且用精确请求计数断言;harness / lifecycle 单独成串行
+      // project 放最后一组,与 zcode-cli 的 4-worker 池分开以限制同机压力。这两个文件已从上面的 CLI
+      // 配置 exclude;retry / stop 仍留在 CLI project,以便包级入口收集。计数漂移只在高负载下出现,
+      // 诊断证据指向格子自身的 300ms 流空闲超时,不在并发(见 vitest.serial.config.ts)。
       "apps/zcode-cli/vitest.serial.config.ts",
     ],
     coverage: {

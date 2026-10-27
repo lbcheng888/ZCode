@@ -10,6 +10,7 @@
 import { SessionEventType } from "@zcode/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  requestLedger,
   startFakeProviderServer,
   type FakeProviderServer,
   type FaultProgram,
@@ -44,6 +45,7 @@ import {
   type CellCoordinate,
 } from "./helpers/fault-matrix-cells.js";
 import { FAULT_MATRIX_SHAPES } from "./helpers/fault-matrix-scripts.js";
+import { FAULT_HANG_STREAM_IDLE_TIMEOUT_MS } from "./helpers/fault-provider-model.js";
 
 /** 并发闸门行的服务器并发上限 C（< 天花板 8，让 AIMD 有东西可收敛）。 */
 const GATE_LIMIT = 2;
@@ -54,13 +56,16 @@ const EVERY_K = 3;
 async function runCell(
   server: FakeProviderServer,
   cell: CellCoordinate,
-  extra: { turns?: number } = {},
+  extra: { turns?: number; streamIdleTimeoutMs?: number } = {},
 ): Promise<FaultCellObservation> {
   const observation = await runFaultCell({
     server,
     shape: cell.shape,
     apiFormat: cell.apiFormat ?? "anthropic-messages",
     ...(extra.turns === undefined ? {} : { turns: extra.turns }),
+    ...(extra.streamIdleTimeoutMs === undefined
+      ? {}
+      : { streamIdleTimeoutMs: extra.streamIdleTimeoutMs }),
   });
   await pause(POST_SETTLE_GRACE_MS);
   return observation;
@@ -107,7 +112,7 @@ describe("fault matrix · B1 healthy — 装配基线", () => {
       try {
         const obs = await runCell(server, cell);
         assertCommonInvariants(obs, { status: "completed", server });
-        expect(server.requests.length).toBe(obs.logicalRequests);
+        expect(server.requests.length, requestLedger(server)).toBe(obs.logicalRequests);
         expect(statusCount(obs.statusEvents, "model_request_completed")).toBe(obs.logicalRequests);
         expect(statusCount(obs.statusEvents, "model_request_failed")).toBe(0);
       } finally {
@@ -321,8 +326,18 @@ for (const row of EVERY_KTH_ROWS) {
           program: row.program?.(cell) ?? everyKth(EVERY_K, row.verdict),
         });
         try {
-          const obs = await runCell(server, cell);
-          assertCommonInvariants(obs, { status: "completed", server });
+          const isHang = row.verdict.kind === "hang";
+          // hang 判决靠 300ms 流空闲超时触发；其余行沿用生产缺省，调度延迟不会变成多余的重试请求。
+          const obs = await runCell(
+            server,
+            cell,
+            isHang ? { streamIdleTimeoutMs: FAULT_HANG_STREAM_IDLE_TIMEOUT_MS } : {},
+          );
+          assertCommonInvariants(obs, {
+            status: "completed",
+            server,
+            streamStallExpected: isHang,
+          });
           const faulted = verdictCount(server, (verdict) => verdict.kind === row.verdict.kind);
           expect(faulted).toBeGreaterThan(0);
           expect(statusCount(obs.statusEvents, "model_request_failed")).toBe(faulted);

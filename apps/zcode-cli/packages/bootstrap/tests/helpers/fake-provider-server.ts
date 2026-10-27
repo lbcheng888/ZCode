@@ -84,6 +84,29 @@ export interface FakeProviderServer {
   close(): Promise<void>;
 }
 
+/**
+ * 请求数不符时打印的账本：判决、对话进度（toolResultCount）与客户端断开标记，用来判断多出来的请求
+ * 是重试（同一进度重复到达）还是另一路对话。只作为断言失败信息，不参与判定。
+ */
+export function requestLedger(server: FakeProviderServer): string {
+  const rows = server.requests.map((entry) => {
+    const verdict =
+      entry.verdict.kind === "status"
+        ? `status:${entry.verdict.status}`
+        : entry.verdict.kind === "stream_error"
+          ? `stream_error:${entry.verdict.code}`
+          : entry.verdict.kind === "cut"
+            ? `cut:${entry.verdict.after}`
+            : entry.verdict.kind;
+    const flags = [
+      entry.closedByClient ? "closedByClient" : undefined,
+      entry.servedStatus !== undefined ? `served:${entry.servedStatus}` : undefined,
+    ].filter((flag) => flag !== undefined);
+    return `#${entry.ordinal} ${verdict} toolResults=${entry.toolResultCount}${flags.length > 0 ? ` ${flags.join(" ")}` : ""}`;
+  });
+  return [`request ledger (${server.requests.length}):`, ...rows].join("\n");
+}
+
 // ————————————————————————————————————————————————————————————————
 // 请求解析
 // ————————————————————————————————————————————————————————————————
