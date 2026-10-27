@@ -43,7 +43,7 @@ Goal 展示目标/prompt 进度，不再承载 todo 明细：
 
 - V4 的目标摘要只读取 CLI `ProductProjection` 中的 `goal` 权威状态。投影必须保留当前 target 的 `targetId`、`summaryTitle`、`timeUsedSeconds`、`activeRunStartedAtMs`、逐轮 todo 和 verifier 的 `reason/nextAction`；live delta 与 cold snapshot 使用同一份投影结构，renderer 不自行持久化目标状态。
 - Goal 处于 active 时，标题右侧显示累计耗时并提供独立 `pauseGoal`；paused 时显示冻结耗时和三角形 `resumeGoal`；verified 时显示冻结耗时和绿色圆圈对勾。pause/resume 是 target 控制命令，不复用通用 stop，也不改变 queue 的 stop/hold 语义。
-- Goal 标题支持折叠 / 展开，默认展开；左侧标题和箭头可点击，右侧只展示 goal 级 `elapsed`，不展示 goal/token 用量；收起时追加 `· 状态图标`，例如 `1m 42s · <icon>`。active / paused 的收起态状态图标仍是可点击的暂停 / 继续 icon button，tooltip 和 aria-label 继续走本地化文案；complete 使用完成图标。状态摘要和 goal 级指标使用普通辅助文本样式，不使用胶囊背景。折叠后隐藏 prompt 列表。
+- Goal 标题支持折叠 / 展开，默认展开；左侧标题和箭头可点击，右侧只展示 goal 级 `elapsed`；token / 轮次 / 时限预算只在 composer 上方目标卡片展示（`ComposerStatusChips`），状态面板不重复；收起时追加 `· 状态图标`，例如 `1m 42s · <icon>`。active / paused 的收起态状态图标仍是可点击的暂停 / 继续 icon button，tooltip 和 aria-label 继续走本地化文案；complete 使用完成图标。状态摘要和 goal 级指标使用普通辅助文本样式，不使用胶囊背景。折叠后隐藏 prompt 列表。
 - Goal 摘要只消费当前 `target.targetID` 对应的 verifier timeline、goal iteration todo 和 goal stats。切换到新 goal 后，旧 target 的 verifier 仍保留在聊天 timeline 中，但不能继续驱动右上角摘要的标题、迭代编号或耗时。
 - 行标题来自 goal iteration 标题：第 1 轮默认优先使用 `target.summaryTitle`；replace 到新 goal 后，第 1 轮优先展示当前 `target.objective`，旧 target 的 `summaryTitle` 或 session title fallback 不能继续作为新目标标题；后续轮次标题仍优先来自当前 target 上一轮 verifier 的 `nextAction`。
 - 每个 prompt item 使用紧凑横向布局：左侧状态图标，右侧 prompt 标题最多三行，`completed/total` 进度固定在标题区域右上角，例如 `0/5`；prompt item 不重复展示 goal 级 elapsed，也不承载暂停 / 继续按钮，避免把 goal 级信息误表达成 iteration 级信息。

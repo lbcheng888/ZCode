@@ -435,6 +435,13 @@ export const goalStateSchema = z.object({
   summaryTitle: z.string().nullable().default(null),
   timeUsedSeconds: z.number().int().nonnegative().default(0),
   activeRunStartedAtMs: z.number().int().nonnegative().nullable().default(null),
+  // 预算与用量可选：旧快照/旧 CLI 不携带这些键，此时是「未知」而不是「已用 0」，
+  // 不能用 default 伪造用量。
+  tokenBudget: z.number().int().positive().nullable().optional(),
+  tokensUsed: z.number().int().nonnegative().optional(),
+  turnBudget: z.number().int().positive().nullable().optional(),
+  turnsUsed: z.number().int().nonnegative().optional(),
+  wallClockBudgetSeconds: z.number().int().positive().nullable().optional(),
   // paused：stop 作用于任何 foreground work 时 target 强制进入（stopPausesActiveGoalTarget）。
   // notSatisfied 与 failed 分离：前者是有效结论，后者是验证过程失败。
   status: z.enum(["active", "paused", "verifying", "verified", "notSatisfied", "failed"]),

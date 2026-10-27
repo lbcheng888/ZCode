@@ -5388,6 +5388,9 @@ describe("goal 状态机", () => {
     tokenBudget: null,
     tokensUsed: 0,
     timeUsedSeconds: 0,
+    turnBudget: null,
+    turnsUsed: 0,
+    wallClockBudgetSeconds: null,
     time: { created: 0, updated: 0 },
   });
 
@@ -5413,6 +5416,11 @@ describe("goal 状态机", () => {
       objective: "把测试全修绿",
       status: "verifying",
       iteration: 1,
+      tokenBudget: null,
+      tokensUsed: 0,
+      turnBudget: null,
+      turnsUsed: 0,
+      wallClockBudgetSeconds: null,
     });
     expect(verifying.control).toMatchObject({
       phase: "running",
@@ -5879,6 +5887,19 @@ describe("goal 状态机", () => {
     });
     expect(projection.applyEvent(noop)).toEqual([]);
 
+    // 预算用量单独变化也必须下发：conflation 只比 status/耗时会把 tokensUsed 静默吞掉。
+    const usageOnly = new EventLog().push(SessionEventType.TargetChanged, {
+      action: "usage_accounted",
+      source: "runtime",
+      target: { ...goalTarget("active"), tokensUsed: 900, turnBudget: 10, turnsUsed: 2 },
+    });
+    const usageDeltas = projection.applyEvent(usageOnly);
+    expect(usageDeltas).toHaveLength(1);
+    expect(usageDeltas[0]).toMatchObject({
+      op: "state.updated",
+      patch: { goal: { tokensUsed: 900, turnBudget: 10, turnsUsed: 2 } },
+    });
+
     projection.applyEvent(
       new EventLog().push(SessionEventType.TargetChanged, {
         action: "cleared",
@@ -5891,6 +5912,32 @@ describe("goal 状态机", () => {
       allowed: false,
       reasonCode: "noGoalToResume",
     });
+  });
+
+  it("旧 target 缺少可选预算字段时保留 undefined（不伪造已用 0）", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TargetChanged, {
+      action: "set",
+      source: "command",
+      target: {
+        sessionID: "session-1",
+        targetID: "target-legacy",
+        objective: "旧目标",
+        summaryTitle: null,
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        time: { created: 0, updated: 0 },
+      },
+    });
+    const { projection } = runAll(log.events);
+    const snapshot = projection.getSnapshot();
+    expect(snapshot.goal?.turnBudget).toBeUndefined();
+    expect(snapshot.goal?.turnsUsed).toBeUndefined();
+    expect(snapshot.goal?.wallClockBudgetSeconds).toBeUndefined();
+    expect(() => conversationSnapshotSchema.parse(snapshot)).not.toThrow();
   });
 });
 

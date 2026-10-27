@@ -111,12 +111,9 @@ describe("ComposerStatusChips", () => {
     expect(emptyHtml).toBe("");
   });
 
-  it("shows the goal chip with its status and expands to objective plus elapsed", () => {
+  it("shows the goal card by default with status, objective and elapsed", () => {
     const html = renderToStaticMarkup(
-      createElement(ComposerStatusChips, {
-        model: model({ goal: goal("active") }),
-        defaultOpenChip: "goal",
-      }),
+      createElement(ComposerStatusChips, { model: model({ goal: goal("active") }) }),
     );
 
     expect(html).toContain("chat.statusPanel.goal");
@@ -124,38 +121,98 @@ describe("ComposerStatusChips", () => {
     expect(html).toContain('data-composer-status-panel="goal"');
     expect(html).toContain("完成竖切目标");
     expect(html).toContain("2m");
+    expect(html).toContain("chat.composerChips.goalElapsed");
   });
 
-  it("goal panel offers cancel (callback only) and close (view only)", () => {
+  it("goal card offers pause/resume per status, cancel (callback only) and close (view only)", () => {
     const onCancelGoal = vi.fn();
+    const onPauseGoal = vi.fn();
+    const onResumeGoal = vi.fn();
     const { container } = render(
       createElement(ComposerStatusChips, {
         model: model({ goal: goal("active") }),
-        defaultOpenChip: "goal",
         onCancelGoal,
+        onPauseGoal,
+        onResumeGoal,
       }),
     );
     expect(container.querySelector('[data-composer-status-panel="goal"]')).not.toBeNull();
-    // 关闭只收起就地展开的面板：不发命令，也不触发取消目标。
+    expect(container.querySelector('[data-goal-action="pause"]')).not.toBeNull();
+    expect(container.querySelector('[data-goal-action="resume"]')).toBeNull();
+
+    fireEvent.click(container.querySelector('[data-goal-action="pause"]')!);
+    expect(onPauseGoal).toHaveBeenCalledTimes(1);
+
+    // 关闭只收起卡片：不发命令，也不触发取消目标。
     fireEvent.click(container.querySelector('[data-goal-action="close"]')!);
     expect(container.querySelector('[data-composer-status-panel="goal"]')).toBeNull();
     expect(onCancelGoal).not.toHaveBeenCalled();
 
-    // 再点 chip 展开后，取消目标只把意图交给父层（父层负责二次确认与 dispatch）。
+    // 回落到 goal chip；再点 chip 重新展开卡片，取消目标只把意图交给父层。
     fireEvent.click(screen.getByText("chat.statusPanel.goal").closest("button")!);
     fireEvent.click(container.querySelector('[data-goal-action="clear"]')!);
     expect(onCancelGoal).toHaveBeenCalledTimes(1);
   });
 
-  it("hides the goal cancel entry when no handler is provided (old CLI availability)", () => {
+  it("paused goal card shows resume instead of pause", () => {
     const html = renderToStaticMarkup(
       createElement(ComposerStatusChips, {
-        model: model({ goal: goal("active") }),
-        defaultOpenChip: "goal",
+        model: model({ goal: goal("paused") }),
+        onPauseGoal: () => {},
+        onResumeGoal: () => {},
       }),
     );
+    expect(html).toContain('data-goal-action="resume"');
+    expect(html).not.toContain('data-goal-action="pause"');
+  });
+
+  it("hides action entries when hosts provide no handler (old CLI availability)", () => {
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, { model: model({ goal: goal("active") }) }),
+    );
     expect(html).not.toContain('data-goal-action="clear"');
+    expect(html).not.toContain('data-goal-action="pause"');
+    expect(html).not.toContain('data-goal-action="resume"');
     expect(html).toContain('data-goal-action="close"');
+  });
+
+  it("renders the budget line only when budget/usage fields exist", () => {
+    const withBudget = renderToStaticMarkup(
+      createElement(ComposerStatusChips, {
+        model: model({
+          goal: {
+            ...goal("active"),
+            tokenBudget: 50_000,
+            tokensUsed: 1_200,
+            turnBudget: 20,
+            turnsUsed: 3,
+            wallClockBudgetSeconds: 3_600,
+          },
+        }),
+      }),
+    );
+    expect(withBudget).toContain('data-goal-budget="tokens"');
+    expect(withBudget).toContain("chat.composerChips.goalBudgetTokens");
+    expect(withBudget).toContain('data-goal-budget="turns"');
+    expect(withBudget).toContain("chat.composerChips.goalBudgetTurns");
+    expect(withBudget).toContain('data-goal-budget="wallClock"');
+    expect(withBudget).toContain("chat.composerChips.goalBudgetWallClock");
+
+    // 旧快照/旧 CLI 没有这些键：整行不渲染，而不是显示「已用 0」。
+    const withoutBudget = renderToStaticMarkup(
+      createElement(ComposerStatusChips, { model: model({ goal: goal("active") }) }),
+    );
+    expect(withoutBudget).not.toContain("data-goal-budget=");
+    expect(withoutBudget).not.toContain("chat.composerChips.goalBudget");
+
+    // 无上限（null budget）只报用量，不伪造分母。
+    const unlimited = renderToStaticMarkup(
+      createElement(ComposerStatusChips, {
+        model: model({ goal: { ...goal("active"), tokenBudget: null, tokensUsed: 900 } }),
+      }),
+    );
+    expect(unlimited).toContain("chat.composerChips.goalBudgetTokensUsed");
+    expect(unlimited).not.toContain("chat.composerChips.goalBudgetTokens:");
   });
 
   it("counts running background bash and agents, and hides them at zero", () => {

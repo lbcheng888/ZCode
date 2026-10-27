@@ -4,6 +4,8 @@ import {
   FileText,
   ListTodo,
   LoaderIcon,
+  Pause,
+  Play,
   Target,
   TerminalSquare,
   Trash2,
@@ -19,8 +21,10 @@ import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
 import type { GoalState, PlanItem } from "@zcode/shared/zcode-protocol-v4";
 import { buildSessionPlanOpenRequest } from "../ConversationStatusPanel.js";
 import type { ConversationStatusPanelModel } from "../conversationStatusPanelModel.js";
+import { getConversationGoalElapsedSeconds } from "../conversationGoalSummaryModel.js";
 import type { OpenPlanDetailSideTabRequest } from "@/lib/workspaceSidePane.js";
 import { getStatusPanelTodoFocusWindow } from "../statusPanelTodoWindow.js";
+import { useNowTicker } from "@/components/workflow-graph/use-now-ticker.js";
 
 type ChipId = "goal" | "plans" | "bash" | "agents" | "progress";
 
@@ -46,9 +50,10 @@ function formatElapsed(seconds: number): string {
 
 /**
  * composer 上方的状态 chip 行（对齐 Kimi Code 桌面版的信息层级）：
- * 目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度。每颗 chip 只带一行摘要，
- * 点开在**同一位置**就地展开明细（限高滚动）。计划面板里的每条计划行是
- * 「跳到计划详情侧 tab」的入口（与状态面板同一个 buildSessionPlanOpenRequest），
+ * 目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度。目标由 chip 行上方的完整卡片承载
+ * （标题 + 状态 + 暂停/继续/取消 + objective + 预算行），关闭后回落到 goal chip；
+ * 其余每颗 chip 只带一行摘要，点开在**同一位置**就地展开明细（限高滚动）。计划面板里的
+ * 每条计划行是「跳到计划详情侧 tab」的入口（与状态面板同一个 buildSessionPlanOpenRequest），
  * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。
  *
  * 计数语义与 kimi 一致：后台类 chip 的数字是「运行中」数量，为 0 时整颗隐藏。
@@ -58,6 +63,8 @@ export function ComposerStatusChips({
   isStreaming = false,
   defaultOpenChip = null,
   onCancelGoal,
+  onPauseGoal,
+  onResumeGoal,
   parentSessionId,
   onOpenPlanDetail,
   className,
@@ -65,10 +72,14 @@ export function ComposerStatusChips({
   model: ConversationStatusPanelModel;
   /** 会话运行期在进度 chip 上给一个转圈，替代旧待办条的渐变动画。 */
   isStreaming?: boolean;
-  /** 仅测试与快照:初始展开某颗 chip，生产调用方不传（默认全收起）。 */
+  /** 仅测试与快照:初始展开某颗 chip；目标卡片默认展开，不走该开关。 */
   defaultOpenChip?: ChipId | null;
   /** 取消目标：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
   onCancelGoal?: () => void;
+  /** 暂停目标；缺省表示宿主/旧 CLI 不支持，卡片不渲染该动作。 */
+  onPauseGoal?: () => void;
+  /** 继续目标；缺省表示宿主/旧 CLI 不支持，卡片不渲染该动作。 */
+  onResumeGoal?: () => void;
   /** 计划详情 tab 的 parent session；缺省时计划行保持纯文本。 */
   parentSessionId?: string;
   /** 打开计划详情侧 tab；缺省时计划行保持纯文本（不跳转、不可点）。 */
@@ -77,27 +88,50 @@ export function ComposerStatusChips({
 }) {
   const { intl } = useZCodeIntl();
   const [openChip, setOpenChip] = useState<ChipId | null>(defaultOpenChip);
+  // 收起目标卡片只记「被收起的是哪个 target」：换目标（含 cleared 后重建）自然重新展开，
+  // 组件实例跨会话复用也不会把「已关闭」带到另一个会话。
+  const [dismissedGoalTargetId, setDismissedGoalTargetId] = useState<string | null>(null);
   const progress = useMemo(() => buildProgress(model.plan), [model.plan]);
-  // 关闭 chip 面板是纯视图动作：只收掉就地展开的面板，不发任何命令、不改目标状态。
-  const closeGoalPanel = useMemo(() => () => setOpenChip(null), []);
+  const goal = model.goal;
+  const goalCardOpen = goal !== null && goal.targetId !== dismissedGoalTargetId;
+  const now = useNowTicker(
+    goalCardOpen &&
+      goal !== null &&
+      goal.activeRunStartedAtMs !== null &&
+      (goal.status === "active" || goal.status === "verifying" || goal.status === "notSatisfied"),
+  );
   const chips = buildChips({
     model,
     progress,
     isStreaming,
     intl,
-    onCancelGoal,
-    closeGoalPanel,
     parentSessionId,
     onOpenPlanDetail,
   });
   if (chips.length === 0) {
     return null;
   }
-  const active = chips.find((chip) => chip.id === openChip) ?? null;
+  const active = chips.find((chip) => chip.id === openChip && chip.panel) ?? null;
+  const closeGoalCard = () => {
+    if (!goal) return;
+    setOpenChip(null);
+    setDismissedGoalTargetId(goal.targetId);
+  };
 
   return (
     <div className={cn("flex flex-col gap-2", className)}>
       {/* 展开面板与 chip 行同列、在行上方：用户视线不需要移动，composer 也不被顶走。 */}
+      {goal && goalCardOpen ? (
+        <GoalCard
+          goal={goal}
+          elapsedSeconds={getConversationGoalElapsedSeconds(goal, now)}
+          intl={intl}
+          onPauseGoal={onPauseGoal}
+          onResumeGoal={onResumeGoal}
+          onCancelGoal={onCancelGoal}
+          onClose={closeGoalCard}
+        />
+      ) : null}
       {active ? (
         <div
           data-composer-status-panel={active.id}
@@ -108,14 +142,26 @@ export function ComposerStatusChips({
       ) : null}
       <div className="flex gap-2 overflow-x-auto whitespace-nowrap pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {chips.map((chip) => {
-          const expanded = openChip === chip.id;
+          // 目标 chip 不开第二个明细面：点它只在「展开卡片 ⇄ 收起卡片」间切换。
+          const expanded = chip.id === "goal" ? goalCardOpen : openChip === chip.id;
           return (
             <button
               key={chip.id}
               type="button"
               data-testid={chip.testId}
               aria-expanded={expanded}
-              onClick={() => setOpenChip(expanded ? null : chip.id)}
+              onClick={() => {
+                if (chip.id === "goal" && goal) {
+                  if (goalCardOpen) {
+                    closeGoalCard();
+                  } else {
+                    setOpenChip(null);
+                    setDismissedGoalTargetId(null);
+                  }
+                  return;
+                }
+                setOpenChip(expanded ? null : chip.id);
+              }}
               className={cn(
                 "inline-flex shrink-0 items-center gap-2 rounded-lg border border-card-border bg-card px-3 py-1.5 text-ui-base text-foreground-subtle transition-colors hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused",
                 expanded && "bg-hover/30 text-foreground",
@@ -130,6 +176,194 @@ export function ComposerStatusChips({
       </div>
     </div>
   );
+}
+
+const GOAL_PAUSABLE_STATUSES: ReadonlySet<GoalState["status"]> = new Set([
+  "active",
+  "verifying",
+  "notSatisfied",
+]);
+
+/**
+ * 完整目标卡片：标题 + 状态 + 三个动作 + objective + 预算行。动作与侧栏同源——
+ * 暂停/继续只交意图（命令由 SessionPane dispatch），取消复用既有确认弹层，
+ * 关闭是纯视图动作（只收起卡片，不发命令、不读 availability）。
+ */
+function GoalCard({
+  goal,
+  elapsedSeconds,
+  intl,
+  onPauseGoal,
+  onResumeGoal,
+  onCancelGoal,
+  onClose,
+}: {
+  goal: GoalState;
+  elapsedSeconds: number;
+  intl: ReturnType<typeof useZCodeIntl>["intl"];
+  onPauseGoal?: () => void;
+  onResumeGoal?: () => void;
+  onCancelGoal?: () => void;
+  onClose: () => void;
+}) {
+  const canPause = onPauseGoal !== undefined && GOAL_PAUSABLE_STATUSES.has(goal.status);
+  const canResume = onResumeGoal !== undefined && goal.status === "paused";
+  const budgetLines = buildGoalBudgetLines(goal, elapsedSeconds, intl);
+  return (
+    <div
+      data-composer-status-panel="goal"
+      className="max-h-64 overflow-y-auto rounded-xl border border-card-border bg-card px-3 py-2"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Target className="size-4 shrink-0 text-foreground-subtle" />
+          <span className="text-ui-base font-medium text-foreground">
+            {intl.formatMessage({ id: "chat.statusPanel.goal" })}
+          </span>
+          <span className={cn("text-ui-sm font-medium", goalStatusClass(goal.status))}>
+            {intl.formatMessage({ id: GOAL_STATUS_MESSAGE_IDS[goal.status] })}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {canPause ? (
+            <GoalActionButton
+              action="pause"
+              label={intl.formatMessage({ id: "chat.target.pause" })}
+              icon={<Pause className="size-3.5 shrink-0" />}
+              onClick={onPauseGoal}
+            />
+          ) : null}
+          {canResume ? (
+            <GoalActionButton
+              action="resume"
+              label={intl.formatMessage({ id: "chat.target.resume" })}
+              icon={<Play className="size-3.5 shrink-0" />}
+              onClick={onResumeGoal}
+            />
+          ) : null}
+          {onCancelGoal ? (
+            <GoalActionButton
+              action="clear"
+              label={intl.formatMessage({ id: "chat.target.cancel" })}
+              icon={<Trash2 className="size-3.5 shrink-0" />}
+              onClick={onCancelGoal}
+              danger
+            />
+          ) : null}
+          <GoalActionButton
+            action="close"
+            label={intl.formatMessage({ id: "chat.target.closePanel" })}
+            icon={<X className="size-3.5 shrink-0" />}
+            onClick={onClose}
+          />
+        </div>
+      </div>
+      <p className="mt-1.5 break-words text-ui-base text-foreground">{goal.objective}</p>
+      <p className="mt-0.5 text-ui-sm text-foreground-subtlest">
+        {intl.formatMessage(
+          { id: "chat.composerChips.goalElapsed" },
+          { elapsed: formatElapsed(elapsedSeconds), iteration: goal.iteration },
+        )}
+      </p>
+      {budgetLines.length > 0 ? (
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-ui-sm text-foreground-subtle">
+          {budgetLines.map((line) => (
+            <span key={line.key} data-goal-budget={line.key}>
+              {line.text}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GoalActionButton({
+  action,
+  label,
+  icon,
+  onClick,
+  danger = false,
+}: {
+  action: "pause" | "resume" | "clear" | "close";
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      data-goal-action={action}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center rounded-md px-1.5 py-1 hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused",
+        danger ? "text-[var(--color-danger)]" : "text-foreground-subtle",
+      )}
+    >
+      {icon}
+    </button>
+  );
+}
+
+const COMPACT_COUNT_FORMAT = new Intl.NumberFormat(undefined, {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+/**
+ * 预算行从快照的可选预算字段派生：旧快照/旧 CLI 没有这些键时整行不渲染，
+ * 而不是显示「已用 0」或「不限」。tokensUsed 与 tokenBudget 同源（SessionGoal），
+ * 因此以用量字段是否出现作为该段的存在判定。
+ */
+function buildGoalBudgetLines(
+  goal: GoalState,
+  elapsedSeconds: number,
+  intl: ReturnType<typeof useZCodeIntl>["intl"],
+): { key: string; text: string }[] {
+  const lines: { key: string; text: string }[] = [];
+  if (goal.tokensUsed !== undefined) {
+    lines.push({
+      key: "tokens",
+      text:
+        goal.tokenBudget !== undefined && goal.tokenBudget !== null
+          ? intl.formatMessage(
+              { id: "chat.composerChips.goalBudgetTokens" },
+              {
+                used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed),
+                budget: COMPACT_COUNT_FORMAT.format(goal.tokenBudget),
+              },
+            )
+          : intl.formatMessage(
+              { id: "chat.composerChips.goalBudgetTokensUsed" },
+              { used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed) },
+            ),
+    });
+  }
+  if (goal.turnBudget !== undefined && goal.turnBudget !== null && goal.turnsUsed !== undefined) {
+    lines.push({
+      key: "turns",
+      text: intl.formatMessage(
+        { id: "chat.composerChips.goalBudgetTurns" },
+        { used: goal.turnsUsed, budget: goal.turnBudget },
+      ),
+    });
+  }
+  if (goal.wallClockBudgetSeconds !== undefined && goal.wallClockBudgetSeconds !== null) {
+    lines.push({
+      key: "wallClock",
+      text: intl.formatMessage(
+        { id: "chat.composerChips.goalBudgetWallClock" },
+        {
+          elapsed: formatElapsed(elapsedSeconds),
+          budget: formatElapsed(goal.wallClockBudgetSeconds),
+        },
+      ),
+    });
+  }
+  return lines;
 }
 
 /**
@@ -151,7 +385,8 @@ interface Chip {
   label: string;
   icon: React.ReactNode;
   trailing?: React.ReactNode;
-  panel: React.ReactNode;
+  /** 目标 chip 不开内联面板：明细由上方目标卡片承载，避免同一目标两个明细面。 */
+  panel?: React.ReactNode;
   testId?: string;
 }
 
@@ -160,8 +395,6 @@ function buildChips({
   progress,
   isStreaming,
   intl,
-  onCancelGoal,
-  closeGoalPanel,
   parentSessionId,
   onOpenPlanDetail,
 }: {
@@ -169,8 +402,6 @@ function buildChips({
   progress: ProgressSummary | null;
   isStreaming: boolean;
   intl: ReturnType<typeof useZCodeIntl>["intl"];
-  onCancelGoal?: () => void;
-  closeGoalPanel: () => void;
   parentSessionId?: string;
   onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
 }): Chip[] {
@@ -186,41 +417,6 @@ function buildChips({
         <span className={cn("font-medium", goalStatusClass(goal.status))}>
           {intl.formatMessage({ id: GOAL_STATUS_MESSAGE_IDS[goal.status] })}
         </span>
-      ),
-      panel: (
-        <div className="flex flex-col gap-1">
-          <span className="text-ui-base text-foreground">{goal.objective}</span>
-          <span className="text-ui-sm text-foreground-subtlest">
-            {intl.formatMessage(
-              { id: "chat.composerChips.goalElapsed" },
-              { elapsed: formatElapsed(goal.timeUsedSeconds), iteration: goal.iteration },
-            )}
-          </span>
-          <div className="mt-1 flex items-center gap-1">
-            {onCancelGoal ? (
-              <button
-                type="button"
-                data-goal-action="clear"
-                onClick={onCancelGoal}
-                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-sm text-[var(--color-danger)] hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
-              >
-                <Trash2 className="size-3.5 shrink-0" />
-                {intl.formatMessage({ id: "chat.target.cancel" })}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              data-goal-action="close"
-              aria-label={intl.formatMessage({ id: "chat.target.closePanel" })}
-              title={intl.formatMessage({ id: "chat.target.closePanel" })}
-              onClick={closeGoalPanel}
-              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-sm text-foreground-subtle hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
-            >
-              <X className="size-3.5 shrink-0" />
-              {intl.formatMessage({ id: "chat.target.closePanel" })}
-            </button>
-          </div>
-        </div>
       ),
     });
   }

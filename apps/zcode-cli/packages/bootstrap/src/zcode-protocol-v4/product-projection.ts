@@ -5190,6 +5190,11 @@ export class ProductProjection {
           summaryTitle: payload.target.summaryTitle,
           timeUsedSeconds: payload.target.timeUsedSeconds,
           activeRunStartedAtMs: payload.target.activeRunStartedAtMs ?? null,
+          tokenBudget: payload.target.tokenBudget,
+          tokensUsed: payload.target.tokensUsed,
+          turnBudget: payload.target.turnBudget,
+          turnsUsed: payload.target.turnsUsed,
+          wallClockBudgetSeconds: payload.target.wallClockBudgetSeconds,
           status: mapGoalStatus(payload.target.status),
           iteration: 0,
           verifications: [],
@@ -5214,6 +5219,11 @@ export class ProductProjection {
           summaryTitle: payload.target.summaryTitle,
           timeUsedSeconds: payload.target.timeUsedSeconds,
           activeRunStartedAtMs: payload.target.activeRunStartedAtMs ?? null,
+          tokenBudget: payload.target.tokenBudget,
+          tokensUsed: payload.target.tokensUsed,
+          turnBudget: payload.target.turnBudget,
+          turnsUsed: payload.target.turnsUsed,
+          wallClockBudgetSeconds: payload.target.wallClockBudgetSeconds,
           status: mapGoalStatus(payload.target.status),
         };
         if (
@@ -5222,6 +5232,11 @@ export class ProductProjection {
           nextGoal.summaryTitle === goal.summaryTitle &&
           nextGoal.timeUsedSeconds === goal.timeUsedSeconds &&
           nextGoal.activeRunStartedAtMs === goal.activeRunStartedAtMs &&
+          nextGoal.tokenBudget === goal.tokenBudget &&
+          nextGoal.tokensUsed === goal.tokensUsed &&
+          nextGoal.turnBudget === goal.turnBudget &&
+          nextGoal.turnsUsed === goal.turnsUsed &&
+          nextGoal.wallClockBudgetSeconds === goal.wallClockBudgetSeconds &&
           nextGoal.status === goal.status
         ) {
           return [];

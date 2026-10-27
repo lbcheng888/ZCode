@@ -5679,6 +5679,16 @@ export function SessionPane({
               ? handleRequestClearGoal
               : undefined
           }
+          onPauseGoal={
+            !readOnly && !selectionSideChat && snapshot?.availability.pauseGoal.allowed
+              ? handlePauseGoal
+              : undefined
+          }
+          onResumeGoal={
+            !readOnly && !selectionSideChat && snapshot?.availability.resumeGoal.allowed
+              ? handleResumeGoal
+              : undefined
+          }
           parentSessionId={sessionId ?? undefined}
           onOpenPlanDetail={onOpenPlanDetail ? handleOpenPlanDetail : undefined}
           className="mb-2"

@@ -840,12 +840,23 @@ interface BackgroundWorkSummary {
 
 ```ts
 interface GoalState {
+  targetId: string; // 当前 target 身份；旧快照省略时回落为 ""
   objective: string; // 当前目标文本（解析后）
+  summaryTitle: string | null;
+  timeUsedSeconds: number;
+  activeRunStartedAtMs: number | null;
+  // 预算与用量：可选——旧快照/旧 CLI 不携带这些键，此时是「未知」而不是「已用 0」。
+  tokenBudget?: number | null;
+  tokensUsed?: number;
+  turnBudget?: number | null;
+  turnsUsed?: number;
+  wallClockBudgetSeconds?: number | null;
   status: "active" | "paused" | "verifying" | "verified" | "notSatisfied" | "failed";
   // paused：stop 作用于任何 foreground work 时 target 强制进入（stopPausesActiveGoalTarget）
   // notSatisfied 与 failed 分离：前者是有效结论，后者是验证过程失败（goalVerificationOutcomeSeparation）
   iteration: number; // 第几轮验证循环
   verifications: GoalVerificationSummary[]; // 最近 N 条（§8），完整历史在 rows 的 goalVerify marker
+  iterations: GoalIterationState[]; // 逐轮 todo 快照
 }
 interface GoalVerificationSummary {
   iteration: number;
