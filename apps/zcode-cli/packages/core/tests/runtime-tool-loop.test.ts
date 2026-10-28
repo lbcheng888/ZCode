@@ -7887,6 +7887,7 @@ describe("AgentRuntime tool loop", () => {
       objective: "Old objective",
       summaryTitle: null,
       status: "active",
+      revision: 1,
       tokenBudget: null,
       tokensUsed: 0,
       timeUsedSeconds: 0,

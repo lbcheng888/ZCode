@@ -124,6 +124,7 @@ create table if not exists session_target (
   objective text not null,
   summary_title text,
   status text not null check(status in ('active', 'paused', 'budget_limited', 'complete')),
+  revision integer not null default 1,
   token_budget integer,
   tokens_used integer not null default 0,
   time_used_seconds integer not null default 0,
@@ -138,13 +139,20 @@ SQLite migration `0005_session_target_accounting` rebuilds the table to add `bud
 
 SQLite migration `0011_session_target_summary_title` adds nullable `summary_title`. This is display metadata generated from the user-provided objective with the same title-generation prompt used for session titles. It is not injected into goal prompts or verifier prompts. The async writeback is guarded by `session_id + target_id` so a title generated for a replaced/cleared goal cannot overwrite the current goal.
 
+SQLite migration `0026_session_target_revision` adds `revision integer not null default 1`. It is the optimistic-concurrency token for model-initiated goal writes: replacing the goal increments it across the `on conflict` update, and each successful objective edit increments it again. `GoalUpdate` / `GoalBlock` write only when `session_id + target_id + revision` all match the current row, so a call built on stale state is rejected instead of silently rewriting a goal the user or runtime already changed. Status/usage/accounting writes do not bump it.
+
 ## Tool Contract
 
-Built-in model tools:
+Built-in model tools (gated by the goal layer flag; without the flag none of the write tools is registered):
 
-- `GoalRead`: read the current session goal.
+- `GoalRead`: read the current session goal. Read-only, definition only, not registered.
+- `GoalCreate`: create the goal from a user-stated objective. Fails when a goal already exists; it never replaces a goal, takes no budget/status/completion input, and does not arm automatic continuation.
+- `GoalUpdate`: replace the objective under `targetID + revision`. Only `objective`, `revision`, `time_updated` and the event log change; status, budgets and usage are untouched. A stale pair returns a `409` handler failure that names the current `targetID` and `revision`, and no write occurs.
+- `GoalBlock`: pause the goal (persistent status `paused`, so the continuation gate that only accepts `active` stops) and append a `blocked` event carrying the model's stable `blocker_code`. `budget-exhausted` is reserved for runtime budget exhaustion. A completed goal cannot be blocked or edited.
 
-`GoalRead` is read-only. Goal creation, replacement, pause/resume, clear, and completion are control/runtime operations rather than model tool mutations.
+All three write tools declare `readOnly: false`, `destructive: false`, `concurrentSafe: false`, `sideEffectScope: "session"`, `riskLevel: "low"`, `needsApproval: false`, and are not allowed in plan mode (plan mode allows read-only tools only). Their model-visible descriptions carry the completion-evidence rule: plans, todo updates, checklists, phase completion, budget exhaustion and stopping work are not completion evidence.
+
+Goal replacement, pause/resume by the user, clear, and completion remain control/runtime operations. The tools cannot set `status`, budgets or `complete`.
 
 ## Completion Verification
 
@@ -252,7 +260,7 @@ calls retain their own existing policy.
 
 - Empty objective is rejected before storage mutation.
 - Objective over the configured limit is rejected before storage mutation.
-- Model-visible `GoalCreate` and `GoalUpdate` tools are not registered.
+- Goal tools are registered only when the goal layer flag is on; the same flag gates their prompt instructions. A stale `targetID + revision` pair is rejected with no write, and a completed goal cannot be edited or blocked.
 - When completion verification is enabled and the verifier fails, runtime keeps the goal active and injects the verifier `nextAction` into the next continuation turn.
 - If completion verification is disabled, runtime skips the verifier and continues the active goal.
 - Active goals are paused when a turn is cancelled.
@@ -262,9 +270,10 @@ calls retain their own existing policy.
 
 ## Test Coverage
 
-- Migration list includes `0004_session_target`, `0005_session_target_accounting`, and `0011_session_target_summary_title`, and remains reopen-idempotent.
+- Migration list includes `0004_session_target`, `0005_session_target_accounting`, `0011_session_target_summary_title`, and `0026_session_target_revision`, and remains reopen-idempotent.
 - Store can set, read, update status, update summary title, reject stale summary title writes, replace with a new `targetId`, and clear goals.
-- Tool registry exposes `GoalRead` only; create/update completion tools are not registered.
+- Store increments `revision` across replacement and objective edits, rejects stale `targetID + revision` writes without mutating the row, and appends `edited` / `blocked` events with the post-state snapshot.
+- Tool registry registers `GoalCreate` / `GoalUpdate` / `GoalBlock` only under `includeGoalTools`; `GoalRead` stays definition-only. Handler tests cover create, objective edit with revision conflict, block, reserved blocker code, and the completed-goal rejection.
 - Goal prompts escape user-provided objectives before embedding them in system-reminder XML and explicitly say that plans, todos, checklists, proxy signals, and elapsed effort are not completion evidence by themselves. The verifier prompt also requires unfinished todos to be completed before the goal can pass.
 - Successful goal mutations emit `target_changed`; projection updates `SessionProjection.target`; ZCode app-server forwards the event through `_meta.zcode.target`.
 - Runtime verifies post-turn goal completion through a separate no-tool model request; tests cover verifier pass, verifier fail continuation, disabled verifier, and prompt/query source projection.

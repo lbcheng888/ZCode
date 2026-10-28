@@ -457,6 +457,7 @@ export function injectTargetStateIntoMessageHistory(
       "The current session goal state was restored from session storage.",
       targetState,
       "Use it as the authoritative long-running objective unless a later GoalRead result or runtime goal event updates it.",
+      "If the GoalUpdate or GoalBlock tool is available, pass the Target ID and Revision above; a stale revision is rejected without writing and the rejection reports the current pair to retry with.",
       "Do not mark the goal complete unless real evidence shows the objective has been achieved.",
       "A completed plan, todo list, checklist, or planning phase is not completion evidence unless the objective was only to produce that artifact.",
     ].join("\n"),

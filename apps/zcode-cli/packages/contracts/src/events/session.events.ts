@@ -1146,6 +1146,8 @@ export type PermissionDecision = "allow" | "deny" | "escalate" | "modify";
 
 export type TargetChangedAction =
   | "set"
+  /** 模型改写 objective：同一 targetID，投影保留 iteration/verifications。 */
+  | "objective_edited"
   | "status_updated"
   | "cleared"
   | "usage_accounted"
@@ -1162,7 +1164,7 @@ export interface TargetChangedPayload {
   previousTarget?: SessionGoal | null;
   /** 状态机事件缘由(session-start-disarm / budget-exhausted 等),供 UI/审计展示。 */
   reason?: string;
-  /** blocked 迁移的稳定 blocker code(当前唯一值 budget-exhausted)。 */
+  /** blocked 迁移的稳定 blocker code(budget-exhausted 或模型 GoalBlock 自报的 code)。 */
   blockerCode?: string;
 }
 

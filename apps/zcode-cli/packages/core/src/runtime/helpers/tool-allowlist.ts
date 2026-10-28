@@ -9,6 +9,7 @@ import {
 } from "@zcode/contracts";
 import { EXPLORE_AGENT_ALLOWED_TOOLS } from "../../subagent/explore-tools.js";
 import type { AgentRuntimeConfig } from "../types.js";
+import { isGoalLayerEnabled } from "./goal-layer.js";
 import { normalizeToolNameAlias } from "../../tool/tool-visibility.js";
 
 const EXPLORE_AGENT_ALLOWED_TOOL_SET = new Set<string>(EXPLORE_AGENT_ALLOWED_TOOLS);
@@ -82,6 +83,16 @@ export function resolveRuntimeDynamicWorkflowToolsIncluded(runtime: {
   // enabled ∧ (¬onDemand ∨ activated)：激活态归 runtime（launch.md「On demand: activation」），
   // 非 onDemand 会话出生即 activated，所以这里对 alwaysOn / TUI / headless 仍只看 enabled。
   return runtime.config.dynamicWorkflowEnabled !== false && runtime.dynamicWorkflowToolsActivated;
+}
+
+/**
+ * goal 灰度旗在 registerBuiltInTools 上的取值。**缺席即关闭**：只有 goalLayerEnabled 显式为
+ * true 才把 GoalCreate/GoalUpdate/GoalBlock 放进模型工具面。两个注册入口共用这一推导。
+ */
+export function resolveRuntimeGoalToolsIncluded(runtime: {
+  config: AgentRuntimeConfig;
+}): boolean {
+  return isGoalLayerEnabled(runtime.config);
 }
 
 export function resolveBuiltInToolAllowlist(

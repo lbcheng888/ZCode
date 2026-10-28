@@ -20,6 +20,7 @@ interface TargetRow {
   objective: string;
   summary_title: string | null;
   status: string;
+  revision: number;
   token_budget: number | null;
   tokens_used: number;
   time_used_seconds: number;
@@ -183,7 +184,9 @@ export function setSessionTarget(
       active_run_started_at = null,
       active_run_last_seen_at = null,
       time_created = excluded.time_created,
-      time_updated = excluded.time_updated
+      time_updated = excluded.time_updated,
+      -- 替换语义:revision 跨 replace 单调递增,旧调用携带的 revision 不可能命中新目标。
+      revision = session_target.revision + 1
     `,
   ).run(
     input.sessionID,
@@ -230,6 +233,7 @@ export function cloneSessionTargetForFork(
       objective,
       summary_title,
       status,
+      revision,
       token_budget,
       tokens_used,
       time_used_seconds,
@@ -241,12 +245,13 @@ export function cloneSessionTargetForFork(
       active_run_last_seen_at,
       time_created,
       time_updated
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
     on conflict(session_id) do update set
       target_id = excluded.target_id,
       objective = excluded.objective,
       summary_title = excluded.summary_title,
       status = excluded.status,
+      revision = excluded.revision,
       token_budget = excluded.token_budget,
       tokens_used = excluded.tokens_used,
       time_used_seconds = excluded.time_used_seconds,
@@ -265,6 +270,8 @@ export function cloneSessionTargetForFork(
     source.objective,
     source.summaryTitle,
     input.status,
+    // fork 快照可能来自迁移前的旧内存对象(没有 revision 字段);缺省落到 1 保持列约束。
+    source.revision ?? 1,
     source.tokenBudget,
     source.tokensUsed,
     source.timeUsedSeconds,
@@ -695,6 +702,82 @@ export function updateSessionTargetSummaryTitle(
   return mustReadTarget(db, input.sessionID);
 }
 
+/**
+ * 乐观并发的 objective 改写:只有 target_id + revision 同时命中当前行才写入,
+ * 否则返回 null(目标被替换/objective 已被改写),调用方据此要求模型重读。
+ * 只动 objective/revision/time_updated;status、预算与用量一概不碰。
+ */
+export function updateSessionTargetObjective(
+  db: DatabaseSync,
+  input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    objective: string;
+  },
+): SessionGoal | null {
+  const now = Date.now();
+  const result = db
+    .prepare(
+      `
+      update session_target
+      set objective = ?, revision = revision + 1, time_updated = ?
+      where session_id = ? and target_id = ? and revision = ? and status <> 'complete'
+      `,
+    )
+    .run(input.objective, now, input.sessionID, input.targetID, input.revision);
+  if (result.changes === 0) return null;
+  touchSessionForTarget(db, input.sessionID, now);
+  const target = mustReadTarget(db, input.sessionID);
+  appendSessionTargetEvent(db, {
+    kind: "edited",
+    reason: "objective-updated",
+    sessionID: input.sessionID,
+    snapshot: target,
+    targetID: target.targetID,
+  });
+  return target;
+}
+
+/**
+ * 模型显式阻塞:持久状态写 paused(续跑闸门只认 active,用户可 /goal resume),
+ * 事件层追加 kind='blocked' + blocker_code(不发明新的持久状态)。
+ * completed 目标不可阻塞——SQL 守卫避免模型把已完成的目标翻回 paused。
+ */
+export function blockSessionTarget(
+  db: DatabaseSync,
+  input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    blockerCode: string;
+    reason: string;
+  },
+): SessionGoal | null {
+  const now = Date.now();
+  const result = db
+    .prepare(
+      `
+      update session_target
+      set status = 'paused', time_updated = ?
+      where session_id = ? and target_id = ? and revision = ? and status <> 'complete'
+      `,
+    )
+    .run(now, input.sessionID, input.targetID, input.revision);
+  if (result.changes === 0) return null;
+  touchSessionForTarget(db, input.sessionID, now);
+  const target = mustReadTarget(db, input.sessionID);
+  appendSessionTargetEvent(db, {
+    blockerCode: input.blockerCode,
+    kind: "blocked",
+    reason: input.reason,
+    sessionID: input.sessionID,
+    snapshot: target,
+    targetID: target.targetID,
+  });
+  return target;
+}
+
 export function clearSessionTarget(db: DatabaseSync, input: { sessionID: SessionId }): boolean {
   const now = Date.now();
   const current = readSessionTarget(db, { sessionID: input.sessionID });
@@ -735,6 +818,7 @@ function decodeTargetRow(row: TargetRow): SessionGoal {
     objective: row.objective,
     summaryTitle: row.summary_title,
     status: row.status as GoalStatus,
+    revision: row.revision,
     tokenBudget: row.token_budget,
     tokensUsed: row.tokens_used,
     timeUsedSeconds: row.time_used_seconds,

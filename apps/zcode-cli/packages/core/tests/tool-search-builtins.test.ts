@@ -15,6 +15,11 @@ const RESIDENT_NAMES = [
   "Bash",
   "Edit",
   "Glob",
+  // goal 写工具常驻：目标锚点会直接点名 GoalUpdate/GoalBlock，deferred 会让直接调用
+  // 以 InputValidationError 失败。它们仍受 goal 灰度旗控制，关旗时根本不在注册表里。
+  "GoalBlock",
+  "GoalCreate",
+  "GoalUpdate",
   "Grep",
   "Read",
   "ReportFindings",

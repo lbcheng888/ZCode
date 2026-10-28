@@ -217,7 +217,7 @@ CREATE TABLE "session_target" (
         time_used_seconds integer not null default 0,
         time_created integer not null,
         time_updated integer not null
-      , summary_title text, active_input_id text, active_run_started_at integer, active_run_last_seen_at integer, turn_budget integer, turns_used integer not null default 0, wall_clock_budget_seconds integer);
+      , summary_title text, active_input_id text, active_run_started_at integer, active_run_last_seen_at integer, turn_budget integer, turns_used integer not null default 0, wall_clock_budget_seconds integer, revision integer not null default 1);
 
 CREATE TABLE session_target_event (
           id integer primary key autoincrement,

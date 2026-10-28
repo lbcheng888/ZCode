@@ -16,10 +16,22 @@ export const GoalStatus = {
 export type GoalStatus = (typeof GoalStatus)[keyof typeof GoalStatus];
 
 export const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+export const MAX_GOAL_BLOCKER_CODE_CHARS = 64;
+export const MAX_GOAL_BLOCK_REASON_CHARS = 2_000;
 export const GOAL_COMPLETION_VERIFICATION_QUERY_SOURCE =
   "target_completion_verification";
 export const GOAL_COMPLETION_VERIFICATION_FALLBACK_REASON =
   "The completion verifier could not confirm that every goal requirement is complete.";
+
+/** blocked 状态的稳定 code（runtime 预算耗尽专用）；持久状态列仍写 budget_limited。 */
+export const TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE = "budget-exhausted";
+
+/**
+ * 模型可见 goal 工具共享的完成证据约束（docs/design/v2/tool/00-tool-change-chain.md
+ * 「Session-state tool」）：任何 goal 状态变更工具都不得把过程信号当完成证据。
+ */
+export const GOAL_TOOL_COMPLETION_EVIDENCE_NOTE =
+  "Plans, todo updates, checklists, phase completion, budget exhaustion, and stopping work are not completion evidence; only real artifacts, command output, tests, PR state, or user confirmation are.";
 
 export const GoalStatusSchema = z.enum([
   "active",
@@ -50,6 +62,11 @@ export interface SessionGoal {
   objective: string;
   summaryTitle: string | null;
   status: GoalStatus;
+  /**
+   * 乐观并发 token：目标被替换（新 targetID）与 objective 被模型改写都会递增。
+   * 模型侧 GoalUpdate / GoalBlock 必须带上上一次读到的 revision，过期即拒绝。
+   */
+  revision: number;
   tokenBudget: number | null;
   tokensUsed: number;
   timeUsedSeconds: number;
@@ -72,6 +89,7 @@ export const SessionGoalSchema = z
     objective: z.string().min(1),
     summaryTitle: z.string().min(1).nullable(),
     status: GoalStatusSchema,
+    revision: z.number().int().positive(),
     tokenBudget: GoalTokenBudgetSchema,
     tokensUsed: z.number().int().nonnegative(),
     timeUsedSeconds: z.number().int().nonnegative(),
@@ -94,6 +112,99 @@ export const GoalReadInputSchema = z.object({}).strict();
 export type GoalReadInput = z.infer<typeof GoalReadInputSchema>;
 export const GoalReadInputJsonSchema = toToolJsonSchema(GoalReadInputSchema);
 
+export const GoalCreateInputSchema = z
+  .object({
+    objective: GoalObjectiveSchema.describe(
+      "The long-running objective, stated as the user's requirement. It replaces nothing: creation fails when a goal already exists.",
+    ),
+  })
+  .strict();
+export type GoalCreateInput = z.infer<typeof GoalCreateInputSchema>;
+export const GoalCreateInputJsonSchema = toToolJsonSchema(GoalCreateInputSchema);
+
+export const GoalCreateOutputSchema = z.object({ goal: SessionGoalSchema }).strict();
+export type GoalCreateOutput = z.infer<typeof GoalCreateOutputSchema>;
+export const GoalCreateOutputJsonSchema = toToolJsonSchema(GoalCreateOutputSchema);
+
+export const GoalUpdateInputSchema = z
+  .object({
+    targetID: z
+      .string()
+      .min(1)
+      .describe("The targetID of the current goal, exactly as shown in the goal state."),
+    revision: z
+      .number()
+      .int()
+      .positive()
+      .describe(
+        "The revision of the goal whose objective is being replaced. A stale revision is rejected and nothing is written.",
+      ),
+    objective: GoalObjectiveSchema.describe(
+      "The full new objective. Rewrite the whole objective; the old text is replaced, not merged.",
+    ),
+  })
+  .strict();
+export type GoalUpdateInput = z.infer<typeof GoalUpdateInputSchema>;
+export const GoalUpdateInputJsonSchema = toToolJsonSchema(GoalUpdateInputSchema);
+
+export const GoalUpdateOutputSchema = z
+  .object({ goal: SessionGoalSchema, previousObjective: z.string() })
+  .strict();
+export type GoalUpdateOutput = z.infer<typeof GoalUpdateOutputSchema>;
+export const GoalUpdateOutputJsonSchema = toToolJsonSchema(GoalUpdateOutputSchema);
+
+export const GoalBlockerCodeSchema = z
+  .string()
+  .transform((value) => value.trim().toLowerCase())
+  .refine(
+    (value) => value.length <= MAX_GOAL_BLOCKER_CODE_CHARS,
+    `blocker code must be at most ${MAX_GOAL_BLOCKER_CODE_CHARS} characters`,
+  )
+  .refine(
+    (value) => /^[a-z0-9][a-z0-9-]*$/.test(value),
+    "blocker code must use lowercase letters, digits and dashes",
+  )
+  .refine(
+    (value) => value !== TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
+    `${TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE} is reserved for runtime budget exhaustion`,
+  );
+
+export const GoalBlockInputSchema = z
+  .object({
+    targetID: z
+      .string()
+      .min(1)
+      .describe("The targetID of the current goal, exactly as shown in the goal state."),
+    revision: z
+      .number()
+      .int()
+      .positive()
+      .describe(
+        "The revision of the goal being blocked. A stale revision is rejected and nothing is written.",
+      ),
+    blockerCode: GoalBlockerCodeSchema.describe(
+      "A stable, machine-readable code for the blocker, such as missing-credentials or external-service-down.",
+    ),
+    reason: z
+      .string()
+      .transform((value) => value.trim())
+      .refine((value) => value.length > 0, "blocker reason must not be empty")
+      .refine(
+        (value) => Array.from(value).length <= MAX_GOAL_BLOCK_REASON_CHARS,
+        `blocker reason must be at most ${MAX_GOAL_BLOCK_REASON_CHARS} characters`,
+      )
+      .describe("One short paragraph explaining what blocks the goal and what would unblock it."),
+  })
+  .strict();
+export type GoalBlockInput = z.infer<typeof GoalBlockInputSchema>;
+export const GoalBlockInputJsonSchema = toToolJsonSchema(GoalBlockInputSchema);
+
+export const GoalBlockOutputSchema = z
+  .object({ goal: SessionGoalSchema, blockerCode: z.string() })
+  .strict();
+export type GoalBlockOutput = z.infer<typeof GoalBlockOutputSchema>;
+export const GoalBlockOutputJsonSchema = toToolJsonSchema(GoalBlockOutputSchema);
+
 // ============================================================
 // Target durable event log(long-horizon-goal-redesign-plan §3.2 / §4.1)
 // ============================================================
@@ -109,9 +220,6 @@ export const SessionTargetEventKinds = [
 ] as const;
 
 export type SessionTargetEventKind = (typeof SessionTargetEventKinds)[number];
-
-/** blocked 状态的稳定 code;持久状态列仍写 budget_limited。 */
-export const TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE = "budget-exhausted";
 
 export interface SessionTargetEvent {
   id: number;
@@ -280,6 +388,11 @@ export function formatTargetAnchorPrompt(goal: SessionGoal, live?: TargetBudgetL
     escapeGoalPromptText(goal.objective),
     "</untrusted_objective>",
     "",
+    "Goal identity:",
+    `- Target ID: ${goal.targetID}`,
+    `- Revision: ${goal.revision}`,
+    "GoalUpdate and GoalBlock require this target ID and revision. The revision changes whenever the goal is replaced or its objective is edited; a rejected call reports the current pair to retry with. Never edit the objective to shrink scope or make the completion check easier.",
+    "",
     "Budget:",
     ...buildTargetBudgetLines(goal, live),
     ...buildTargetBudgetConvergenceLines(goal, live),
@@ -371,6 +484,8 @@ export function formatGoalStateForModel(
   return [
     "Current session goal state (authoritative):",
     `Status: ${goal.status}`,
+    `Target ID: ${goal.targetID}`,
+    `Revision: ${goal.revision}`,
     `Tokens used: ${goal.tokensUsed}`,
     `Token budget: ${budget}`,
     `Time used: ${goal.timeUsedSeconds} seconds`,

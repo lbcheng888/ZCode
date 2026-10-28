@@ -340,3 +340,43 @@ describe("Agent / Task 描述随灰度门增删工作流那一行", () => {
     expect(task).toContain("CreateWorkflow");
   });
 });
+
+// goal 写工具的灰度极性与 dynamic-workflow **相反**：缺席即不注册。同型风险仍在——
+// 第二个注册入口（分支刷新）漏传 includeGoalTools 时，关旗会话本不该出现的工具会被
+// 无声加回。这里同样走公开的 shell 快照初始化路径，验证两个入口共用同一推导。
+describe("AgentRuntime：goal 写工具只在 goal 层开启时注册", () => {
+  const GOAL_WRITE_TOOL_NAMES = ["GoalCreate", "GoalUpdate", "GoalBlock"] as const;
+  const CMD_SHELL_SELECTION = {
+    dialect: "cmd",
+    display: { name: "CMD" },
+    id: "cmd",
+    label: "CMD",
+    path: "cmd.exe",
+    source: "user-config",
+  } as const;
+
+  it.each([
+    { config: {}, registered: false },
+    { config: { goalLayerEnabled: false }, registered: false },
+    { config: { goalLayerEnabled: true }, registered: true },
+  ])("config %j", ({ config: runtimeConfig, registered }) => {
+    const runtime = new AgentRuntime(createSessionId("goal-tools-gate"), runtimeConfig, {
+      eventStore: createTestSessionEventStore(),
+      toolRegistry: createToolRegistry(),
+    });
+    const expectGoalTools = () => {
+      for (const name of GOAL_WRITE_TOOL_NAMES) {
+        expect({ name, registered: runtime.getToolRegistry().has(name) }).toEqual({
+          name,
+          registered,
+        });
+      }
+      // GoalRead 仍是只有定义、不注册的只读契约。
+      expect(runtime.getToolRegistry().has("GoalRead")).toBe(false);
+    };
+
+    expectGoalTools();
+    expect(runtime.initializeSessionShellEnvironmentIfNeeded(CMD_SHELL_SELECTION)).toBe(true);
+    expectGoalTools();
+  });
+});

@@ -642,6 +642,7 @@ describe("SQLite session store", () => {
       "0023_session_soft_delete_outcome",
       "0024_session_database_identity",
       "0025_session_target_budget_and_events",
+      "0026_session_target_revision",
     ];
 
     try {
@@ -678,6 +679,7 @@ describe("SQLite session store", () => {
         "0.16.5",
         "0.16.5",
         "0.16.5",
+        "0.16.9",
         "0.16.9",
         "0.16.9",
         "0.16.9",
@@ -718,7 +720,7 @@ describe("SQLite session store", () => {
         ]),
       );
       expect(attempts.flat().filter((result) => !result.ok)).toEqual([]);
-      expect(attempts.flat().every((result) => result.migrationIds?.length === 25)).toBe(true);
+      expect(attempts.flat().every((result) => result.migrationIds?.length === 26)).toBe(true);
     },
     CONCURRENT_STARTUP_TEST_TIMEOUT_MS,
   );
@@ -946,6 +948,7 @@ describe("SQLite session store", () => {
         "0023_session_soft_delete_outcome",
         "0024_session_database_identity",
         "0025_session_target_budget_and_events",
+        "0026_session_target_revision",
       ]);
       store.close();
     } finally {
@@ -2735,6 +2738,133 @@ describe("SQLite session store", () => {
         kind: "paused",
         reason: "turn-cancelled",
         snapshot: { status: "paused", targetID: cancelled.targetID },
+      });
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("guards model-initiated objective edits and blocks with the target revision", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-revision-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-revision");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-revision"),
+        slug: "target-revision",
+        directory: tempRoot,
+        title: "target revision",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+
+      const first = await store.setTarget({ objective: "First objective", sessionID });
+      expect(first.revision).toBe(1);
+      // 替换语义:revision 跨 replace 单调,旧对不可能命中新目标。
+      const replaced = await store.setTarget({ objective: "Replaced objective", sessionID });
+      expect(replaced.targetID).not.toBe(first.targetID);
+      expect(replaced.revision).toBe(2);
+
+      // 旧 targetID + 旧 revision:不写入。
+      await expect(
+        store.updateTargetObjective({
+          objective: "Stale rewrite",
+          revision: 1,
+          sessionID,
+          targetID: first.targetID,
+        }),
+      ).resolves.toBeNull();
+      await expect(store.readTarget({ sessionID })).resolves.toMatchObject({
+        objective: "Replaced objective",
+        revision: 2,
+        targetID: replaced.targetID,
+      });
+
+      // 当前对:objective 改写 + revision +1,事件走既有 edited 车道。
+      const edited = await store.updateTargetObjective({
+        objective: "Refined objective",
+        revision: 2,
+        sessionID,
+        targetID: replaced.targetID,
+      });
+      expect(edited).toMatchObject({
+        objective: "Refined objective",
+        revision: 3,
+        status: "active",
+        targetID: replaced.targetID,
+      });
+
+      // 过期 revision 的 block 同样不写。
+      await expect(
+        store.blockTarget({
+          blockerCode: "missing-credentials",
+          reason: "No token.",
+          revision: 2,
+          sessionID,
+          targetID: replaced.targetID,
+        }),
+      ).resolves.toBeNull();
+
+      const blocked = await store.blockTarget({
+        blockerCode: "missing-credentials",
+        reason: "No token.",
+        revision: 3,
+        sessionID,
+        targetID: replaced.targetID,
+      });
+      expect(blocked).toMatchObject({
+        objective: "Refined objective",
+        revision: 3,
+        status: "paused",
+      });
+
+      const events = await store.readTargetEvents({ sessionID });
+      expect(events.map((event) => event.kind)).toEqual([
+        "created",
+        "edited",
+        "edited",
+        "blocked",
+      ]);
+      expect(events.at(-2)).toMatchObject({
+        kind: "edited",
+        reason: "objective-updated",
+        snapshot: { objective: "Refined objective", revision: 3 },
+      });
+      expect(events.at(-1)).toMatchObject({
+        blockerCode: "missing-credentials",
+        kind: "blocked",
+        reason: "No token.",
+        snapshot: { revision: 3, status: "paused" },
+        targetID: replaced.targetID,
+      });
+
+      // complete 是不可逆终态:block 不把它翻回 paused。
+      await store.updateTargetStatus({ sessionID, status: "complete" });
+      await expect(
+        store.blockTarget({
+          blockerCode: "other",
+          reason: "No.",
+          revision: 3,
+          sessionID,
+          targetID: replaced.targetID,
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        store.updateTargetObjective({
+          objective: "Reopen",
+          revision: 3,
+          sessionID,
+          targetID: replaced.targetID,
+        }),
+      ).resolves.toBeNull();
+      await expect(store.readTarget({ sessionID })).resolves.toMatchObject({
+        objective: "Refined objective",
+        status: "complete",
       });
     } finally {
       store.close();

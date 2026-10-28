@@ -67,6 +67,7 @@ import type {
 import type { JournalStorePort } from "@zcode/dynamic-workflow";
 import {
   accountSessionTargetUsage,
+  blockSessionTarget,
   clearSessionTarget,
   cloneSessionTargetForFork,
   createSessionTarget,
@@ -77,6 +78,7 @@ import {
   recoverInterruptedSessionTargetRun,
   setSessionTarget,
   startSessionTargetRun,
+  updateSessionTargetObjective,
   updateSessionTargetSummaryTitle,
   updateSessionTargetStatus,
 } from "../session-target.js";
@@ -788,6 +790,25 @@ export class SqliteSessionStore
     reason?: string;
   }): Promise<SessionGoal | null> {
     return updateSessionTargetStatus(this.db, input);
+  }
+
+  async updateTargetObjective(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    objective: string;
+  }): Promise<SessionGoal | null> {
+    return updateSessionTargetObjective(this.db, input);
+  }
+
+  async blockTarget(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    blockerCode: string;
+    reason: string;
+  }): Promise<SessionGoal | null> {
+    return blockSessionTarget(this.db, input);
   }
 
   async startTargetRun(input: {

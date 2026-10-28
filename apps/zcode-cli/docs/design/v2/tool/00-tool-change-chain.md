@@ -1133,7 +1133,8 @@ history。重点检查：
 - `readOnly` 只用于不会改变 session/workspace/system/network 状态的检查型 tool。会写入 session 状态的 tool 应声明 `sideEffectScope: "session"`，并根据是否允许在 plan mode 使用来设置权限；不要为了免审批把 session mutation 标成 read-only。
 - `allowedInPlanMode` 只允许显式放行 `sideEffectScope: "session"`、`destructive: false`、`needsApproval: false` 的控制型 tool；它不能放行 workspace/system/network side effect，也不能覆盖 global/project deny/ask 规则。典型用途是 child runtime 向所属 coordinator 写入 session-local response queue。
 - 用于完成 long-running target/goal 的 session-state tool 必须把“计划、todo、checklist、阶段完成、预算耗尽或停止工作不是完成证据”写进模型可见描述或 prompt，并要求模型基于真实 artifact、命令输出、测试、PR 状态或用户确认完成审计。
-- 如果 session-state tool 的结果需要二阶段确认，例如 goal completion verifier，优先把 verifier 做成 runtime gate 和可配置开关，不新增持久状态；必须定义 verifier 失败时的模型继续提示、稳定状态事件、UI/ZCode app-server 状态投影和测试覆盖。现有 long-running goal 仍通过兼容事件 `target_changed` 和 ZCode app-server `_meta.zcode.target` 投影给旧客户端；当前模型可见 goal 工具只有 `GoalRead`，不得再新增或恢复 `GoalCreate` / `GoalUpdate` / `Target*` 这类模型可见状态变更工具。
+- 如果 session-state tool 的结果需要二阶段确认，例如 goal completion verifier，优先把 verifier 做成 runtime gate 和可配置开关，不新增持久状态；必须定义 verifier 失败时的模型继续提示、稳定状态事件、UI/ZCode app-server 状态投影和测试覆盖。现有 long-running goal 仍通过兼容事件 `target_changed` 和 ZCode app-server `_meta.zcode.target` 投影给旧客户端。
+- 模型可见 goal 写工具受 goal 灰度旗（`goalLayerEnabled`）门控，缺口即不注册：`GoalCreate`（仅在没有目标时创建）、`GoalUpdate`（只改 objective）、`GoalBlock`（只把目标置 paused 并落 blocked 事件）。三者都必须在入参里带 `targetID` + `revision`，由 store 的 `target_id + revision` 守卫拒绝过期写入；都不得接受 status / budget / complete 入参，也不得新增持久状态（blocked 只存在于事件层）。各注册入口必须共用 `tool-allowlist.ts` 的同一个推导，避免分支刷新时无声加回工具。`GoalRead` 仍是只有定义、不注册的只读契约。
 
 ### Discovery-backed instruction tool
 

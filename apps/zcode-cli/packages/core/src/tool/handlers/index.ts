@@ -41,6 +41,11 @@ import { isSubagentDispatchToolName } from "../compat.js";
 import { skillToolEntry } from "./skill.js";
 import { todoReadToolEntry, todoWriteToolEntry } from "./todo.js";
 import {
+  goalBlockToolEntry,
+  goalCreateToolEntry,
+  goalUpdateToolEntry,
+} from "./target.js";
+import {
   cronCreateToolEntry,
   cronDeleteToolEntry,
   cronListToolEntry,
@@ -91,6 +96,10 @@ export const builtInTools: ToolEntry[] = [
   webSearchToolEntry,
   todoReadToolEntry,
   todoWriteToolEntry,
+  // long-horizon goal 的模型可见写入口:只在 goal 灰度旗开启时注册(见 includeGoalTools)。
+  goalCreateToolEntry,
+  goalUpdateToolEntry,
+  goalBlockToolEntry,
   cronCreateToolEntry,
   cronListToolEntry,
   cronUpdateToolEntry,
@@ -174,6 +183,18 @@ export function isDynamicWorkflowToolName(toolName: string): boolean {
   return DYNAMIC_WORKFLOW_TOOL_NAMES.has(toolName);
 }
 
+/**
+ * 模型可见 goal 写工具。**缺席即不注册**（与 dynamicWorkflowEnabled 的极性相反）：
+ * 只有 goal 灰度旗显式开启时它们才进模型工具面，关旗会话保持旧的「只有 GoalRead 定义、
+ * 没有任何 goal 写工具」形态。两个注册入口（runtime-tools.ts / embedded-search-branch.ts）
+ * 必须共用 tool-allowlist.ts 的同一个推导。
+ */
+const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  goalCreateToolEntry.metadata.name,
+  goalUpdateToolEntry.metadata.name,
+  goalBlockToolEntry.metadata.name,
+]);
+
 interface RegisterBuiltInToolsOptions {
   bashTimeoutPolicy?: BashTimeoutPolicy;
   includeSkill?: boolean;
@@ -181,6 +202,8 @@ interface RegisterBuiltInToolsOptions {
   includeSendMessage?: boolean;
   includeRespondToCoordinator?: boolean;
   includeSubmitResult?: boolean;
+  /** goal 灰度旗（goalLayerEnabled）。只有显式 true 才注册 GoalCreate/GoalUpdate/GoalBlock。 */
+  includeGoalTools?: boolean;
   /**
    * 在场时 submit_result 以 typed 声明注册（`{ result: <schema> }`，strict 资格），供 dwf mono
    * 子代理；缺席即通用声明。只在 includeSubmitResult 为真时有意义。
@@ -229,6 +252,9 @@ export function registerBuiltInTools(
       continue;
     }
     if (disallowedTools?.has(entry.metadata.name)) {
+      continue;
+    }
+    if (GOAL_TOOL_NAMES.has(entry.metadata.name) && options.includeGoalTools !== true) {
       continue;
     }
     if (isSubagentDispatchToolName(entry.metadata.name) && options.includeAgent !== true) {

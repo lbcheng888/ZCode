@@ -1238,6 +1238,28 @@ export interface SessionStorePort {
     /** 状态机事件缘由(session-start-disarm / budget-exhausted 等)。 */
     reason?: string;
   }): Promise<SessionGoal | null>;
+  /**
+   * 乐观并发的 objective 改写:会话状态里不存在第二份 revision,只有 target_id + revision
+   * 都命中当前行才写入;目标被替换或已被别的调用改过时返回 null(调用方负责提示重读)。
+   * 只改 objective/revision/time_updated,不碰 status、预算或用量。
+   */
+  updateTargetObjective?(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    objective: string;
+  }): Promise<SessionGoal | null>;
+  /**
+   * 模型显式阻塞:持久状态写 paused(续跑闸门只认 active,用户可 /goal resume),
+   * 事件层追加 kind='blocked' + blocker_code。completed 目标不可阻塞。
+   */
+  blockTarget?(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    blockerCode: string;
+    reason: string;
+  }): Promise<SessionGoal | null>;
   startTargetRun?(input: {
     sessionID: SessionId;
     targetID: string;

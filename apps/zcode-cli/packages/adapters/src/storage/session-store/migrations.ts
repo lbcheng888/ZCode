@@ -1061,4 +1061,22 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
         on session_target_event(session_id, id);
     `,
   },
+  {
+    appVersion: "0.16.9",
+    id: "0026_session_target_revision",
+    touchedTables: ["session_target"],
+    // 模型可见 goal 工具的乐观并发 token:目标替换与 objective 改写都递增。
+    // 与 0023/0025 同款 pragma 幂等守卫(删除账本行后重放的场景下裸 alter 会失败)。
+    apply: (db) => {
+      const targetColumns = new Set(
+        db
+          .prepare("pragma table_info(session_target)")
+          .all()
+          .map((row) => row.name),
+      );
+      if (!targetColumns.has("revision"))
+        db.exec("alter table session_target add column revision integer not null default 1");
+    },
+    sql: `alter table session_target add column revision integer not null default 1;`,
+  },
 ];

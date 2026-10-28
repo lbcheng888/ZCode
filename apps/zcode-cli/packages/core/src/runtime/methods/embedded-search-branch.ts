@@ -5,6 +5,7 @@ import { resolveEmbeddedSearchBranchCapability } from "../../embedded-search/cap
 import {
   resolveBuiltInToolAllowlist,
   resolveRuntimeDynamicWorkflowToolsIncluded,
+  resolveRuntimeGoalToolsIncluded,
 } from "../helpers/tool-allowlist.js";
 import { isToolNameDisallowed } from "../../tool/tool-visibility.js";
 
@@ -37,6 +38,9 @@ export function refreshBranchAwareBuiltInTools(runtime: AgentRuntimeInternal): v
     // silentDuplicateWarnings 还把告警吞掉，所以全程无声）。推导因此必须与 runtime-tools.ts
     // 共用同一个 helper，不能在这里重写一遍判断。
     includeDynamicWorkflow: resolveRuntimeDynamicWorkflowToolsIncluded(runtime),
+    // goal 写工具是「缺席即不注册」的 fail-closed 极性，漏传方向安全；但仍与首次装配共用
+    // 同一个推导，避免两处各自解释 goal 旗。
+    includeGoalTools: resolveRuntimeGoalToolsIncluded(runtime),
     allowedTools: resolveBuiltInToolAllowlist(runtime.config),
     disallowedTools: runtime.config.toolDisallowlist,
     silentDuplicateWarnings: true,
