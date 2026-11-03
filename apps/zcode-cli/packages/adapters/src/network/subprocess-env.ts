@@ -39,6 +39,76 @@ const CA_TARGET_KEYS = CA_SOURCE_KEYS;
 const EXPLICIT_CA_SOURCE_KEYS = [ZCODE_AGENT_CA_CERT_ENV_KEY] as const;
 const EXPLICIT_NO_PROXY_SOURCE_KEYS = [ZCODE_NO_PROXY_ENV_KEY] as const;
 
+/**
+ * spec run（M5 投机执行）子进程 env 的白名单键：运行必需（shell/路径/临时目录/
+ * locale）。不在表内的键——一切凭据形态（token/authKey/Authorization/OTEL headers/
+ * ZCODE_TOOL_ENV_PASSTHROUGH_JSON…）——结构性不进 env。这是「无凭据」的机械保证，
+ * 不靠 denylist 猜键名（凭据形态不可穷举，denylist 无法证明零字节，见
+ * docs/architecture/super-agent-spec-lane-spec.md §3）。
+ */
+const SPEC_RUN_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "TZ",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+] as const;
+
+export interface SpecRunEnvOptions {
+  /** 本地 egress 代理地址（如 http://127.0.0.1:12345）。为空即抛——无代理拒绝启动。 */
+  proxyUrl: string;
+  sourceEnv?: Record<string, string | undefined>;
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * 构造 spec run 的子进程 env：白名单拷贝 + 强制代理注入（复用
+ * `applyNetworkEgressEnv` 通道）。fail-closed：`proxyUrl` 为空直接抛错，
+ * 任何路径都不回退直连（spec §3 硬不变量）。
+ *
+ * 注入语义：`sourceEnv: {}` 不回落 ZCODE_HTTP_PROXY/ZCODE_NO_PROXY/
+ * ZCODE_AGENT_CA_CERT；`noProxy` 空 ⇒ 不设 NO_PROXY，一切主机（含 localhost）
+ * 都必须过代理，由代理 allowlist 统一裁决；`toolEnvPassthrough: false` ⇒
+ * 不恢复可能携带凭据的 ZCODE_TOOL_ENV_PASSTHROUGH_JSON。
+ */
+export function buildSpecRunEnv(options: SpecRunEnvOptions): Record<string, string> {
+  const proxyUrl = normalizeEnvValue(options.proxyUrl);
+  if (!proxyUrl) {
+    throw new Error(
+      "spec run 缺少 egress 代理地址：无代理即拒绝启动（fail-closed），不回退直连",
+    );
+  }
+  const platform = options.platform ?? process.platform;
+  const sourceEnv = options.sourceEnv ?? {};
+  const env: Record<string, string> = {};
+  for (const key of SPEC_RUN_ENV_ALLOWLIST) {
+    const value = getEnvValue(sourceEnv, key, platform);
+    if (value !== undefined) {
+      setEnvKey(env, key, value, platform);
+    }
+  }
+  applyNetworkEgressEnv(env, {
+    network: { httpProxy: proxyUrl, noProxy: "" },
+    sourceEnv: {},
+    toolEnvPassthrough: false,
+    platform,
+  });
+  return env;
+}
+
 export function applyNetworkEgressEnv(
   env: Record<string, string>,
   options: NetworkEgressEnvOptions,

@@ -1,0 +1,20 @@
+# super-agent-spec-lane
+
+一页以内。只写类型与测试表达不了的三样：模块存在的意图、不变量、与其它模块的交集在哪个 hook 点处理。
+
+意图：M5 投机执行 spec lane 的出站约束——结构隔离（硬，工具面零出站/信道句柄）+ 协作式 egress 代理（env 级，托管 per-workspace 本地代理，白名单 host 直通、其余拒绝），给 dispatcher 一个「无代理即拒绝启动」的 run 准入接缝。受限 profile（core `buildSpecRestrictedProfile`）与无凭据 env（adapters `buildSpecRunEnv`）与本模块共同构成 spec run 的三层约束（工具面 ∩ env ∩ 代理）。**诚实边界（裁定 B）**：env 级代理是协作式第二层——`curl --noproxy '*'`、`env -u HTTP_PROXY`、不读代理 env 的客户端可绕过，属已知残留（spec §0/§5/§8-6），绕过对抗测试如实钉住；对外文案禁用「物理隔绝出站」。
+
+不变量：
+
+- **fail-closed，无降级**：listen 失败抛 `SpecEgressStartupError`，调用方据此拒绝 run 启动；模块内不存在「代理不可用就直连」的路径。
+- **零 egress 缺省**：`allowHosts` 缺省 `[]` ⇒ 一切转发被拒；白名单只能来自调用方显式传入（per-repo 依赖镜像配置）。条目形状损坏（非字符串/空串/畸形 host:port）抛错，不静默丢弃。
+- **代理只说 HTTP 代理协议**：absolute-form + CONNECT；只绑 loopback；不开任意 TCP 转发。
+- **per-workspace 有且仅有一个实例**：同 workspace 再 prepare = 先停旧再起新（替换，不叠加）；配置校验先于停旧，损坏配置不制造无代理窗口。
+- **noProxy 恒为空**：networkPolicy 不提供 NO_PROXY 旁路——spec run 一切主机（含 localhost）都过代理，由 allowlist 统一裁决。
+
+与其它模块的交集（hook 点，全部经组合根/dispatcher，本模块不主动接线）：
+
+- **dispatcher（mandate/spec-trigger lane，M4/M2）**：调 `prepareSpecRunEgress` → 拿 plan 接执行适配器（`network`）与 `buildSpecRunEnv`（`processEnv`）；run 终态调 `stopSpecRunEgress`。verdict 门、结果卡交付不在本模块。
+- **adapters `buildSpecRunEnv`**：同源消费 plan.proxyUrl；凭据真空与代理 env 注入在那侧（spec §3）。
+- **core `buildSpecRestrictedProfile`**：工具面剔除出站/信道工具（spec §2）；与本模块正交，组合根同时装配两者。
+- **contracts config（config lane）**：`specEgress.allowHosts` 的 repo 配置键与读取；本模块只收 `allowHosts` 参数 + `normalizeSpecEgressAllowlist` 纯函数。

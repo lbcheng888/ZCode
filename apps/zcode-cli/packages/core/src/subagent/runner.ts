@@ -53,7 +53,12 @@ import {
 } from "./profile.js";
 import { EXPLORE_AGENT_ALLOWED_TOOLS } from "./explore-tools.js";
 import { formatLocalAgentTaskNotification } from "./completion-notification.js";
-import { filterSubagentChildToolNames } from "./tool-policy.js";
+import {
+  SPEC_RESTRICTED_PROFILE_NAME,
+  buildSpecRestrictedDisallowRules,
+  filterSpecRestrictedToolNames,
+  filterSubagentChildToolNames,
+} from "./tool-policy.js";
 import {
   ErrorPayloadRole,
   selectExecutionErrorMessage,
@@ -2165,6 +2170,18 @@ function resolveAllowedTools(
   const disallowed = new Set(profile.disallowedTools ?? []);
   if (profile.skills && profile.skills.length > 0 && !disallowed.has("Skill")) {
     baseTools.push("Skill");
+  }
+  // spec restricted profile（M5 spec §2.3）：出站/信道表 + mcp__* 前缀双闸在
+  // runner 解析层生效——即使调用方把 tools 改写成 "*"，展开前的显式名与后续
+  // runtime 展开（resolveSubagentToolAllowlist 吃同一份 disallowedTools）
+  // 都过这两道规则，出站工具与动态 MCP 名进不了 child 工具面。
+  if (profile.name === SPEC_RESTRICTED_PROFILE_NAME) {
+    return filterSpecRestrictedToolNames(
+      filterSubagentChildToolNames(
+        baseTools,
+        buildSpecRestrictedDisallowRules(profile.disallowedTools),
+      ),
+    );
   }
   return filterSubagentChildToolNames(baseTools, profile.disallowedTools);
 }
