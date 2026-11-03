@@ -21,6 +21,12 @@ import {
   isGroupOwnerCommand,
   canAnswerGroupQuestion,
 } from "./groupSessions.js";
+import {
+  buildBotTriggerThreadKeyHint,
+  type TriggerSink,
+  type TriggerSinkEnvelope,
+  type TriggerSinkOutcome,
+} from "./triggerSink.js";
 /* eslint-disable max-lines -- Bots 服务仍复用原 RPC 文件名，先把鉴权、命令路由、ZCode Agent 桥接收口集中在同一服务内。 */
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -109,6 +115,8 @@ import type {
   BotAutomationRunWatchParams,
   BotCreateBindCodeParams,
   BotListWorkspaceRefsParams,
+  BotOutboxDeadLetterRetryParams,
+  BotOutboxDeadLetterRetrySummary,
   BotSaveBotParams,
   BotTestResult,
   BotUserConfigOptionsParams,
@@ -129,6 +137,15 @@ import {
 import { BOT_MENU_COMMAND_ORDER } from "./commandOrder.js";
 import { parseBotCommand } from "./commandParser.js";
 import { BotsRepo } from "./repo.js";
+import {
+  BotsOutboxDeadLetterRepo,
+  BOT_OUTBOX_DEAD_LETTER_MAX_ATTEMPTS,
+  buildBotOutboxDeadLetterId,
+  planDeadLetterRetryFailure,
+  type BotOutboxDeadLetterInput,
+  type BotOutboxDeadLetterRow,
+  type BotOutboxDeadLetterStore,
+} from "./outboxDeadLetter.js";
 import type {
   BotProviderAdapter,
   BotStreamingReplyCardBlock,
@@ -320,9 +337,17 @@ interface BotsServiceDeps {
   modelSelectionService: Pick<IModelSelectionService, "getView">;
   remoteWorkspaceService?: BotRemoteWorkspaceService;
   repo?: BotsRepo;
+  /** M7③ 出站死信存储；测试注入内存实现，生产缺省落 bot-outbox-dead-letter.v1.json。 */
+  outboxDeadLetterRepo?: BotOutboxDeadLetterStore;
   // 修复原因：desktop-attached 远端启动阶段不应抢跑 bot 轮询、runtime lock 和模型候选缓存；
   // 这些后台任务属于本地桌面 host，不属于 SSH/Docker 远端首屏连接路径。
   runStartupBackgroundTasks?: boolean;
+  /**
+   * Phase 2 触发子系统出口（spec §2.2 / §5.2）：缺省不注入 = 连信封都不构造的 legacy 直路；
+   * 组合根按 features.eventRouter 注入 no-op 直通（kill-switch）或 super-agent-intake 适配器。
+   * 注入后：handled=true 跳过 legacy 直路（避免双跑），handled=false 继续 legacy。
+   */
+  triggerSink?: TriggerSink;
 }
 
 type BotRemoteWorkspaceReconnectResult = Awaited<
@@ -747,6 +772,11 @@ export function createBotsService(
 ): IBotsService & { disposeAll(): void; disposeAllAndWait(): Promise<void> } {
   const runStartupBackgroundTasks = deps.runStartupBackgroundTasks !== false;
   const repo = deps.repo ?? new BotsRepo();
+  const outboxDeadLetterRepo = deps.outboxDeadLetterRepo ?? new BotsOutboxDeadLetterRepo();
+  // Phase 2 出口接线（spec §5.4）：undefined = 未接线（生产缺省，零额外 I/O）；
+  // kill-switch 关闭时组合根注入 noopTriggerSink，行为与 legacy 逐字节一致。
+  const triggerSink = deps.triggerSink;
+  let deadLetterRetryInFlight: Promise<BotOutboxDeadLetterRetrySummary> | null = null;
   const bindCodes = new Map<string, BindCodeRecord>();
   const automationDeliveryWarningAtByKey = new Map<string, number>();
   const streamSubscriptions = new Map<
@@ -3165,6 +3195,42 @@ export function createBotsService(
     return true;
   }
 
+  /**
+   * 出口规范化铸造 TriggerEnvelope（spec §2.1 / §5.2）：taint=true 客户端不可伪造，
+   * 凭据零字节（只带对话寻址字段与正文），workspaceIdentity 取自对话绑定
+   * （`workspaceIdentity?.trim() || workspacePath`，未绑定为空串由 intake 落审计行）。
+   * 域键 hint 与 botDeliveryTarget / 存量回填同一格式，保证订阅匹配。
+   */
+  async function mintTriggerEnvelope(message: BotInboundMessage): Promise<TriggerSinkEnvelope> {
+    const conversation = (await repo.readState()).bots[getBotConversationKey(message.actor)];
+    const workspaceIdentity =
+      conversation?.workspaceIdentity?.trim() || conversation?.workspacePath?.trim() || "";
+    return {
+      workspaceIdentity,
+      source: message.actor.provider === "webhook" ? "webhook" : "im",
+      provider: message.actor.provider,
+      providerMessageId: message.actor.providerMessageId?.trim() || undefined,
+      threadKeyHint: buildBotTriggerThreadKeyHint(message.actor),
+      actor: {
+        kind: message.senderType === "app" ? "bot" : "human",
+        id: message.actor.providerUserId.trim() || undefined,
+      },
+      payload: {
+        botId: message.botId,
+        chatType: message.actor.chatType,
+        chatId: message.actor.chatId,
+        threadId: message.actor.threadId,
+        mentionedBot: message.mentionedBot === true,
+        groupCardAction: message.groupCardAction === true,
+        elicitation: message.elicitationResponse !== undefined,
+        senderType: message.senderType ?? "user",
+        commandText: message.commandText,
+        text: message.text,
+      },
+      taint: true,
+    };
+  }
+
   async function sendTyping(bot: BotConfig, actor: BotActor): Promise<void> {
     const adapter = providers[bot.provider];
     const targetId = actor.chatId ?? actor.providerUserId;
@@ -3720,6 +3786,27 @@ export function createBotsService(
         };
       }
     }
+    // Phase 0 安全债（webhook secret 空值 fail-open）：bot 一旦配置了 webhookSecretRef，
+    // 加载不到凭据（credentialService.load 返回空）或与入站 secret 不一致都必须拒绝。
+    // 旧实现只在「能加载且不相等」时拒绝，凭据缺失时整条校验被短路跳过（fail-open），
+    // 伪造/缺失 secret 的回调会被放行。修复依据：与同函数飞书路径
+    // （!expectedToken || expectedToken !== inboundToken）语义统一；未配置 secretRef 的
+    // webhook bot 保持原有准入，不受此门禁影响。
+    if (callbackBot && callbackBot.provider === "webhook" && callbackBot.webhookSecretRef) {
+      const expectedSecret = await deps.credentialService.load(callbackBot.webhookSecretRef);
+      const inboundSecret =
+        isRecord(payload) && typeof payload.webhookSecret === "string"
+          ? payload.webhookSecret
+          : undefined;
+      if (!expectedSecret || expectedSecret !== inboundSecret) {
+        return {
+          ok: false,
+          replies: [],
+          status: 401,
+          responseBody: { error: msg(locale, "webhookSecretInvalid") },
+        };
+      }
+    }
     let materialPayload = payload;
     if (callbackBot && isFeishuBotProvider(provider) && isRecord(payload)) {
       const event = isRecord(payload.event) ? payload.event : payload;
@@ -3835,7 +3922,10 @@ export function createBotsService(
       const bot = findBot(config, inbound.botId);
       if (bot?.provider === "webhook" && bot.webhookSecretRef) {
         const expectedSecret = await deps.credentialService.load(bot.webhookSecretRef);
-        if (expectedSecret && expectedSecret !== inboundSecret) {
+        // Bugfix: 旧条件 `expectedSecret && expectedSecret !== inboundSecret` 在凭据
+        // 加载为空时短路跳过整条校验（fail-open）；配置了 secretRef 就必须 fail-closed，
+        // 与上方整回调门禁和飞书路径语义统一。
+        if (!expectedSecret || expectedSecret !== inboundSecret) {
           replies.push(createOutbound(inbound.actor, msg(locale, "webhookSecretInvalid")));
           continue;
         }
@@ -3894,6 +3984,22 @@ export function createBotsService(
         ...inboundMessage,
         actor: { ...inboundMessage.actor, mentionedBot: inboundMessage.mentionedBot === true },
       };
+      // Phase 2 出口（spec §5.2）：构造信封 → TriggerSink.ingest。markInboundDelivery 快速
+      // 守卫已在上面；DB unique 幂等由 intake 权威兜底（重启后 Map 失效的重投仍单行）。
+      if (triggerSink) {
+        const envelope = await mintTriggerEnvelope(inboundMessage);
+        let sinkOutcome: TriggerSinkOutcome;
+        try {
+          sinkOutcome = await triggerSink.ingest(envelope);
+        } catch (error) {
+          // sink 失败必须释放快速去重占位，否则 provider 重试会被 Map 吞掉；错误原样上浮不吞。
+          releaseInboundDelivery(inboundMessage);
+          throw error;
+        }
+        // handled=true：事件已归新链路（含 rejected 终态），跳过 legacy 直路避免双跑；
+        // 路由动作（routeOwned/dispatchHumanExplicit/notifyCandidate）由注入实现侧负责。
+        if (sinkOutcome.handled) continue;
+      }
       let outbound: BotOutboundMessage[];
       let reconnectStartingReply: BotOutboundMessage | null = null;
       let inboundBusinessFailure = false;
@@ -5115,6 +5221,35 @@ export function createBotsService(
             : undefined,
         );
       } catch (error) {
+        if (automationRun) {
+          // M7③：automation 终态消息发送失败是出站终态失败。除既有抛出（进入流事件告警）外
+          // 落死信行，供 retryBotOutboxDeadLetters 有界重放；成功路径不会写行，也就绝不二次发送。
+          await recordOutboundDeadLetter({
+            id: buildBotOutboxDeadLetterId({
+              kind: "automation-send",
+              botId: bot.id,
+              providerUserId: actor.providerUserId,
+              ...(actor.threadId !== undefined ? { threadId: actor.threadId } : {}),
+              runRef: resultRunId || context.activeTaskId || "",
+              payloadSeed: message.text,
+            }),
+            botId: bot.id,
+            provider: bot.provider,
+            chatType: actor.chatType,
+            providerUserId: actor.providerUserId,
+            ...(actor.threadId !== undefined ? { threadId: actor.threadId } : {}),
+            ...(actor.conversationThreadId !== undefined
+              ? { conversationThreadId: actor.conversationThreadId }
+              : {}),
+            reason: "send_failed",
+            ...(actor.chatType === "group" && automationAuthorizationId !== undefined
+              ? { groupAuthorizationId: automationAuthorizationId }
+              : {}),
+            payloadRef: `automation-run:${resultRunId || "unbound"}:${context.activeTaskId ?? ""}`,
+            payloadText: message.text,
+            lastError: error instanceof Error ? error.message : String(error),
+          });
+        }
         if (!persistentPrivate) throw error;
         privateDeliveryFailed = true;
       }
@@ -8050,20 +8185,247 @@ export function createBotsService(
     );
   }
 
-  async function watchAutomationRun(params: BotAutomationRunWatchParams): Promise<void> {
+  /**
+   * M7③ 出站死信落行：节流 warn 仍是运维信号，死信行是审计与重试的持久权威。
+   * 存储故障只降级为 warn，不能反过来影响 automation 派发/结算。
+   */
+  async function recordOutboundDeadLetter(input: BotOutboxDeadLetterInput): Promise<void> {
+    try {
+      await outboxDeadLetterRepo.upsert(input);
+    } catch (error) {
+      botsLogger.warn(
+        undefined,
+        `bot outbox dead letter write failed id=${input.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /** watchAutomationRun 预检跳过统一落引用型死信；stable id 与 run/task 绑定，重复失败只 upsert 一行。 */
+  async function recordAutomationWatchDeadLetter(
+    params: BotAutomationRunWatchParams,
+    reason: string,
+  ): Promise<void> {
+    await recordOutboundDeadLetter({
+      id: buildBotOutboxDeadLetterId({
+        kind: "automation-watch",
+        botId: params.target.botId,
+        providerUserId: params.target.providerUserId,
+        ...(params.target.threadId !== undefined ? { threadId: params.target.threadId } : {}),
+        runRef: params.runId ?? params.taskId,
+      }),
+      botId: params.target.botId,
+      provider: params.target.provider,
+      chatType: params.target.chatType,
+      providerUserId: params.target.providerUserId,
+      ...(params.target.threadId !== undefined ? { threadId: params.target.threadId } : {}),
+      reason,
+      automation: {
+        ...(params.runId !== undefined ? { runId: params.runId } : {}),
+        target: params.target,
+        taskId: params.taskId,
+        workspacePath: params.workspacePath,
+        ...(params.workspaceIdentity !== undefined
+          ? { workspaceIdentity: params.workspaceIdentity }
+          : {}),
+      },
+      payloadRef: `automation-run:${params.runId ?? "unbound"}:${params.taskId}`,
+    });
+  }
+
+  async function runOutboxDeadLetterRetry(params?: BotOutboxDeadLetterRetryParams): Promise<BotOutboxDeadLetterRetrySummary> {
+    const maxAttempts = BOT_OUTBOX_DEAD_LETTER_MAX_ATTEMPTS;
+    const summary: BotOutboxDeadLetterRetrySummary = {
+      considered: 0,
+      sent: 0,
+      restored: 0,
+      dropped: 0,
+      failed: 0,
+    };
+    const now = () => Date.now();
+    const { entries } = await outboxDeadLetterRepo.read();
+    const config = await repo.readConfig();
+    const due = entries.filter(
+      (entry) =>
+        entry.status === "pending" &&
+        entry.nextRetryAt <= now() &&
+        (!params?.botId || entry.botId === params.botId),
+    );
+    summary.considered = due.length;
+    for (const row of due) {
+      const bot = findBot(config, row.botId);
+      // 重试前置核对 bot 仍存在、启用且 provider 一致；群目标的会话授权在 payload 重放前
+      // 由下方群授权门复核（引用型死信则由 automation watch 预检复核）。
+      if (!bot || !bot.enabled || bot.provider !== row.provider) {
+        await outboxDeadLetterRepo.update(
+          row.id,
+          planDeadLetterRetryFailure(row, now(), "bot unavailable for retry", maxAttempts),
+        );
+        const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+        if (latest?.status === "dropped") summary.dropped += 1;
+        else summary.failed += 1;
+        continue;
+      }
+      if (row.automation) {
+        // 引用型死信：重放 automation watch。预检失败由 watchAutomationRunWithOutcome 返回
+        // 类型化 outcome（并以同一稳定 id 递增 attempts、含到上限翻 dropped），这里只按
+        // outcome 记账，不再用 updatedAt 时间戳猜测结果（并发 live watch upsert 会误判）。
+        let outcome: BotAutomationWatchOutcome;
+        try {
+          outcome = await watchAutomationRunWithOutcome({
+            ...(row.automation.runId !== undefined ? { runId: row.automation.runId } : {}),
+            target: row.automation.target,
+            taskId: row.automation.taskId,
+            workspacePath: row.automation.workspacePath,
+            ...(row.automation.workspaceIdentity !== undefined
+              ? { workspaceIdentity: row.automation.workspaceIdentity }
+              : {}),
+          });
+        } catch (error) {
+          // 订阅建立等系统错误不是预检失败：按重试失败记账，保留行等退避重试。
+          const message = error instanceof Error ? error.message : String(error);
+          await outboxDeadLetterRepo.update(
+            row.id,
+            planDeadLetterRetryFailure(row, now(), message, maxAttempts),
+          );
+          const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+          if (latest?.status === "dropped") summary.dropped += 1;
+          else summary.failed += 1;
+          continue;
+        }
+        if (outcome.kind === "precheck_failed") {
+          const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+          if (latest?.status === "dropped") summary.dropped += 1;
+          else summary.failed += 1;
+          continue;
+        }
+        // subscribed：清行。引用型重放只恢复投递路径，不重建重放前已错过的终态结果。
+        await outboxDeadLetterRepo.remove(row.id);
+        summary.restored += 1;
+        continue;
+      }
+      if (!row.payloadText) {
+        // 无可重放载荷的行只能走引用路径；缺 automation 引用时直接按失败记账收敛到 dropped。
+        await outboxDeadLetterRepo.update(
+          row.id,
+          planDeadLetterRetryFailure(row, now(), "dead letter has no replayable payload", maxAttempts),
+        );
+        const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+        if (latest?.status === "dropped") summary.dropped += 1;
+        else summary.failed += 1;
+        continue;
+      }
+      const actor: BotActor = {
+        provider: row.provider as BotActor["provider"],
+        botId: row.botId,
+        providerUserId: row.providerUserId,
+        chatType: row.chatType,
+        threadId: row.threadId,
+        conversationThreadId: row.conversationThreadId,
+        ...(row.chatType === "group" ? { chatId: row.providerUserId } : {}),
+      };
+      // 群目标 send_failed 重放必须复用与原发送相同的群授权门（enabled/owner/authorizationId）。
+      // 原 automation 群发送不走 BotGroupDelivery 幂等账本（无 groupTaskId/deliveryId），仅靠
+      // authorize 回调把关；裸重放会跳过该把关，导致授权撤销后仍向群投递。
+      const isGroupReplay = row.chatType === "group";
+      const isGroupReplayAuthorized = async (): Promise<boolean> => {
+        const groupState = (await repo.readState()).bots[
+          getBotConversationKey({
+            botId: row.botId,
+            chatType: "group",
+            chatId: row.providerUserId,
+            threadId: row.threadId,
+            ...(row.conversationThreadId !== undefined
+              ? { conversationThreadId: row.conversationThreadId }
+              : {}),
+          })
+        ];
+        const currentBot = findBot(await repo.readConfig(), row.botId);
+        return Boolean(
+          currentBot?.enabled &&
+            groupState?.group?.enabled &&
+            groupState.group.ownerId === currentBot.providerUserId &&
+            (!row.groupAuthorizationId ||
+              groupState.group.authorizationId === row.groupAuthorizationId),
+        );
+      };
+      if (isGroupReplay && !(await isGroupReplayAuthorized())) {
+        // 授权已撤销：按失败记账（退避到上限翻 dropped），绝不再向群投递。
+        await outboxDeadLetterRepo.update(
+          row.id,
+          planDeadLetterRetryFailure(row, now(), "group authorization changed for replay", maxAttempts),
+        );
+        const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+        if (latest?.status === "dropped") summary.dropped += 1;
+        else summary.failed += 1;
+        continue;
+      }
+      try {
+        // 成功即删行；dropped 行不再进入扫描，保证同一死信绝不二次发送。
+        // 群目标再带一道 authorize 门，复现原发送在 sendOutbound 内的临界复查。
+        await sendOutbound(
+          bot,
+          createOutbound(actor, row.payloadText),
+          isGroupReplay ? isGroupReplayAuthorized : undefined,
+        );
+        await outboxDeadLetterRepo.remove(row.id);
+        summary.sent += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await outboxDeadLetterRepo.update(
+          row.id,
+          planDeadLetterRetryFailure(row, now(), message, maxAttempts),
+        );
+        const latest = (await outboxDeadLetterRepo.read()).entries.find((e) => e.id === row.id);
+        if (latest?.status === "dropped") summary.dropped += 1;
+        else summary.failed += 1;
+      }
+    }
+    return summary;
+  }
+
+  /** M7③ 出站死信重试入口：单飞，避免并发重试对同一行二次发送。 */
+  function retryBotOutboxDeadLetters(
+    params?: BotOutboxDeadLetterRetryParams,
+  ): Promise<BotOutboxDeadLetterRetrySummary> {
+    if (!deadLetterRetryInFlight) {
+      deadLetterRetryInFlight = runOutboxDeadLetterRetry(params).finally(() => {
+        deadLetterRetryInFlight = null;
+      });
+    }
+    return deadLetterRetryInFlight;
+  }
+
+  /**
+   * watchAutomationRun 的类型化结果：预检失败是正常业务分支而非异常，
+   * 死信重试按 outcome 记账，不依赖异常或 updatedAt 时间戳猜测（并发 live watch
+   * upsert 会误判时间戳）。暂不提升到 IBotsService 公共签名：desktop
+   * cronBotDelivery 的本地接口仍是 Promise<void>，提升需要同步改分区外文件。
+   */
+  type BotAutomationWatchOutcome =
+    | { kind: "subscribed" }
+    | { kind: "precheck_failed"; reason: string };
+
+  async function watchAutomationRunWithOutcome(
+    params: BotAutomationRunWatchParams,
+  ): Promise<BotAutomationWatchOutcome> {
     const config = await repo.readConfig();
     const bot = findBot(config, params.target.botId);
     if (!bot) {
       warnAutomationDeliveryOnce({ target: params.target, reason: "bot_missing" });
-      return;
+      await recordAutomationWatchDeadLetter(params, "bot_missing");
+      return { kind: "precheck_failed", reason: "bot_missing" };
     }
     if (!bot.enabled) {
       warnAutomationDeliveryOnce({ target: params.target, reason: "bot_disabled" });
-      return;
+      await recordAutomationWatchDeadLetter(params, "bot_disabled");
+      return { kind: "precheck_failed", reason: "bot_disabled" };
     }
     if (bot.provider !== params.target.provider) {
       warnAutomationDeliveryOnce({ target: params.target, reason: "provider_mismatch" });
-      return;
+      await recordAutomationWatchDeadLetter(params, "provider_mismatch");
+      return { kind: "precheck_failed", reason: "provider_mismatch" };
     }
     if (params.target.chatType === "private") await reconcilePrivateSynchronization(bot.id);
     let conversationThreadId: string | null | undefined;
@@ -8080,7 +8442,8 @@ export function createBotsService(
         ];
       if (!state?.group?.enabled || state.group.ownerId !== bot.providerUserId) {
         warnAutomationDeliveryOnce({ target: params.target, reason: "group_not_authorized" });
-        return;
+        await recordAutomationWatchDeadLetter(params, "group_not_authorized");
+        return { kind: "precheck_failed", reason: "group_not_authorized" };
       }
       // 旧 alias 不能继续回退到默认任务；话题投递必须存在独立的授权会话。
       conversationThreadId = state.group.threadId ?? null;
@@ -8115,6 +8478,12 @@ export function createBotsService(
       },
       params.runId ?? true,
     );
+    return { kind: "subscribed" };
+  }
+
+  /** IBotsService 公共入口：消费类型化 outcome（desktop 消费方仍按 Promise<void> 契约）。 */
+  async function watchAutomationRun(params: BotAutomationRunWatchParams): Promise<void> {
+    await watchAutomationRunWithOutcome(params);
   }
 
   service = {
@@ -8636,6 +9005,10 @@ export function createBotsService(
       await repo.updateContext(contextKey, () => undefined);
       await reconcilePrivateSynchronization(contextKey);
     },
+    async listOutboxDeadLetters(): Promise<BotOutboxDeadLetterRow[]> {
+      return (await outboxDeadLetterRepo.read()).entries;
+    },
+    retryBotOutboxDeadLetters,
     watchAutomationRun,
     async handleInboundMessage(message: BotInboundMessage) {
       if (shutdownPromise) return [];

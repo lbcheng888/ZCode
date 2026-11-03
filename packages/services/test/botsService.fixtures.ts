@@ -24,6 +24,13 @@ import type { ISettingService } from "../src/setting/setting.js";
 import type { VirtualProject } from "../src/project/contract.js";
 import { remoteHostIdFromWorkspaceIdentity } from "@zcode/shared";
 import { createBotsService as createBotsServiceImpl } from "../src/bots/botsService.js";
+import {
+  applyDeadLetterFailure,
+  type BotOutboxDeadLetterFile,
+  type BotOutboxDeadLetterInput,
+  type BotOutboxDeadLetterRow,
+  type BotOutboxDeadLetterStore,
+} from "../src/bots/outboxDeadLetter.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -68,6 +75,35 @@ export function createMemoryRepo(config: BotsConfigFile, state?: BotsStateFile) 
       if (next) currentState.bots[botId] = next;
       else delete currentState.bots[botId];
       return next;
+    },
+  };
+}
+
+/** 内存版出站死信存储：复用与文件版相同的纯记账函数，保证测试与生产语义一致。 */
+export function createMemoryOutboxDeadLetterStore(): BotOutboxDeadLetterStore & {
+  snapshot(): BotOutboxDeadLetterFile;
+} {
+  let file: BotOutboxDeadLetterFile = { version: 1, entries: [] };
+  return {
+    async read() {
+      return structuredClone(file);
+    },
+    async upsert(input: BotOutboxDeadLetterInput) {
+      const existing = file.entries.find((entry) => entry.id === input.id);
+      const next = applyDeadLetterFailure(existing, input, Date.now());
+      file.entries = existing
+        ? file.entries.map((entry) => (entry.id === input.id ? next : entry))
+        : [...file.entries, next];
+      return structuredClone(next);
+    },
+    async update(id: string, next: BotOutboxDeadLetterRow) {
+      file.entries = file.entries.map((entry) => (entry.id === id ? next : entry));
+    },
+    async remove(id: string) {
+      file.entries = file.entries.filter((entry) => entry.id !== id);
+    },
+    snapshot() {
+      return structuredClone(file);
     },
   };
 }

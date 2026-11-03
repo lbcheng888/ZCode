@@ -19,6 +19,8 @@ export const BOTS_V2_STATE_FILE = "bot-state.v2.json";
 export const BOTS_STATE_FILE = "bot-state.v3.json";
 export const BOTS_LEGACY_MODEL_CACHE_FILE = "bots-model-cache.json";
 export const BOTS_MODEL_CACHE_FILE = "bots-model-cache.v2.json";
+// M7③ 出站死信：独立 version 1 文件；缺失时创建空表，未来版本不被旧代码重新解释。
+export const BOTS_OUTBOX_DEAD_LETTER_FILE = "bot-outbox-dead-letter.v1.json";
 const BOT_CREDENTIAL_PREFIX = "bot";
 
 export function createDefaultBotsConfig(): BotsConfigFile {

@@ -15,6 +15,25 @@ import type {
   ZCodeAutomationBotDeliveryTarget,
 } from "@zcode/shared";
 import type { ZCodeAgentAppRuntimePreferences } from "../zcode-agent/zcodeAgent.js";
+import type { BotOutboxDeadLetterRow } from "./outboxDeadLetter.js";
+
+export interface BotOutboxDeadLetterRetrySummary {
+  /** 本次扫描到的到期 pending 死信数。 */
+  considered: number;
+  /** 重放 payload 成功并清除的行数。 */
+  sent: number;
+  /** automation 引用行重放 watch 成功、投递路径恢复并清除的行数。 */
+  restored: number;
+  /** 本次重试后达到尝试上限、翻转为 dropped 的行数。 */
+  dropped: number;
+  /** 本次重试失败、仍保持 pending 的行数。 */
+  failed: number;
+}
+
+export interface BotOutboxDeadLetterRetryParams {
+  /** 只重试指定 bot 的死信；缺省扫描全部到期 pending 行。 */
+  botId?: string;
+}
 
 export interface BotCreateBindCodeParams {
   botId?: string;
@@ -202,6 +221,10 @@ export interface IBotsService {
   }): Promise<import("@zcode/shared").BotGroupDelivery>;
   retryPrivateDelivery?(params: { botId: string; deliveryId: string }): Promise<void>;
   resetBotState(contextKey: string): Promise<void>;
+  /** M7③ 出站死信审计视图（只读，无 UI）。 */
+  listOutboxDeadLetters?(): Promise<BotOutboxDeadLetterRow[]>;
+  /** M7③ 出站死信重试权威：单飞重试到期 pending 行，成功清行、到上限翻 dropped。 */
+  retryBotOutboxDeadLetters?(params?: BotOutboxDeadLetterRetryParams): Promise<BotOutboxDeadLetterRetrySummary>;
   /** 在 automation prompt 派发前订阅终态，并把结果回推到创建它的 Bot 会话。 */
   watchAutomationRun(params: BotAutomationRunWatchParams): Promise<void>;
   handleInboundMessage(message: BotInboundMessage): Promise<BotOutboundMessage[]>;
