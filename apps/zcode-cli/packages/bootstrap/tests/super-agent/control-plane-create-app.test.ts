@@ -1,0 +1,158 @@
+// lane W：create-app 装配面的 flag 开关语义（spec super-agent-trigger-subsystem-spec
+// §5.4 kill-switch + §7-7 里程碑 A）。flag 关 = 完全不构造控制面（零行为变化）；
+// flag 开 = 控制面在场且 leader，app.close 对称 stop 后 sink 回纯转发。
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createSqliteSessionStore } from "@zcode/adapters/storage";
+import type { CommandAck, CommandEnvelope } from "@zcode/shared/zcode-protocol-v4";
+
+import { CommandInbox } from "../../src/zcode-protocol-v4/command-inbox.js";
+import type { SuperAgentCommandHandle } from "../../src/app/super-agent-control-plane.js";
+import type { ZCodeApp } from "../../src/app/types.js";
+import { buildSessionSnapshot } from "../../src/zcode-protocol/session-mapper.js";
+import { createRegistryBackedTestApp as createZCodeApp } from "../helpers/registry-backed-test-app.js";
+
+const roots: string[] = [];
+const apps: ZCodeApp[] = [];
+
+afterEach(async () => {
+  for (const app of apps.splice(0)) {
+    try {
+      await app.close?.();
+    } catch {
+      // 断言后的关闭失败不掩盖用例失败。
+    }
+  }
+  await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
+});
+
+function makeInboxHandle(): {
+  handleCommand: SuperAgentCommandHandle;
+  envelopes: CommandEnvelope[];
+} {
+  const envelopes: CommandEnvelope[] = [];
+  const inbox = new CommandInbox({
+    getRevision: () => 1,
+    getLogEpoch: (): string => "epoch-create-app",
+  });
+  const handleCommand: SuperAgentCommandHandle = async (raw) => {
+    envelopes.push(raw as CommandEnvelope);
+    const outcome = await inbox.handle(raw);
+    if (outcome.kind === "ack") return outcome.ack as CommandAck;
+    outcome.settle({ status: "accepted" });
+    return outcome.ack;
+  };
+  return { handleCommand, envelopes };
+}
+
+async function createApp(options: {
+  eventRouter: boolean;
+}): Promise<{ app: ZCodeApp; root: string; handleCommand: SuperAgentCommandHandle }> {
+  const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-"));
+  roots.push(root);
+  const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+  const { handleCommand } = makeInboxHandle();
+  const userConfigPath = join(root, "config.json");
+  if (options.eventRouter) {
+    await writeFile(userConfigPath, JSON.stringify({ features: { eventRouter: true } }));
+  }
+  const app = await createZCodeApp({
+    env: {},
+    runtimeConfig: { workingDirectory: root },
+    sessionStore,
+    userConfigPath,
+    ...(options.eventRouter
+      ? {
+          superAgent: {
+            handleCommand,
+            autoReplyGuard: { admit: async () => true },
+            superAgentDatabasePath: join(root, "super-agent.sqlite"),
+          },
+        }
+      : {}),
+  });
+  apps.push(app);
+  return { app, root, handleCommand };
+}
+
+describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () => {
+  it("flag 关（缺省）：不构造控制面，app.superAgentControlPlane 缺席 = legacy 直路", async () => {
+    const { app } = await createApp({ eventRouter: false });
+    expect(app.superAgentControlPlane).toBeUndefined();
+  });
+
+  it("flag 开 + 注入端口：控制面在场且 leader；close 对称 stop 后 sink 纯转发", async () => {
+    const { app } = await createApp({ eventRouter: true });
+    const plane = app.superAgentControlPlane;
+    expect(plane).toBeDefined();
+    expect(plane!.isLeader()).toBe(true);
+    // flag 开时域库已按注入路径打开（装配证据，不是 mock）。
+    const row = plane!.database
+      .prepare("select count(*) as n from trigger_events")
+      .get() as { n: number };
+    expect(row.n).toBe(0);
+
+    await app.close?.();
+    // 已关一次：移出登记表，避免 afterEach 二次 close（close 幂等性不归本用例赌）。
+    apps.splice(apps.indexOf(app), 1);
+    // stop 后：域库已关、租约循环已停——sink 回 handled:false（纯转发，不触库）。
+    const outcome = await plane!.triggerSink.ingest({
+      workspaceIdentity: "ws",
+      source: "im",
+      provider: "feishu",
+      providerMessageId: "pm-after-close",
+      actor: { kind: "human", id: "u1" },
+      payload: { text: "你好" },
+      taint: true,
+    });
+    expect(outcome).toEqual({ handled: false });
+  });
+
+  it("快照投影：控制面在场 → pendingWouldAccept 键在场为数组；缺席 → 键不发布（unknown≠0）", async () => {
+    // mapper 级接线回归（spec §5.5 / 00-tool-change-chain.md「验证见 control-plane-*」）：
+    // 键缺席（旧发送端/flag 关）≠ 空数组（已发布零卡片），UI 不得把缺席渲染成空收件箱。
+    const off = await createApp({ eventRouter: false });
+    const offSnapshot = await buildSessionSnapshot({
+      app: off.app,
+      eventSeq: 0,
+      messages: [],
+      stateRevision: 1,
+      workspace: { workspacePath: off.root, workspaceKey: off.root },
+    });
+    expect("pendingWouldAccept" in offSnapshot).toBe(false);
+
+    const on = await createApp({ eventRouter: true });
+    const onSnapshot = await buildSessionSnapshot({
+      app: on.app,
+      eventSeq: 0,
+      messages: [],
+      stateRevision: 1,
+      workspace: { workspacePath: on.root, workspaceKey: on.root },
+    });
+    expect(Array.isArray(onSnapshot.pendingWouldAccept)).toBe(true);
+    // 数据源 = 控制面读面（本用例零卡片 → 显式空数组，键已发布）。
+    expect(onSnapshot.pendingWouldAccept).toEqual(
+      on.app.superAgentControlPlane!.listPendingWouldAccept(),
+    );
+    expect(onSnapshot.pendingWouldAccept).toEqual([]);
+  });
+
+  it("flag 开但宿主未注入 superAgent：启动期响亮失败（不静默降级 legacy）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-missing-"));
+    roots.push(root);
+    const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const userConfigPath = join(root, "config.json");
+    await writeFile(userConfigPath, JSON.stringify({ features: { eventRouter: true } }));
+    await expect(
+      createZCodeApp({
+        env: {},
+        runtimeConfig: { workingDirectory: root },
+        sessionStore,
+        userConfigPath,
+      }),
+    ).rejects.toThrow(/features\.eventRouter=true/);
+    sessionStore.close();
+  });
+});

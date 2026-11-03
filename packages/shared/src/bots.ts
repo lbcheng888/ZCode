@@ -126,6 +126,8 @@ export interface BotConfig {
   allowedCommands: BotAllowedCommands;
   currentOptions: BotCurrentOptions;
   replyMode: BotReplyMode;
+  /** bot 维度 EventRouter 灰度（spec §5.4）：需全局 features.eventRouter=true 时逐 bot 开；缺省 legacy 直路。 */
+  eventRouterEnabled?: boolean;
 }
 
 export interface BotPendingPermissionOption {
@@ -799,6 +801,7 @@ export const botConfigSchema = z
       "summary_changes",
       "streaming_card",
     ]),
+    eventRouterEnabled: z.boolean().optional(),
   })
   .strict();
 
