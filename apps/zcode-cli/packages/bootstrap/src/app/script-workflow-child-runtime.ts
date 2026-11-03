@@ -35,9 +35,11 @@ import {
   type WorkflowEscalatePort,
   type WorkflowSubmitPort,
 } from "@zcode/contracts";
+import type { AgentProfile } from "@zcode/shared";
 import { collectDisabledPaths } from "../skill-command-overrides.js";
 import { parseProviderQualifiedModelSelection } from "./provider-registry-selection.js";
 import type { ZCodeAppOptions } from "./types.js";
+import { filterWorkflowChildToolface } from "./workflow-actor-tools.js";
 
 export interface ScriptWorkflowAgentRuntimeDeps {
   agentTelemetry: AgentExecutionTelemetryPort;
@@ -114,7 +116,37 @@ export function createScriptWorkflowAgentRuntime(input: {
    * （apps/zcode-cli/packages/dynamic-workflow/docs/execution-engine.md「Subagent sessions」）。
    */
   browserControlPort?: BrowserControlPort;
+  /**
+   * spec 受限子代理档案（super-agent-spec-lane-spec §6-1）。在场时工具面走
+   * `filterWorkflowChildToolface` 既有链过滤（`profile.tools` 优先于 `request.opts.tools`），
+   * `profile.disallowedTools` 并入 `toolDisallowlist`。调用方约定传 `buildSpecRestrictedProfile`
+   * 产出；缺席保持现状字节。与 `appOptions.executionPort` 互斥（spec 语境的子执行必须走本接缝，
+   * 见下方 processEnv 的生效前提）。
+   */
+  profile?: AgentProfile;
+  /**
+   * 子执行进程 env。在场时 `createNodeExecutionAdapter` 直接采用；缺席回落
+   * `deps.appOptions.env ?? process.env`。调用方约定传 `buildSpecRunEnv` 产出
+   * （adapters/src/network/subprocess-env.ts，白名单键、无凭据）。
+   *
+   * 生效前提（fail-closed，二者同在直接抛错，不降级）：
+   * - `deps.appOptions.executionPort` 必须缺席——宿主注入共享执行端口时本入参会被
+   *   静默忽略，子执行走宿主端口的父 env（含凭据），spec run「无凭据」直接失守；
+   * - env 必须带代理键（HTTP_PROXY）——执行适配器的 `network` 从本 env 派生
+   *   （super-agent-spec-lane-spec §6-3），缺键即抛，不回退直连。
+   */
+  processEnv?: Record<string, string>;
 }): AgentRuntime {
+  // fail-closed：共享执行端口携带宿主 env（含凭据），会静默丢弃本接缝的无凭据
+  // processEnv / spec profile——spec run「无凭据」失守。二者同在直接拒绝启动。
+  if (
+    (input.processEnv !== undefined || input.profile !== undefined) &&
+    input.deps.appOptions.executionPort !== undefined
+  ) {
+    throw new Error(
+      "workflow child：processEnv/profile 与 appOptions.executionPort 互斥——共享执行端口携带宿主 env（含凭据），会静默丢弃无凭据的 spec env",
+    );
+  }
   // dwf actor 经 configOverrides.workflowActor 走 builder 的叠加路径，此时 systemPrompt 必须
   // 缺席（builder 对二者同在抛错）——父会话自带的 custom system prompt 不得漏给子代理，所以
   // 从继承的配置里把它剥掉，而不是靠后面的覆盖。
@@ -131,6 +163,27 @@ export function createScriptWorkflowAgentRuntime(input: {
     throw new Error(`Workflow child model must be provider-qualified: ${input.request.opts.model}`);
   }
   const modelSelection = requestedSelection ?? parentSelection;
+  // profile 生效的工具面：profile.tools 优先（subagent resolveAllowedTools 同款），缺席回落
+  // request.opts.tools；两者都缺席时保持 undefined（不收窄）。profile 缺席时字节同现状。
+  const toolfaceBase = input.profile?.tools ?? input.request.opts?.tools;
+  const toolAllowlist =
+    input.profile !== undefined && toolfaceBase !== undefined
+      ? filterWorkflowChildToolface(toolfaceBase, input.profile)
+      : input.request.opts?.tools;
+  // profile.disallowedTools 并入 toolDisallowlist：在 configOverrides 展开后取并集，
+  // 保证 actor 减法表与 profile 减法互不覆盖。仅在 profile 带非空 disallowedTools 时落键，
+  // 缺席/空 → 不加键 → 配置字节与现状一致。
+  const profileDisallowlist =
+    input.profile?.disallowedTools && input.profile.disallowedTools.length > 0
+      ? [
+          ...new Set([
+            ...(input.configOverrides?.toolDisallowlist ??
+              inheritedConfig.toolDisallowlist ??
+              []),
+            ...input.profile.disallowedTools,
+          ]),
+        ]
+      : undefined;
   return new AgentRuntime(
     input.childSessionId,
     {
@@ -151,28 +204,41 @@ export function createScriptWorkflowAgentRuntime(input: {
       // actor 只存在于一次 run 之下，天然「已激活」（launch.md「On demand: activation」Children 段）：
       // 不继承父会话的按需标志，否则 spread 会把 onDemand 带进来而子会话里没有任何激活入口。
       dynamicWorkflowToolsOnDemand: false,
-      toolAllowlist: input.request.opts?.tools,
+      toolAllowlist,
       workingDirectory: input.deps.workingDirectory,
       ...input.configOverrides,
+      // profile 在场时，过滤后的白名单必须在 configOverrides 之后再落一次：
+      // configOverrides.toolAllowlist 若排在后面会整体覆盖过滤结果，旁路出站剔除
+      // （减法表 toolDisallowlist 已在同侧取并集，这里对齐；profile 缺省不加键，字节不变）。
+      ...(input.profile !== undefined && toolAllowlist !== undefined ? { toolAllowlist } : {}),
+      ...(profileDisallowlist === undefined
+        ? {}
+        : { toolDisallowlist: profileDisallowlist }),
     },
     {
-      ...createRuntimeDeps(input.deps, input.traceContext, input.childSessionId, {
-        // 对外交互端口只能由父 runtime 铸造：子会话不是客户端认识的身份。
-        // 这里过去直接用 `appOptions.providerRuntimeHeadersPort` /
-        // `deps.permissionBroker`，于是 actor 带着 `sess_dwf-…` 去问桌面，桌面
-        // `requireSession` 抛错、response 永不发出，子代理在首个模型请求前挂死。
-        agentId: input.childSessionId,
-        agentType: input.request.opts?.agentType ?? "zcode-workflow",
-        childSessionId: input.childSessionId,
-        description:
-          input.interactionDescription ??
-          input.request.opts?.label ??
-          input.request.opts?.agentType ??
-          "workflow agent",
-        ...(input.traceContext.turnId === undefined
-          ? {}
-          : { parentTurnId: input.traceContext.turnId }),
-      }),
+      ...createRuntimeDeps(
+        input.deps,
+        input.traceContext,
+        input.childSessionId,
+        {
+          // 对外交互端口只能由父 runtime 铸造：子会话不是客户端认识的身份。
+          // 这里过去直接用 `appOptions.providerRuntimeHeadersPort` /
+          // `deps.permissionBroker`，于是 actor 带着 `sess_dwf-…` 去问桌面，桌面
+          // `requireSession` 抛错、response 永不发出，子代理在首个模型请求前挂死。
+          agentId: input.childSessionId,
+          agentType: input.request.opts?.agentType ?? "zcode-workflow",
+          childSessionId: input.childSessionId,
+          description:
+            input.interactionDescription ??
+            input.request.opts?.label ??
+            input.request.opts?.agentType ??
+            "workflow agent",
+          ...(input.traceContext.turnId === undefined
+            ? {}
+            : { parentTurnId: input.traceContext.turnId }),
+        },
+        input.processEnv,
+      ),
       ...(input.browserControlPort === undefined
         ? {}
         : {
@@ -194,11 +260,49 @@ export function createScriptWorkflowAgentRuntime(input: {
   );
 }
 
+/**
+ * 执行适配器的 network 策略：`processEnv` 在场（spec run）时从它派生，缺席时
+ * 原样回退用户 config（缺省路径字节不变）。
+ *
+ * 为什么必须派生：spawn 链路（adapters `buildExecutionEnv`）先按 processEnv 拷贝、
+ * 再 `sanitizeZCodeRuntimeEnvInPlace` 剔掉代理键、最后只按这里给的 network 回填。
+ * 沿用用户 config 会让子进程拿到用户代理/直连（spec egress 代理被旁路或覆盖），
+ * 用户 noProxy 还会注入 NO_PROXY 违反 §3「noProxy 空、含 localhost 也过代理」。
+ *
+ * fail-closed：processEnv 缺代理键即抛（§3「无代理拒绝启动」），不回退直连。
+ * 大小写两态都认——win32 下 `setEnvKey` 的大小写不敏感删除会让 buildSpecRunEnv
+ * 只留下小写变体键。与 workflow-facade 的同名函数保持同步（两处构造点同一规则）。
+ */
+function resolveWorkflowChildExecutionNetwork(
+  processEnv: Record<string, string> | undefined,
+  configNetwork: { caCertFile?: string; httpProxy?: string; noProxy?: string },
+): { caCertFile?: string; httpProxy?: string; noProxy?: string } {
+  if (processEnv === undefined) {
+    return {
+      httpProxy: configNetwork.httpProxy,
+      noProxy: configNetwork.noProxy,
+      caCertFile: configNetwork.caCertFile,
+    };
+  }
+  const httpProxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
+  if (httpProxy === undefined || httpProxy === "") {
+    throw new Error(
+      "workflow child processEnv 缺少代理键（HTTP_PROXY）：无代理即拒绝启动（fail-closed），不回退直连",
+    );
+  }
+  return {
+    httpProxy,
+    noProxy: processEnv.NO_PROXY ?? processEnv.no_proxy ?? "",
+    caCertFile: configNetwork.caCertFile,
+  };
+}
+
 function createRuntimeDeps(
   deps: ScriptWorkflowAgentRuntimeDeps,
   traceContext: TraceContext,
   childSessionId: SessionId,
   clientPortsContext: ChildClientPortsContext,
+  processEnv?: Record<string, string>,
 ): ConstructorParameters<typeof AgentRuntime>[2] {
   return {
     agentTelemetry: deps.agentTelemetry,
@@ -238,14 +342,13 @@ function createRuntimeDeps(
       deps.appOptions.executionPort ??
       createNodeExecutionAdapter({
         onToolExecResource: deps.appOptions.onToolExecResource,
-        network: {
-          httpProxy: deps.configResult.config.network.httpProxy,
-          noProxy: deps.configResult.config.network.noProxy,
-          caCertFile: deps.configResult.config.network.caCertFile,
-        },
+        // processEnv 在场时 network 从它派生（见 resolveWorkflowChildExecutionNetwork）：
+        // spawn 链路 sanitize 后只按这里的 network 回填代理键，沿用用户 config 会让
+        // 子进程拿到用户代理/直连，spec egress 代理被旁路。
+        network: resolveWorkflowChildExecutionNetwork(processEnv, deps.configResult.config.network),
         outputRootDir: join(deps.storageRoot, "cli", "exec"),
         bashOutputTempDir: tmpdir(),
-        processEnv: deps.appOptions.env ?? process.env,
+        processEnv: processEnv ?? deps.appOptions.env ?? process.env,
       }),
     fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
     httpClientPort:

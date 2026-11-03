@@ -64,6 +64,8 @@ const FILE_RULES: FileRule[] = [
   { categoryId: "toolOutputs", pattern: /^v2\/coding-plan-cache\.json$/ },
   // Bot 历史缓存仅供资源管理器识别展示，不加载配置或启动渠道。
   { categoryId: "toolOutputs", pattern: /^v2\/bots-model-cache[^/]*\.json$/ },
+  // bot 出站死信：审计事实，不可清理；不能落入泛化的 config 规则
+  { categoryId: "other", pattern: /^v2\/bot-outbox-dead-letter\.v1\.json$/ },
   { categoryId: "logs", pattern: /^computer-use\/run\/[^/]+\.log$/ },
   { categoryId: "config", pattern: /^v2\/[^/]+\.json$/ },
   { categoryId: "config", pattern: /^cli\/config\.json$/ },

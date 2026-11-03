@@ -89,6 +89,7 @@ describe("虚拟项目升级顺序", () => {
         "0003_official_glm_selection",
         "0004_project_execution_scopes",
         "0006_task_group_admissions",
+        "0007_dispatch_requests",
       ]);
       const projectAppliedAt = db
         .prepare("SELECT applied_at FROM schema_migration WHERE id='0005_projects'")

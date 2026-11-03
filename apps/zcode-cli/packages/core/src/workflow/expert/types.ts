@@ -7,6 +7,7 @@ import type {
   WorkflowRunStatus,
   WorkflowStorePort,
 } from "@zcode/contracts";
+import type { AgentProfile } from "@zcode/shared";
 
 export interface ExpertWorkflowAgentRunInput {
   abortSignal?: AbortSignal;
@@ -16,6 +17,10 @@ export interface ExpertWorkflowAgentRunInput {
   onEvent?: (event: SessionEvent) => void | Promise<void>;
   parentSessionId?: string;
   phase: string;
+  /** 子执行进程 env（约定传 buildSpecRunEnv 产出）；缺席由 child runtime 回落 appOptions.env。 */
+  processEnv?: Record<string, string>;
+  /** spec 受限子代理档案；在场时 child 工具面走 spec 受限链过滤（super-agent-spec-lane-spec §6-1）。 */
+  profile?: AgentProfile;
   prompt: string;
   runId: string;
   task: string;

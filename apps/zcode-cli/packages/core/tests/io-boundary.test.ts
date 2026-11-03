@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = join(import.meta.dirname, "..", "..", "..");
 const allowedNetworkBoundaryFiles = new Set([
+  // spec-lane egress 代理本身就是网络边界适配器（HTTP CONNECT 隧道用 net.connect）。
+  "packages/bootstrap/src/super-agent/spec-lane/egress-proxy.ts",
   "packages/adapters/src/auth/localhost-callback.ts",
   "packages/adapters/src/http/index.ts",
   // 仅使用 node:http 的状态码/类型，不执行网络请求。

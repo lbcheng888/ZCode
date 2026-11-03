@@ -57,6 +57,39 @@ const executionColumns = [
   ["off_peak_tasks", "additional_directories"],
 ] as const;
 
+/**
+ * dispatch_requests（spec super-agent-trigger-subsystem-spec §1.6，M7② exactly-once
+ * 派发桥状态机载体）。run_id/command_id 双 UNIQUE：commandId=hash(runId) 稳定幂等键
+ * 由崩溃重投复用；无 failed 终态——push 失败计 attempts 续推，终态只有
+ * dispatched/skipped（TTL 30 天由清理任务负责，不在本迁移）。
+ */
+const DISPATCH_REQUESTS_SQL = `
+  CREATE TABLE IF NOT EXISTS dispatch_requests (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    command_id TEXT NOT NULL UNIQUE,
+    workspace_identity TEXT NOT NULL,
+    session_id TEXT,
+    payload TEXT,
+    status TEXT NOT NULL,
+    skip_reason TEXT,
+    dispatch_policy TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_at INTEGER,
+    pushed_at INTEGER,
+    acked_at INTEGER,
+    settled_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_dispatch_requests_status_updated
+  ON dispatch_requests (status, updated_at);
+
+  CREATE INDEX IF NOT EXISTS idx_dispatch_requests_workspace_status
+  ON dispatch_requests (workspace_identity, status);
+`;
+
 // 与 Agent 同样是库级串行事务，但不跨域依赖其具体 adapter。TS 转换使用冻结语义版本，
 // 禁用 function.toString 哈希：Electron/SEA 打包会改变函数文本而非迁移语义。
 const definitions = [
@@ -117,6 +150,13 @@ const definitions = [
     touchedTables: ["task_group_admissions"],
     checksumInput: [TASK_GROUP_ADMISSIONS_SQL],
     apply: (db: DatabaseSync) => db.exec(TASK_GROUP_ADMISSIONS_SQL),
+  },
+  {
+    // §1.6 派发桥：纯增量建表 + 两索引，不动既有表；发布后 SQL 冻结，结构变更只能追加。
+    id: "0007_dispatch_requests",
+    touchedTables: ["dispatch_requests"],
+    checksumInput: [DISPATCH_REQUESTS_SQL],
+    apply: (db: DatabaseSync) => db.exec(DISPATCH_REQUESTS_SQL),
   },
 ] as const;
 

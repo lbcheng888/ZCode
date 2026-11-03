@@ -19,6 +19,7 @@ import type {
   WorkflowRunSnapshot,
   WorkflowRunStatus,
 } from "@zcode/contracts";
+import type { PendingWouldAcceptCard } from "@zcode/shared/zcode-protocol-v4";
 import type {
   CommandCenterCustomCommandContent,
   CommandCenterCustomCommandListOutcome,
@@ -220,6 +221,14 @@ export type CommandCenterApp = {
   setPluginEnabled?(plugin: string, enabled: boolean): Promise<CommandCenterPluginSetResult>;
   uninstallPlugin?(plugin: string): Promise<CommandCenterPluginUninstallResult>;
   listMcpServers?(): Promise<Record<string, CommandCenterMcpStatus>>;
+  /**
+   * would-accept 收件箱控制面（spec §5.5）：结构子集（ZCodeApp.superAgentControlPlane
+   * 的读/批转面）。缺席 = features.eventRouter 关或宿主未注入，命令如实报 unavailable。
+   */
+  superAgentControlPlane?: {
+    listPendingWouldAccept(): PendingWouldAcceptCard[];
+    promoteWouldAccept(cardId: string): Promise<void>;
+  };
   listCheckpoints?(options?: { limit?: number }): Promise<CommandCenterCheckpoint[]>;
   connectMcpServer?(name: string): Promise<CommandCenterMcpStatus>;
   disconnectMcpServer?(name: string): Promise<CommandCenterMcpStatus | undefined>;

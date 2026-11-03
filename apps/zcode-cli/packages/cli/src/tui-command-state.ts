@@ -4,7 +4,9 @@ import type {
   TuiGetMainSessionId,
   TuiListWorkflowRuns,
   TuiReplayWorkflowRuns,
+  TuiListWouldAcceptCards,
   TuiModelOption,
+  TuiPromoteWouldAcceptCard,
   TuiRecallPreviousInput,
   TuiSendInput,
   TuiSetMode,
@@ -24,6 +26,8 @@ export type TuiPromptHandler = TuiSubmitPrompt & {
   readSubagentTranscript?: import("@zcode/tui").TuiReadSubagentTranscript;
   listWorkflowRuns?: TuiListWorkflowRuns;
   replayWorkflowRuns?: TuiReplayWorkflowRuns;
+  listWouldAcceptCards?: TuiListWouldAcceptCards;
+  promoteWouldAcceptCard?: TuiPromoteWouldAcceptCard;
   getMainSessionId?: TuiGetMainSessionId;
   listModelOptions?: () => Promise<readonly TuiModelOption[]>;
   recallPreviousInput?: TuiRecallPreviousInput;

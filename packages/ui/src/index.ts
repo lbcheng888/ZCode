@@ -116,6 +116,9 @@ export { setReactErrorArmsReporter } from "./lib/reactErrorArmsTelemetry.js";
 export { recordArmsCustomEventForE2E } from "./lib/armsCustomEventObservability.js";
 export { generateMobileDeviceFingerprint, setStreamClientId } from "./lib/streamClientId.js";
 export { GlobalDatabaseStartupLoading } from "./root/GlobalDatabaseStartupLoading.js";
+export { WouldAcceptInbox } from "./would-accept/WouldAcceptInbox.js";
+export { useWouldAcceptPromote } from "./would-accept/useWouldAcceptPromote.js";
+export type { IWouldAcceptPromoteService } from "./would-accept/useWouldAcceptPromote.js";
 
 export { LocalTtftObserver, setLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
 export { ensurePendingTaskDraft } from "@/v4/composer/composerDraftStore.js";

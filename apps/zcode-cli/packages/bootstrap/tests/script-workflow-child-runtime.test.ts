@@ -6,7 +6,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
 import { createInMemorySessionEventStore, createSqliteSessionStore } from "@zcode/adapters/storage";
-import { type AgentRuntime, PermissionService, defaultPermissionConfig } from "@zcode/core";
+import {
+  buildSpecRestrictedProfile,
+  type AgentRuntime,
+  PermissionService,
+  SPEC_RESTRICTED_TOOLFACE,
+  defaultPermissionConfig,
+} from "@zcode/core";
 import { createModelTelemetry } from "@zcode/telemetry";
 import {
   createRootTraceContext,
@@ -14,6 +20,7 @@ import {
   createToolCallId,
   createTraceId,
   CREATE_WORKFLOW_TOOL_NAME,
+  type ExecutionPort,
   ESCALATE_TOOL_NAME,
   EVAL_WORKFLOW_SNIPPET_TOOL_NAME,
   LIST_WORKFLOW_RUNS_TOOL_NAME,
@@ -44,6 +51,7 @@ import {
   type WorkflowSubagentPermissionMode,
 } from "../src/app/workflow-actor-permission.js";
 import { workflowActorToolPolicy } from "../src/app/workflow-actor-tools.js";
+import { buildSpecRunEnv } from "../../adapters/src/network/subprocess-env.js";
 import {
   createTestAgentRuntime,
   createTestModelFactory,
@@ -1207,5 +1215,327 @@ describe("script workflow child runtime — 子代理的技能清单", () => {
     const deps = skillDeps({ pluginSkillRoots: [] });
     (deps.configResult.config.features as { skill: boolean }).skill = false;
     expect(createWorkflowChildSkillPort(deps)).toBeUndefined();
+  });
+});
+
+/**
+ * Y-Task1 接缝（super-agent-spec-lane-spec §6-1）：spec 受限 profile 与 buildSpecRunEnv
+ * 产出的 processEnv 接到 workflow child。可选接线——缺省两入参时配置与 env 字节同现状。
+ */
+describe("script workflow child runtime — spec profile 与 processEnv 接缝", () => {
+  const parentSessionId = createSessionId("spec-lane-parent");
+  let tempRoot: string;
+  let sessionStore: SessionStorePort;
+
+  beforeEach(async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "zcode-spec-lane-child-"));
+    sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+  });
+
+  afterEach(async () => {
+    await rm(tempRoot, { force: true, recursive: true });
+  });
+
+  const modelFactory = createTestModelFactoryFromAdapter({
+    async generateText() {
+      return {
+        finishReason: "stop",
+        providerMetadata: undefined,
+        text: "ok",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      } as unknown as ModelResult;
+    },
+  });
+
+  function makeDeps(): ScriptWorkflowAgentRuntimeDeps {
+    return {
+      agentTelemetry: createModelTelemetry().agentExecution,
+      appOptions: { env: process.env },
+      appVersion: "0.0.0-test",
+      configResult: {
+        config: {
+          features: { skill: false },
+          modelStream: { idleTimeoutMs: 0 },
+          network: {},
+          skillOverrides: {},
+          skills: { enabled: false, roots: [] },
+        },
+      },
+      fileSystemPort: createNodeFileSystemAdapter(),
+      imageProcessorPort: {},
+      logger: undefined,
+      modelFactory,
+      permissionService: new PermissionService(defaultPermissionConfig),
+      runtime: createTestAgentRuntime(
+        parentSessionId,
+        { workingDirectory: tempRoot },
+        { modelFactory },
+      ),
+      runtimeConfig: { workingDirectory: tempRoot },
+      sessionId: parentSessionId,
+      sessionStore,
+      storageRoot: tempRoot,
+      workingDirectory: tempRoot,
+    } as unknown as ScriptWorkflowAgentRuntimeDeps;
+  }
+
+  function configOf(runtime: AgentRuntime): Record<string, unknown> {
+    return (runtime as unknown as { config: Record<string, unknown> }).config;
+  }
+
+  type ChildRuntimeInput = Parameters<typeof createScriptWorkflowAgentRuntime>[0];
+  function childRuntime(input: {
+    configOverrides?: ChildRuntimeInput["configOverrides"];
+    profile?: ChildRuntimeInput["profile"];
+    processEnv?: ChildRuntimeInput["processEnv"];
+    tools?: string[];
+  }): AgentRuntime {
+    return createScriptWorkflowAgentRuntime({
+      childSessionId: createSessionId("spec-lane-child"),
+      deps: makeDeps(),
+      profile: input.profile,
+      processEnv: input.processEnv,
+      configOverrides: input.configOverrides,
+      request: { opts: input.tools === undefined ? {} : { tools: input.tools } } as never,
+      traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+    });
+  }
+
+  it("spec profile 生效：工具面剔除出站工具与 mcp__ 动态名", () => {
+    // 加固：显式混入出站与动态 MCP 名，证明过滤在跑（而非本来就不在面里）。
+    const profile = {
+      ...buildSpecRestrictedProfile(),
+      tools: [
+        ...SPEC_RESTRICTED_TOOLFACE,
+        "WebFetch",
+        "WebSearch",
+        "mcp__x__y",
+        "SendMessage",
+        "EnterPlanMode",
+      ],
+    };
+    const runtime = childRuntime({ profile });
+    const config = configOf(runtime);
+    expect(config.toolAllowlist).toEqual([...SPEC_RESTRICTED_TOOLFACE]);
+    expect(config.toolAllowlist).not.toContain("WebFetch");
+    expect(config.toolAllowlist).not.toContain("mcp__x__y");
+    expect(config.toolAllowlist).not.toContain("EnterPlanMode");
+    // 注册面同闸：白名单里的 Read 注册，出站 WebFetch 不注册。
+    const registry = runtime.getToolRegistry();
+    expect(registry.has("Read")).toBe(true);
+    expect(registry.has("WebFetch")).toBe(false);
+    // profile.disallowedTools 并入减法表（注册期第二道闸）。
+    expect(config.toolDisallowlist).toEqual(
+      expect.arrayContaining(["WebFetch", "mcp__*"]),
+    );
+  });
+
+  it("profile.disallowedTools 与 configOverrides 的 actor 减法表取并集", () => {
+    const runtime = childRuntime({
+      profile: { ...buildSpecRestrictedProfile(), disallowedTools: ["ProfileOnlyDenied"] },
+      configOverrides: workflowActorToolPolicy(),
+    });
+    const config = configOf(runtime);
+    expect(config.toolDisallowlist).toEqual(
+      expect.arrayContaining(["CreateWorkflow", "ProfileOnlyDenied"]),
+    );
+  });
+
+  it("processEnv 在场：执行适配器直接采用 buildSpecRunEnv 产出（无凭据、白名单键），network 从 env 派生", () => {
+    const execution = vi.spyOn(executionAdapters, "createNodeExecutionAdapter");
+    const specEnv = buildSpecRunEnv({
+      proxyUrl: "http://127.0.0.1:9",
+      sourceEnv: {
+        PATH: "/usr/bin:/bin",
+        GITHUB_TOKEN: "ghp_should_not_leak",
+        ANTHROPIC_API_KEY: "sk_should_not_leak",
+      },
+    });
+    childRuntime({ processEnv: specEnv });
+    const options = execution.mock.calls.at(-1)?.[0];
+    // 直接采用：引用同一份 env，不与 appOptions.env / process.env 混合。
+    expect(options?.processEnv).toBe(specEnv);
+    const bytes = JSON.stringify(options?.processEnv ?? {});
+    expect(bytes).not.toContain("ghp_should_not_leak");
+    expect(bytes).not.toContain("sk_should_not_leak");
+    expect(options?.processEnv?.PATH).toBe("/usr/bin:/bin");
+    expect(options?.processEnv?.HTTP_PROXY).toBe("http://127.0.0.1:9");
+    // network 从 processEnv 派生（§6-3）：spawn 链路 sanitize 后按它回填代理键。
+    expect(options?.network?.httpProxy).toBe("http://127.0.0.1:9");
+    expect(options?.network?.noProxy).toBe("");
+    execution.mockRestore();
+  });
+
+  it("processEnv 在场：用户 config 的代理/noProxy 不得进入 network（egress 不被旁路）", () => {
+    const execution = vi.spyOn(executionAdapters, "createNodeExecutionAdapter");
+    const deps = makeDeps();
+    deps.configResult.config.network = {
+      httpProxy: "http://user-corp:8080",
+      noProxy: "localhost",
+      timeout: 0,
+    };
+    const specEnv = buildSpecRunEnv({
+      proxyUrl: "http://127.0.0.1:9",
+      sourceEnv: { PATH: "/usr/bin:/bin" },
+    });
+    createScriptWorkflowAgentRuntime({
+      childSessionId: createSessionId("spec-lane-proxy-derive"),
+      deps,
+      processEnv: specEnv,
+      request: { opts: {} } as never,
+      traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+    });
+    const options = execution.mock.calls.at(-1)?.[0];
+    expect(options?.network?.httpProxy).toBe("http://127.0.0.1:9");
+    expect(options?.network?.noProxy).toBe("");
+    execution.mockRestore();
+  });
+
+  it("spawn 层：子进程 env 含 spec 代理、NO_PROXY 缺席、无凭据字节", async () => {
+    const execution = vi.spyOn(executionAdapters, "createNodeExecutionAdapter");
+    const deps = makeDeps();
+    // 用户 config 带代理与 noProxy——不得覆盖 spec 代理，也不得注入 NO_PROXY（§3）。
+    deps.configResult.config.network = {
+      httpProxy: "http://user-corp:8080",
+      noProxy: "localhost",
+      timeout: 0,
+    };
+    const specEnv = buildSpecRunEnv({
+      proxyUrl: "http://127.0.0.1:9",
+      sourceEnv: {
+        PATH: "/usr/bin:/bin",
+        GITHUB_TOKEN: "ghp_should_not_leak",
+        ANTHROPIC_API_KEY: "sk_should_not_leak",
+      },
+    });
+    createScriptWorkflowAgentRuntime({
+      childSessionId: createSessionId("spec-lane-spawn"),
+      deps,
+      processEnv: specEnv,
+      request: { opts: {} } as never,
+      traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+    });
+    const adapter = execution.mock.results.at(-1)?.value;
+    execution.mockRestore();
+    expect(adapter).toBeDefined();
+    const result = await (adapter as ExecutionPort).run({
+      command: {
+        mode: "argv",
+        file: process.execPath,
+        args: ["-e", "console.log(JSON.stringify(process.env))"],
+      },
+      cwd: tempRoot,
+    });
+    expect(result.status).toBe("completed");
+    const childEnvText = result.stdout.text;
+    const childEnv = JSON.parse(childEnvText) as Record<string, string | undefined>;
+    // spec 代理在、用户代理不在（egress 不被旁路）。
+    expect(childEnv.HTTP_PROXY ?? childEnv.http_proxy).toBe("http://127.0.0.1:9");
+    expect(childEnvText).not.toContain("user-corp");
+    // noProxy 空：含 localhost 也必须过代理（§3）。
+    expect(childEnv.NO_PROXY ?? childEnv.no_proxy).toBeUndefined();
+    // 无凭据字节。
+    expect(childEnvText).not.toContain("ghp_should_not_leak");
+    expect(childEnvText).not.toContain("sk_should_not_leak");
+    expect(childEnv.PATH).toBe("/usr/bin:/bin");
+  }, 15_000);
+
+  it("processEnv 缺代理键：fail-closed 抛错，不回退直连", () => {
+    expect(() => childRuntime({ processEnv: { PATH: "/usr/bin" } })).toThrow(
+      /缺少代理键/,
+    );
+  });
+
+  it("processEnv/profile 与宿主 executionPort 同在：fail-closed 抛错", () => {
+    const specEnv = buildSpecRunEnv({
+      proxyUrl: "http://127.0.0.1:9",
+      sourceEnv: { PATH: "/usr/bin:/bin" },
+    });
+    const depsWithPort = (): ScriptWorkflowAgentRuntimeDeps => {
+      const deps = makeDeps();
+      deps.appOptions.executionPort = {
+        run: vi.fn(async () => ({
+          status: "completed" as const,
+          stdout: { text: "", bytes: 0, truncated: false },
+          stderr: { text: "", bytes: 0, truncated: false },
+          exitCode: 0,
+          durationMs: 1,
+          timedOut: false,
+          cancelled: false,
+          startedAt: new Date(),
+          completedAt: new Date(),
+        })),
+      };
+      return deps;
+    };
+    expect(() =>
+      createScriptWorkflowAgentRuntime({
+        childSessionId: createSessionId("spec-lane-port-env"),
+        deps: depsWithPort(),
+        processEnv: specEnv,
+        request: { opts: {} } as never,
+        traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+      }),
+    ).toThrow(/executionPort/);
+    expect(() =>
+      createScriptWorkflowAgentRuntime({
+        childSessionId: createSessionId("spec-lane-port-profile"),
+        deps: depsWithPort(),
+        profile: buildSpecRestrictedProfile(),
+        request: { opts: {} } as never,
+        traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+      }),
+    ).toThrow(/executionPort/);
+  });
+
+  it("profile 在场：configOverrides.toolAllowlist 不得覆盖过滤后的白名单", () => {
+    const runtime = childRuntime({
+      profile: buildSpecRestrictedProfile(),
+      configOverrides: { toolAllowlist: ["Read", "WebFetch", "mcp__x__y"] },
+    });
+    const config = configOf(runtime);
+    expect(config.toolAllowlist).toEqual([...SPEC_RESTRICTED_TOOLFACE]);
+    expect(config.toolAllowlist).not.toContain("WebFetch");
+    expect(config.toolAllowlist).not.toContain("mcp__x__y");
+  });
+
+  it("缺省 profile/processEnv：toolAllowlist 同 opts.tools 引用，env 回落 appOptions.env", () => {
+    const execution = vi.spyOn(executionAdapters, "createNodeExecutionAdapter");
+    const deps = makeDeps();
+    const tools = ["Read", "Bash"];
+    const runtime = createScriptWorkflowAgentRuntime({
+      childSessionId: createSessionId("spec-lane-default"),
+      deps,
+      request: { opts: { tools } } as never,
+      traceContext: createRootTraceContext({ sessionId: parentSessionId }),
+    });
+    const config = configOf(runtime);
+    expect(config.toolAllowlist).toBe(tools);
+    expect(config.toolDisallowlist).toBeUndefined();
+    const options = execution.mock.calls.at(-1)?.[0];
+    expect(options?.processEnv).toBe(deps.appOptions.env);
+    // 缺省路径 network 原样回退用户 config（字节不变）。
+    expect(options?.network).toEqual({
+      httpProxy: undefined,
+      noProxy: undefined,
+      caCertFile: undefined,
+    });
+    execution.mockRestore();
+  });
+
+  it("workflowActorToolPolicy：profile 带 disallowedTools 时合并，缺席返回原减法表引用", () => {
+    const plain = workflowActorToolPolicy();
+    expect(plain.toolDisallowlist).toBe(workflowActorToolPolicy().toolDisallowlist);
+    expect(workflowActorToolPolicy({ disallowedTools: [] }).toolDisallowlist).toBe(
+      plain.toolDisallowlist,
+    );
+    expect(workflowActorToolPolicy({ disallowedTools: [] }).toolDisallowlist).toEqual(
+      plain.toolDisallowlist,
+    );
+    const merged = workflowActorToolPolicy({ disallowedTools: ["ProfileOnlyDenied"] });
+    expect(merged.toolDisallowlist).not.toBe(plain.toolDisallowlist);
+    expect(merged.toolDisallowlist).toEqual(
+      expect.arrayContaining(["CreateWorkflow", "ProfileOnlyDenied"]),
+    );
   });
 });

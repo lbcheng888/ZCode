@@ -132,6 +132,12 @@ export async function buildSessionSnapshot(input: {
     goalStats: buildGoalStats(projection, input.messages),
     todos: input.todos?.map(mapTodoItem) ?? [],
     todoGroups: buildTodoGroups(input.messages, input.todos ?? [], projection),
+    // would-accept 收件箱（spec super-agent-trigger-subsystem-spec §5.5）：控制面在场
+    // 才发布该键——缺席 = 旧发送端未投影（unknown≠0，UI 不得当成空收件箱）；显式数组
+    // （可为空）才是「已发布且零卡片」。数据源 = 控制面 decision_log×trigger_events 联读。
+    ...(input.app.superAgentControlPlane
+      ? { pendingWouldAccept: input.app.superAgentControlPlane.listPendingWouldAccept() }
+      : {}),
   };
 }
 

@@ -34,6 +34,14 @@ export interface CommandInboxHost {
   validateRowTarget?(envelope: CommandEnvelope): GuardDecision;
   /** 业务 guard（product-protocol guard id）。缺省一律放行。 */
   guard?(envelope: CommandEnvelope): GuardDecision;
+  /**
+   * admission 回执面（spec super-agent-trigger-subsystem-spec §2.1 派发桥
+   * onHostAck 的唯一数据源）：handle() 每次返回的 ACK 送达一次——accepted（准入）
+   * 与 duplicate（重投幂等吸收）是派发桥 settle dispatched 的合法回执，rejected/
+   * stale/noop/failed 同样原样送达，由订阅方按 commandId 自行过滤。
+   * 缺省不订阅；组合根仅在派发桥启用时注入。回调抛错不得影响 admission 结果。
+   */
+  onAdmissionReceipt?(ack: CommandAck): void;
   /** 以下回调顺序就是持久化事实优先级；实现必须精确匹配 sourceCommandId。 */
   lookupTranscriptCommand?: PersistentLookup;
   lookupTimelineCommand?: PersistentLookup;
@@ -120,13 +128,15 @@ export class CommandInbox {
   async handle(raw: unknown): Promise<CommandInboxOutcome> {
     const parsed = parseCommandEnvelope(raw);
     if (!parsed.ok) {
-      return this.ackOnly({
-        commandId: this.extractCommandId(raw),
-        status: "rejected",
-        reasonCode: "proto.invalidPayload",
-        message: parsed.error.message,
-        revisionAtDecision: 0,
-      });
+      return this.ackOnly(
+        this.receipt({
+          commandId: this.extractCommandId(raw),
+          status: "rejected",
+          reasonCode: "proto.invalidPayload",
+          message: parsed.error.message,
+          revisionAtDecision: 0,
+        }),
+      );
     }
     const envelope = parsed.envelope;
     const key = { sessionId: envelope.sessionId, commandId: envelope.commandId };
@@ -135,9 +145,9 @@ export class CommandInbox {
 
     try {
       const pinned = this.inFlight.get(bucketKey)?.get(envelope.commandId);
-      if (pinned) return this.ackOnly(this.retryAck(await pinned.final));
+      if (pinned) return this.ackOnly(this.receipt(this.retryAck(await pinned.final)));
       const existing = await this.lookupExact(key);
-      if (existing) return this.ackOnly(this.retryAck(existing));
+      if (existing) return this.ackOnly(this.receipt(this.retryAck(existing)));
 
       // 固定锁序：key gate → per-session admission gate。session gate 持有到 settle，
       // 因而同 session 不同 commandId 以 CLI 实际执行 admission 的顺序串行。
@@ -147,12 +157,12 @@ export class CommandInbox {
         const afterWaitPinned = this.inFlight.get(bucketKey)?.get(envelope.commandId);
         if (afterWaitPinned) {
           releaseSession();
-          return this.ackOnly(this.retryAck(await afterWaitPinned.final));
+          return this.ackOnly(this.receipt(this.retryAck(await afterWaitPinned.final)));
         }
         const afterWait = await this.lookupExact(key);
         if (afterWait) {
           releaseSession();
-          return this.ackOnly(this.retryAck(afterWait));
+          return this.ackOnly(this.receipt(this.retryAck(afterWait)));
         }
 
         await this.host.prepareDecision?.(envelope);
@@ -160,8 +170,10 @@ export class CommandInbox {
         if (decision.kind === "ack") {
           if (decision.remember) this.rememberSettled(bucketKey, envelope.commandId, decision.ack);
           releaseSession();
-          return this.ackOnly(decision.ack);
+          return this.ackOnly(this.receipt(decision.ack));
         }
+        // admission ACK（accepted）先送达回执面，再返回 execute；settle 终态不重复送达。
+        this.receipt(decision.ack);
 
         const nextAdmissionSeq = (this.admissionSeq.get(bucketKey) ?? 0) + 1;
         const admittedAt = this.host.now?.() ?? Date.now();
@@ -210,11 +222,22 @@ export class CommandInbox {
         throw error;
       }
     } catch (error) {
-      return this.ackOnly(this.queryUnavailableAck(key, error));
+      return this.ackOnly(this.receipt(this.queryUnavailableAck(key, error)));
     } finally {
       // execute 路径已在 pin 后提前 release；release 幂等，其他路径在这里释放。
       releaseKey();
     }
+  }
+
+  /** 回执面投递：宿主订阅方（派发桥 onHostAck）抛错不得影响 admission 返回值。 */
+  private receipt(ack: CommandAck): CommandAck {
+    try {
+      // 传副本：回执订阅方不得改动 pin 在 in-flight / settled LRU 上的权威 ack 对象。
+      this.host.onAdmissionReceipt?.({ ...ack });
+    } catch {
+      // 回执订阅是旁路面；订阅方故障原样吞掉不影响唯一 admission 路径。
+    }
+    return ack;
   }
 
   /** 1..64 的上层 schema 由 gateway 校验；这里并行查询并保持 Promise.all 输入顺序。 */

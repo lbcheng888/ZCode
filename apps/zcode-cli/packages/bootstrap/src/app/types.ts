@@ -108,6 +108,10 @@ import type { ZCodeInstalledPluginData } from "../plugins.js";
 import type { SessionTranscriptMessage } from "../session-transcript.js";
 import type { NodeReplBrowserBroker } from "./node-repl-browser-broker.js";
 import type { ProviderRegistryModelSource } from "./provider-registry-model-runtime.js";
+import type {
+  SuperAgentControlPlane,
+  SuperAgentHostPorts,
+} from "./super-agent-control-plane.js";
 import type { WorkspaceHookReviewCommandResult } from "./workspace-hook-review-controller.js";
 export type { ZCodeModelOption } from "@zcode/shared";
 
@@ -219,6 +223,12 @@ export interface ZCodeAppOptions {
   workspaceHookTrustEnabled?: boolean;
   /** Presence means this owner Host supports the dedicated Workspace Hook review route. */
   workspaceHookReviewHost?: WorkspaceHookReviewHostContext;
+  /**
+   * super-agent 控制面宿主注入面（spec super-agent-trigger-subsystem-spec §2.2/§5.4）。
+   * features.eventRouter=true 时必填：缺 handleCommand/autoReplyGuard = 启动期响亮失败
+   * （kill-switch 只认 flag=false，不静默回 legacy 直路）；flag 关闭时本字段被忽略。
+   */
+  superAgent?: SuperAgentHostPorts;
 }
 
 export interface SubmitPromptOptionsBase {
@@ -344,6 +354,11 @@ export interface ZCodeApp {
    */
   reloadWorkspaceHookTrust(): Promise<void>;
   close?(): Promise<void>;
+  /**
+   * super-agent 控制面（features.eventRouter=true 时在场；缺席 = kill-switch 关，
+   * legacy 直路，spec §5.4）。app.close 对称 stop（心跳/驱动器/域库）。
+   */
+  readonly superAgentControlPlane?: SuperAgentControlPlane;
   getMode(): CollaborationMode;
   getModel(): string;
   /** current-only 协议快照精确读取当前 Registry 模型，避免枚举整个目录。 */

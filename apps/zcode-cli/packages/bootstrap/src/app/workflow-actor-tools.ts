@@ -14,15 +14,43 @@
 // 只读靠提示）。
 
 import {
+  buildSpecRestrictedDisallowRules,
+  filterSpecRestrictedToolNames,
+} from "@zcode/core";
+import {
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
   READ_SESSION_CONTEXT_TOOL_NAME,
   RESOLVE_WORKFLOW_QUESTION_TOOL_NAME,
 } from "@zcode/contracts";
+import type { AgentProfile } from "@zcode/shared";
 
 /** AgentRuntimeConfig 的工具面切片。 */
 interface WorkflowActorToolPolicy {
   toolDisallowlist: readonly string[];
+}
+
+/**
+ * profile 生效的 workflow child 工具面（super-agent-spec-lane-spec §6-1 接缝）。
+ *
+ * 既有链是 `filterSpecRestrictedToolNames(filterSubagentChildToolNames(base,
+ * buildSpecRestrictedDisallowRules(profile.disallowedTools)))`。其中
+ * `filterSubagentChildToolNames` 未从 `@zcode/core` 根导出（`subagent/index.ts` 命名清单
+ * 缺项，分区外），其两段语义在此等价展开：精确名集合过滤（plan 两件套 +
+ * profile.disallowedTools + 出站表）→ 外层 `filterSpecRestrictedToolNames` 再剔出站精确名
+ * （别名归一）与全部 `mcp__*` 前缀。字面量 `"mcp__*"` 是前缀规则不是工具名，从精确集合剔除，
+ * 前缀语义全交外层。
+ *
+ * `profile.disallowedTools` 另并入 `toolDisallowlist`（注册期第二道闸，带别名/限定符归一），
+ * 括号限定符规则（如 `Bash(git *)`）在精确集合不命中时由该闸兜住。
+ */
+export function filterWorkflowChildToolface(
+  base: readonly string[],
+  profile: Pick<AgentProfile, "disallowedTools">,
+): readonly string[] {
+  const rules = buildSpecRestrictedDisallowRules(profile.disallowedTools);
+  const exactDenied = new Set(rules.filter((rule) => rule !== "mcp__*"));
+  return filterSpecRestrictedToolNames(base.filter((name) => !exactDenied.has(name)));
 }
 
 /**
@@ -51,8 +79,19 @@ const ACTOR_DISALLOWED_TOOLS: readonly string[] = [
  * workflow actor 的 AgentRuntime 工具配置。纯函数，供 driver 侧 runtime 工厂展开进
  * AgentRuntimeConfig：不收窄，只减掉 plan 与越权的元工具。
  *
+ * `profile` 在场时把 `profile.disallowedTools` 并进减法表（去重保序）；缺席或为空时返回
+ * 原 `ACTOR_DISALLOWED_TOOLS` 引用，现有调用字节不变。
+ *
  * 只覆盖内建工具；MCP / plugin 工具的过滤留待生产接线时处理（同一个工厂 seam）。
  */
-export function workflowActorToolPolicy(): WorkflowActorToolPolicy {
-  return { toolDisallowlist: ACTOR_DISALLOWED_TOOLS };
+export function workflowActorToolPolicy(
+  profile?: Pick<AgentProfile, "disallowedTools">,
+): WorkflowActorToolPolicy {
+  const extra = profile?.disallowedTools;
+  return {
+    toolDisallowlist:
+      extra && extra.length > 0
+        ? [...new Set([...ACTOR_DISALLOWED_TOOLS, ...extra])]
+        : ACTOR_DISALLOWED_TOOLS,
+  };
 }

@@ -53,6 +53,8 @@ const DIRECT_BRANCH_EXPECTED_PROVIDER_TOOL_ORDER = [
   "DeferredToolCall",
   "SendMessage",
   "ReadSessionContext",
+  // M9 引用图链式召回：紧跟同档只读发现面 ReadSessionContext 注册。
+  "Recall",
   "ReplyToChannel",
   "CreateWorkflow",
   // 修订入口紧随 CreateWorkflow 注册（docs/dynamic-workflow/launch.md「The `AmendWorkflow` tool」）。

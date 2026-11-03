@@ -111,6 +111,8 @@ export const runTuiCommand = async (
         readSubagentTranscript: promptHandler.readSubagentTranscript,
         listWorkflowRuns: promptHandler.listWorkflowRuns,
         replayWorkflowRuns: promptHandler.replayWorkflowRuns,
+        listWouldAcceptCards: promptHandler.listWouldAcceptCards,
+        promoteWouldAcceptCard: promptHandler.promoteWouldAcceptCard,
         getMainSessionId: promptHandler.getMainSessionId,
         writeClipboardText:
           deps.writeClipboardText ?? createNodeClipboardTextWriter({ stdout: ctx.stdout }),

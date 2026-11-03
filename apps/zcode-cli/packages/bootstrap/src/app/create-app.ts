@@ -73,6 +73,11 @@ import { createInputFacade } from "./input-facade.js";
 import { createPluginFacadeForApp } from "./plugin-facade.js";
 import { resolvePluginRuntimeFeatures } from "./plugin-runtime-features.js";
 import { createSessionFacade } from "./session-facade.js";
+import {
+  createRuntimeAdjudicationSession,
+  createSuperAgentControlPlane,
+  type SuperAgentControlPlane,
+} from "./super-agent-control-plane.js";
 import { resolveAppRuntimeConfig, runtimeConfigLogContext } from "./runtime-config.js";
 import { resolveBundledSkillRoots } from "./bundled-skills.js";
 import { collectDynamicWorkflowDisabledSkillPaths } from "./dynamic-workflow-gate.js";
@@ -215,6 +220,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   let nodeReplBrowserBroker: NodeReplBrowserBroker | undefined;
   let ownedNodeReplBrowserBroker: NodeReplBrowserBroker | undefined;
   let providerModelRuntime: ApiProviderModelRuntime | undefined;
+  // super-agent 控制面（Phase 2 里程碑 A）：只在 features.eventRouter=true 时构造；
+  // 声明提到 try 前，启动中途失败时外层 catch 能对称 stop 关库不泄漏。
+  let superAgentControlPlane: SuperAgentControlPlane | undefined;
+  let superAgentAbort: AbortController | undefined;
   try {
     const storageRoot = resolvePath(configResult.config.storage.dir);
     const cliStorageRoot = getCliStorageRoot(storageRoot);
@@ -1011,6 +1020,50 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       workingDirectory,
     });
 
+    // super-agent 控制面装配（spec super-agent-trigger-subsystem-spec §7-7 里程碑 A）：
+    // flag 关（缺省）= 完全不构造，零行为变化（spec §5.4 kill-switch）；flag 开 = 宿主
+    // 必须注入 handleCommand（CommandInbox 在线投递）与 autoReplyGuard（bots 互答守卫），
+    // 缺站启动期响亮失败——不静默回 legacy（静默降级会把 flag 语义变成谎言）。
+    if (configResult.config.features.eventRouter === true) {
+      const superAgentHost = options.superAgent;
+      if (!superAgentHost) {
+        throw new Error(
+          "features.eventRouter=true 需要宿主注入 options.superAgent（handleCommand + autoReplyGuard，spec §2.2 组合根注入）",
+        );
+      }
+      superAgentAbort = new AbortController();
+      superAgentControlPlane = await createSuperAgentControlPlane({
+        // leader 租约/回填/续期作用域：与协议 workspace 身份键同源（trim 缺省回退工作目录）。
+        workspaceIdentity:
+          options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory,
+        onError: (error, context) => {
+          logger.warn("super-agent control plane error", {
+            error: error instanceof Error ? error : new Error(String(error)),
+            event: "bootstrap.super_agent.error",
+            module: "bootstrap",
+            context,
+          });
+        },
+        sessionFace: {
+          sessionId,
+          isIdle: () => getRuntime().getActiveTurnInfo() === undefined,
+        },
+        hostPorts: superAgentHost,
+        // M4/M6：flag 关（缺省）保持 P2 字节兼容——mandate 恒隐式 record_only、
+        // 方案门不启用；flag 开才接三档解析与五字段出口门。
+        mandateGate: configResult.config.features.mandateGate === true,
+        adjudicationSession: createRuntimeAdjudicationSession({
+          generateWorkspaceText: (input, sessionOptions) =>
+            getRuntime().generateWorkspaceText(input, sessionOptions),
+          resolveSelection: () =>
+            getRuntime().getSessionModelSelection() ??
+            options.configuredDefaultModelSelection,
+          abortSignal: superAgentAbort.signal,
+        }),
+      });
+      await superAgentControlPlane.start();
+    }
+
     const closeSession = sessionFacade.close;
     const resolvePromptAttachment = async (input: {
       ref: string;
@@ -1238,12 +1291,23 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       ...sessionFacade,
       close: async () => {
         try {
-          await closeSession?.();
+          // 控制面先停（心跳/裁决循环/域库对称关闭），再停会话，二者均幂等（spec §3.3）。
+          // 诚实边界：abort() 是同步中止信号、不等于 drain——adjudication.stop() 明示在途
+          // 批不取消（自然收尾），plane.stop() 随即同步 db.close()；若在途裁决批的
+          // applyVerdicts 落在关库之后，抛错经 onError（adjudication wake）响亮告警、
+          // 零写入、候选行留 pending 待下次启动补扫。该窄竞态已登记 spec §8-12，消除它
+          // 需驱动器暴露 drain（quiesce 后再关库），归 adjudication 模块批。
+          superAgentAbort?.abort();
+          superAgentControlPlane?.stop();
         } finally {
           try {
-            providerModelRuntime?.dispose();
+            await closeSession?.();
           } finally {
-            await modelTelemetry.shutdown();
+            try {
+              providerModelRuntime?.dispose();
+            } finally {
+              await modelTelemetry.shutdown();
+            }
           }
         }
       },
@@ -1403,6 +1467,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             },
           }),
       ...createPluginFacadeForApp({ configResult, options, workingDirectory }),
+      ...(superAgentControlPlane ? { superAgentControlPlane } : {}),
       getPluginReferenceCatalog: () => pluginReferenceCatalog,
       getSkillCatalog: async () => {
         // Skill 目录属于 context 初始化结果。冷恢复必须先恢复 Session 边界，再读取
@@ -1414,6 +1479,15 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       ...inputFacade,
     };
   } catch (error) {
+    // 启动中途失败：控制面已构造时对称停（关域库/清心跳），清理失败不掩盖原始启动错误。
+    if (superAgentControlPlane) {
+      try {
+        superAgentAbort?.abort();
+        superAgentControlPlane.stop();
+      } catch {
+        // 见上：原始 error 才是失败原因。
+      }
+    }
     providerModelRuntime?.dispose();
     void modelTelemetry.shutdown().catch(() => undefined);
     void ownedNodeReplBrowserBroker?.close();

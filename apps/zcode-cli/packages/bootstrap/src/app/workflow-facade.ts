@@ -39,8 +39,10 @@ import {
   type TraceContext,
   type WorkflowDefinition,
 } from "@zcode/contracts";
+import type { AgentProfile } from "@zcode/shared";
 import { collectDisabledPaths } from "../skill-command-overrides.js";
 import type { PrepareUserExecutionBoundary, ZCodeAppOptions } from "./types.js";
+import { filterWorkflowChildToolface } from "./workflow-actor-tools.js";
 import { createWorkflowMethods, type WorkflowFacade } from "./workflow-methods.js";
 
 interface CreateWorkflowFacadeDeps {
@@ -108,6 +110,8 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
         childSessionId,
         childTraceContext,
         workflowKind,
+        profile: request.profile,
+        processEnv: request.processEnv,
       });
       const unsubscribe = request.onEvent
         ? childRuntime.subscribeEvents({ onSessionEvent: request.onEvent })
@@ -273,14 +277,90 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
   });
 }
 
-function createWorkflowChildRuntime(
+/**
+ * 执行适配器的 network 策略：`processEnv` 在场（spec run）时从它派生，缺席时
+ * 原样回退用户 config（缺省路径字节不变）。
+ *
+ * 为什么必须派生：spawn 链路（adapters `buildExecutionEnv`）先按 processEnv 拷贝、
+ * 再 `sanitizeZCodeRuntimeEnvInPlace` 剔掉代理键、最后只按这里给的 network 回填。
+ * 沿用用户 config 会让子进程拿到用户代理/直连（spec egress 代理被旁路或覆盖），
+ * 用户 noProxy 还会注入 NO_PROXY 违反 §3「noProxy 空、含 localhost 也过代理」。
+ *
+ * fail-closed：processEnv 缺代理键即抛（§3「无代理拒绝启动」），不回退直连。
+ * 大小写两态都认——win32 下 `setEnvKey` 的大小写不敏感删除会让 buildSpecRunEnv
+ * 只留下小写变体键。与 script-workflow-child-runtime 的同名函数保持同步
+ * （两处构造点同一规则）。
+ */
+function resolveWorkflowChildExecutionNetwork(
+  processEnv: Record<string, string> | undefined,
+  configNetwork: { caCertFile?: string; httpProxy?: string; noProxy?: string },
+): { caCertFile?: string; httpProxy?: string; noProxy?: string } {
+  if (processEnv === undefined) {
+    return {
+      httpProxy: configNetwork.httpProxy,
+      noProxy: configNetwork.noProxy,
+      caCertFile: configNetwork.caCertFile,
+    };
+  }
+  const httpProxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
+  if (httpProxy === undefined || httpProxy === "") {
+    throw new Error(
+      "workflow child processEnv 缺少代理键（HTTP_PROXY）：无代理即拒绝启动（fail-closed），不回退直连",
+    );
+  }
+  return {
+    httpProxy,
+    noProxy: processEnv.NO_PROXY ?? processEnv.no_proxy ?? "",
+    caCertFile: configNetwork.caCertFile,
+  };
+}
+
+export function createWorkflowChildRuntime(
   deps: CreateWorkflowFacadeDeps,
   options: {
     childSessionId: SessionId;
     childTraceContext: TraceContext;
     workflowKind: string;
+    /**
+     * spec 受限子代理档案；在场时工具面走 spec 受限链过滤（与 script child 同规则）。
+     * 与 `appOptions.executionPort` 互斥（spec 语境的子执行必须走本接缝，见 processEnv）。
+     */
+    profile?: AgentProfile;
+    /**
+     * 子执行进程 env；在场直接采用，缺席回落 `appOptions.env ?? process.env`。
+     * 调用方约定传 `buildSpecRunEnv` 产出（白名单键、无凭据）。生效前提（fail-closed，
+     * 二者同在直接抛错，不降级）：`appOptions.executionPort` 必须缺席——宿主注入共享
+     * 执行端口时本入参会被静默忽略，子执行走宿主端口的父 env（含凭据）；且 env 必须
+     * 带代理键（HTTP_PROXY）——network 从本 env 派生（super-agent-spec-lane-spec §6-3）。
+     */
+    processEnv?: Record<string, string>;
   },
 ): AgentRuntime {
+  // fail-closed：共享执行端口携带宿主 env（含凭据），会静默丢弃本接缝的无凭据
+  // processEnv / spec profile——spec run「无凭据」失守。二者同在直接拒绝启动。
+  if (
+    (options.processEnv !== undefined || options.profile !== undefined) &&
+    deps.appOptions.executionPort !== undefined
+  ) {
+    throw new Error(
+      "workflow child：processEnv/profile 与 appOptions.executionPort 互斥——共享执行端口携带宿主 env（含凭据），会静默丢弃无凭据的 spec env",
+    );
+  }
+  // profile 生效的工具面：profile.tools 在场才收窄（expert 路径没有 request.opts.tools）。
+  const toolAllowlist =
+    options.profile?.tools !== undefined
+      ? filterWorkflowChildToolface(options.profile.tools, options.profile)
+      : undefined;
+  // profile.disallowedTools 与继承的 toolDisallowlist 取并集；仅在非空时落键（缺省字节不变）。
+  const profileDisallowlist =
+    options.profile?.disallowedTools && options.profile.disallowedTools.length > 0
+      ? [
+          ...new Set([
+            ...(deps.runtimeConfig.toolDisallowlist ?? []),
+            ...options.profile.disallowedTools,
+          ]),
+        ]
+      : undefined;
   return new AgentRuntime(
     options.childSessionId,
     {
@@ -294,6 +374,10 @@ function createWorkflowChildRuntime(
       parentSessionId: deps.sessionId,
       taskType: "workflow_child",
       workingDirectory: deps.workingDirectory,
+      ...(toolAllowlist === undefined ? {} : { toolAllowlist }),
+      ...(profileDisallowlist === undefined
+        ? {}
+        : { toolDisallowlist: profileDisallowlist }),
     },
     {
       agentTelemetry: deps.agentTelemetry,
@@ -307,14 +391,16 @@ function createWorkflowChildRuntime(
         deps.appOptions.executionPort ??
         createNodeExecutionAdapter({
           onToolExecResource: deps.appOptions.onToolExecResource,
-          network: {
-            httpProxy: deps.configResult.config.network.httpProxy,
-            noProxy: deps.configResult.config.network.noProxy,
-            caCertFile: deps.configResult.config.network.caCertFile,
-          },
+          // processEnv 在场时 network 从它派生（见 resolveWorkflowChildExecutionNetwork）：
+          // spawn 链路 sanitize 后只按这里的 network 回填代理键，沿用用户 config 会让
+          // 子进程拿到用户代理/直连，spec egress 代理被旁路。
+          network: resolveWorkflowChildExecutionNetwork(
+            options.processEnv,
+            deps.configResult.config.network,
+          ),
           outputRootDir: join(deps.storageRoot, "cli", "exec"),
           bashOutputTempDir: tmpdir(),
-          processEnv: deps.appOptions.env ?? process.env,
+          processEnv: options.processEnv ?? deps.appOptions.env ?? process.env,
         }),
       fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
       httpClientPort:

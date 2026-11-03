@@ -8123,6 +8123,14 @@ const enUS: Record<string, string> = {
     "I used the ZCode Highspeed card and saved {duration}s. Give it a try. Download ZCode https://zcode.z.ai",
   "globalNotice.highspeed.imageSummary": "{tokens} tokens · {duration}s saved",
   "globalNotice.highspeed.close": "Close Highspeed share card",
+  "wouldAccept.title": "Would-accept inbox",
+  "wouldAccept.empty": "No pending would-accept cards.",
+  "wouldAccept.promoteAuto": "Promote to auto",
+  "wouldAccept.promoteUnavailable": "Mandate service is not connected in this build",
+  "wouldAccept.promoteFailed": "Promote failed: {message}",
+  "wouldAccept.tier.recordOnly": "record only",
+  "wouldAccept.tier.speculative": "speculative",
+  "wouldAccept.tier.auto": "auto",
   ...requestSecurityMessagesEnUS,
 };
 

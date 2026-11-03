@@ -1,4 +1,7 @@
-import type { WorkflowRunProgressEnvelope } from "@zcode/shared/zcode-protocol-v4";
+import type {
+  PendingWouldAcceptCard,
+  WorkflowRunProgressEnvelope,
+} from "@zcode/shared/zcode-protocol-v4";
 import type { ModelSelection, ZCodeModelOption } from "@zcode/shared";
 import type {
   CollaborationMode,
@@ -277,6 +280,22 @@ export type TuiGetMainSessionId = () => string | undefined;
 
 export type TuiListMcpServers = () => Promise<Record<string, McpServerStatus>>;
 
+/**
+ * would-accept 收件箱卡片列表（TUI 降级 `/would-accept` 命令的数据缝）。
+ * 载荷与 v4 快照投影 `pendingWouldAccept` 同构；CLI 宿主负责接到投影/RPC。
+ * 缝缺席 = 构建未接入，命令如实报 unavailable。
+ */
+export type TuiListWouldAcceptCards = () =>
+  | Promise<readonly PendingWouldAcceptCard[]>
+  | readonly PendingWouldAcceptCard[];
+
+/**
+ * would-accept 一键批转 auto（`/would-accept promote <cardId>` 的数据缝，spec §2.1
+ * `promoteWouldAccept` 同签名）。CLI 宿主接到控制面 `promoteWouldAccept`；
+ * 缝缺席 = 构建未接入，命令如实报 unavailable。
+ */
+export type TuiPromoteWouldAcceptCard = (cardId: string) => Promise<void>;
+
 export type TuiSlashCommandSuggestion = {
   aliases?: readonly string[];
   name: string;
@@ -324,6 +343,8 @@ export type TuiOptions = {
   listMcpServers?: TuiListMcpServers;
   listWorkflowRuns?: TuiListWorkflowRuns;
   replayWorkflowRuns?: TuiReplayWorkflowRuns;
+  listWouldAcceptCards?: TuiListWouldAcceptCards;
+  promoteWouldAcceptCard?: TuiPromoteWouldAcceptCard;
   getMainSessionId?: TuiGetMainSessionId;
   readClipboardImage?: TuiReadClipboardImage;
   recallPreviousInput?: TuiRecallPreviousInput;

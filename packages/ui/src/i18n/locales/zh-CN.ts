@@ -7708,6 +7708,14 @@ const zhCN: Record<string, string> = {
     "我用 ZCode 高速卡节省了 {duration} 秒的时间，你也来试试吧。下载 ZCode https://zcode.z.ai",
   "globalNotice.highspeed.imageSummary": "{tokens} tokens · 节省 {duration} 秒",
   "globalNotice.highspeed.close": "关闭加速分享卡片",
+  "wouldAccept.title": "Would-accept 收件箱",
+  "wouldAccept.empty": "暂无待处理的 would-accept 卡片。",
+  "wouldAccept.promoteAuto": "批转 auto",
+  "wouldAccept.promoteUnavailable": "当前构建未接入 mandate 服务",
+  "wouldAccept.promoteFailed": "批转失败：{message}",
+  "wouldAccept.tier.recordOnly": "仅记录",
+  "wouldAccept.tier.speculative": "投机",
+  "wouldAccept.tier.auto": "auto",
   ...requestSecurityMessagesZhCN,
 };
 

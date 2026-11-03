@@ -97,7 +97,8 @@ describe("AgentRuntime prompt admission", () => {
     expect(queued?.delivery).toBe("inject");
   });
 
-  it("does not recognize the inject lane when the goal layer flag is off", async () => {
+  it("recognizes the inject lane even when the goal layer flag is off", async () => {
+    // 设计 M11 Remove 清单已删 inject→queue 降级残留:inject 车道恒可用,不因关旗而降级。
     const runtime = createRuntime("prompt-admission-inject-off", async () => ({
       finishReason: "stop",
       text: "done",
@@ -109,15 +110,17 @@ describe("AgentRuntime prompt admission", () => {
       queueDelivery: "inject",
     });
 
-    // 关旗:不落 inject 收件箱、不 steer inject;按普通 queue 准入(idle 即起一轮)。
-    expect(admission.kind).toBe("started");
-    if (admission.kind !== "started") throw new Error("inject request was not admitted");
-    await admission.completion;
+    // 关旗仍落 inject 收件箱,不降级为普通 queue 起轮。
+    expect(admission.kind).toBe("queued");
+    if (admission.kind !== "queued") throw new Error("inject request was not queued");
     const projection = await runtime.getProjection();
-    expect(projection.pendingSteerInputs.some((item) => item.delivery === "inject")).toBe(false);
+    const queued = projection.pendingSteerInputs.find(
+      (item) => item.pendingInputId === (admission as { pendingInputId?: string }).pendingInputId,
+    );
+    expect(queued?.delivery).toBe("inject");
   });
 
-  it("degrades a direct inject steer to queue when the goal layer flag is off", async () => {
+  it("keeps a direct inject steer on the inject lane when the goal layer flag is off", async () => {
     const modelGate = deferred<unknown>();
     const modelStarted = deferred<void>();
     const runtime = createRuntime("prompt-admission-inject-steer-off", async () => {
@@ -136,8 +139,9 @@ describe("AgentRuntime prompt admission", () => {
 
     await runtime.steerTurn({ delivery: "inject", input: "ambient steer" });
     const projection = await runtime.getProjection();
+    // 关旗也不降级:steer inject 仍落 inject 车道。
     expect(projection.pendingSteerInputs.map((item) => [item.input, item.delivery])).toEqual([
-      ["ambient steer", "queue"],
+      ["ambient steer", "inject"],
     ]);
 
     modelGate.resolve(undefined);

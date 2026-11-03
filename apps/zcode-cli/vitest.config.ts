@@ -19,6 +19,9 @@ export default defineConfig({
       "tests/**/*.test.ts",
       "packages/*/test/**/*.test.ts",
       "packages/*/tests/**/*.test.ts",
+      // managed 模块五件套的 contract.test.ts 落在 src 模块目录内（如 super-agent/*），
+      // 必须进共享 project 才会被中央验证收集；只收 vitest 约定的 contract 测试，不扩 node:test 目录。
+      "packages/*/src/**/contract.test.ts",
     ],
     // Bugfix: cli、tui、plugin-creator 的测试文件由 node:test 驱动(包内 test 脚本用 node/tsx --test 运行),
     // vitest 收集后必然以 "No test suite found in file" 失败;插件包的 test/ 是真实构建、MCP、

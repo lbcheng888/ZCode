@@ -1,4 +1,6 @@
 export { runTui } from "./tui.js";
+// would-accept 命令面：宿主缝在场但能力缺席时抛此类型（CLI 宿主接缝用，分流不靠错误文本）。
+export { WouldAcceptUnavailableError } from "./app-would-accept.js";
 export type {
   TuiClipboardImage,
   TuiImageMediaType,
@@ -6,6 +8,8 @@ export type {
   TuiGetMainSessionId,
   TuiListWorkflowRuns,
   TuiReplayWorkflowRuns,
+  TuiListWouldAcceptCards,
+  TuiPromoteWouldAcceptCard,
   TuiListWorkspacePathSuggestions,
   TuiEffortOption,
   TuiModelOption,

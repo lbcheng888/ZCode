@@ -12,7 +12,7 @@ import {
 import { resolveEffectiveBashShellSelection } from "@zcode/adapters/exec";
 import { inputIntentMetadata } from "../zcode-protocol-v4/commands/input-intent.js";
 import { createModelExecutionContext } from "./model-execution.js";
-import type { SendInputOptions } from "../app/types.js";
+import type { SendInputOptions, ZCodeAppOptions } from "../app/types.js";
 import { repairPersistedRemoteSessionPaths, type TurnAttachment } from "@zcode/core";
 import {
   CoreErrorType,
@@ -124,7 +124,8 @@ import { createProtocolTopicResourcePort } from "./topic-resource-port.js";
 import { createProtocolBrowserControlBroker } from "./browser-control-broker.js";
 import { mapComputerUseOperationEvent } from "./computer-use-operation-event.js";
 import { protocolMcpServersToRuntimeMcpConfig } from "./protocol-mcp-config.js";
-import { projectIdFromDirectory } from "../app/paths.js";
+import { dirname, join } from "node:path";
+import { getSuperAgentDatabasePath, projectIdFromDirectory } from "../app/paths.js";
 import {
   collectSubagentChildSessionIds,
   paginateEndedSubagents,
@@ -2890,6 +2891,9 @@ export async function generateWorkspaceText(
       },
       sessionStore: context.deps.sessionStore,
       version: context.deps.version,
+      // flag-on 下临时 app 同样过 create-app 的 options.superAgent 门（§8-10①）；
+      // 每 app 一控制面由 leader 租约收敛为单活跃实例（§8-9）。
+      superAgent: buildProtocolSuperAgentHostPorts(context),
     }));
 
   try {
@@ -3409,6 +3413,57 @@ async function resolveSessionStartupPreferences(
   };
 }
 
+/** tasks-index 库文件名（services getTasksIndexDatabasePath 同名；与 super-agent 库同根目录）。 */
+const TASKS_INDEX_DATABASE_FILENAME = "tasks-index.sqlite";
+
+/**
+ * super-agent 宿主注入面（spec super-agent-trigger-subsystem-spec §8-10① / §8-2）：
+ * features.eventRouter=true 时 create-app 要求 options.superAgent 在场，否则启动期响亮
+ * 失败；flag 关时该字段被 create-app 忽略（本函数零 I/O，恒注入 = flag-off 零行为变化）。
+ * - handleCommand：延迟绑定 v4Gateway——构造 options 不要求 gateway 已挂载（直调
+ *   createRecord 的测试上下文可缺），真正投递时缺站原样响亮失败，与 §8-2 同语义。
+ * - autoReplyGuard：本进程不承载 botsService（入站宿主批 §8-10② 未接），没有互答占额
+ *   状态可查；非守卫适用面按 intake 合同原样放行，群内 IM 一旦被咨询即响亮失败——
+ *   不静默放行（会伪造准入），也不假造占额。
+ * - 数据库路径：super-agent 与 tasks-index 同根 {dataBaseDir}/.zcode/v2（spec §1.1/§1.6），
+ *   dataBaseDir 解析单点复用 getSuperAgentDatabasePath（本进程不调 services
+ *   setDataBaseDir，ZCODE_DATA_BASE_DIR→HOME→homedir 链与 services 缺省一致）。
+ *   注入 tasksIndexDatabasePath = 声明已迁移，未迁移时派发桥构造响亮失败（§8-6 既定语义）。
+ * - backfillSeeds 不注入：种子属 services 的既有 bot conversation 枚举（§8-8），
+ *   缺省空表零新增行，不伪造回填。
+ */
+function buildProtocolSuperAgentHostPorts(
+  context: ZCodeProtocolAgentServerContext,
+): NonNullable<ZCodeAppOptions["superAgent"]> {
+  const superAgentDatabasePath = getSuperAgentDatabasePath();
+  const tasksIndexDatabasePath = join(
+    dirname(superAgentDatabasePath),
+    TASKS_INDEX_DATABASE_FILENAME,
+  );
+  return {
+    handleCommand: (rawParams) => {
+      const gateway = context.v4Gateway;
+      if (!gateway) {
+        throw new Error(
+          "协议宿主缺 v4Gateway.handleCommand（super-agent 在线投递面未装配，spec §8-10①）",
+        );
+      }
+      return gateway.handleCommand(rawParams);
+    },
+    autoReplyGuard: {
+      async admit(envelope) {
+        // 守卫只对群内 IM 消耗占额（intake §3.1 已保证 unscoped/非 IM 不进守卫）。
+        if (envelope.source !== "im" || envelope.payload.chatType !== "group") return true;
+        throw new Error(
+          "协议宿主缺 bots 互答守卫状态（admitAutoReplyTurn 未随入站宿主下沉，spec §8-10②）",
+        );
+      },
+    },
+    superAgentDatabasePath,
+    tasksIndexDatabasePath,
+  };
+}
+
 async function materializeSessionRecord(
   context: ZCodeProtocolAgentServerContext,
   params: ZCodeSessionRecordParams,
@@ -3563,6 +3618,9 @@ async function createRecord(
     traceContext,
     version: context.deps.version,
     modelIoFullRetentionEnabled: context.appRuntimePreferences.modelIoFullRetentionEnabled,
+    // 协议宿主准入接线（spec §8-10①）：gateway.handleCommand + 守卫 + 库路径注入
+    // options.superAgent，flag-on 不再启动期响亮失败；flag-off 该字段被 create-app 忽略。
+    superAgent: buildProtocolSuperAgentHostPorts(context),
   });
   const now = Date.now();
   const record: ZCodeProtocolSessionRecord = {

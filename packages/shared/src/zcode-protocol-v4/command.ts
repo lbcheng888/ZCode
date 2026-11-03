@@ -345,6 +345,16 @@ export const ROW_TARGETING_COMMANDS: ReadonlySet<CommandType> = new Set([
 ]);
 
 // ── 信封 ──
+/**
+ * prompt-admission 触发来源枚举（spec super-agent-trigger-subsystem-spec §2.2 /
+ * 设计 §7 Upgrade「prompt-admission 触发来源枚举（与 wire schema 同步）」）。
+ * user = 宿主/用户直接输入（缺省）；trigger = super-agent EventRouter / human-explicit
+ * 分派器经 CommandInbox 投递（信封携带 triggerId）。core prompt-admission 从本 schema
+ * 导入同源类型，禁止两侧各写一份字面量枚举。
+ */
+export const promptTriggerSourceSchema = z.enum(["user", "trigger"]);
+export type PromptTriggerSource = z.infer<typeof promptTriggerSourceSchema>;
+
 export const commandEnvelopeSchema = z.object({
   ttft: localTtftContextSchema.optional(),
   // uuid v7，客户端生成，重试不变。
@@ -358,6 +368,12 @@ export const commandEnvelopeSchema = z.object({
   payload: z.unknown(),
   // 客户端时钟，仅遥测；服务端不用于任何裁决。
   issuedAt: timestampSchema,
+  // super-agent 触发子系统投递标记（spec §2.2 additive-optional）：EventRouter /
+  // human-explicit 分派器经 host RPC 投 CommandInbox 时携带 trigger_events.id；
+  // 非触发路径缺省即旧语义，旧端 z.object 静默丢弃（fail-safe）。
+  triggerId: z.string().trim().min(1).optional(),
+  // taint 信封（M2/§5）：supervisor 铸造、随 trigger_events.taint 透传，永不构成指令权威。
+  taint: z.boolean().optional(),
 });
 export type CommandEnvelope = z.infer<typeof commandEnvelopeSchema>;
 

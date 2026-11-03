@@ -3349,7 +3349,7 @@ describe("AgentRuntime tool loop", () => {
 
     const runtime = createTestAgentRuntime(
       sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-loop" },
+      { goalLayerEnabled: true, mode: "build", workingDirectory: "/tmp/zcode-runtime-target-loop" },
       {
         eventStore,
         modelFactory: createTestModelFactory({
@@ -3572,67 +3572,6 @@ describe("AgentRuntime tool loop", () => {
     });
   });
 
-  it("keeps the legacy continuation loop and omits budgets/anchors when the goal layer flag is off", async () => {
-    const sessionId = createSessionId("runtime-goal-layer-off-legacy-loop");
-    const eventStore = createTestSessionEventStore();
-    const sessionStore = new RecordingSessionStore();
-    const requests: any[][] = [];
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      {
-        mode: "build",
-        workingDirectory: "/tmp/zcode-runtime-goal-layer-off",
-      },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            requests.push(withoutAgentListingMessages(request.messages));
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "legacy continuation",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-      },
-    );
-
-    await runtime.ensureSessionPersistedForExternalActivity("/goal Legacy");
-    await sessionStore.setTarget({
-      objective: "Legacy target without the goal layer",
-      sessionID: sessionId,
-      turnBudget: 1,
-    });
-
-    // 关旗:手动续跑走旧的忙碌循环(续跑一回合后自带完成判定),回合预算不挂载,
-    // 因此没有锚点、没有预算终局提示。
-    const result = await runtime.continueActiveTargetLoop({ trigger: "manual" });
-    expect(result?.response).toBe("legacy continuation");
-    const allRequestText = requests.map((messages) => providerMessagesToText(messages)).join("\n");
-    expect(allRequestText).toContain("Continue working toward the active session goal.");
-    expect(allRequestText).not.toContain("Active session goal anchor");
-    expect(allRequestText).not.toContain("The session goal budget is exhausted.");
-    // 续跑回合 + 循环内的完成判定(旧行为),没有预算宽限终局回合。
-    expect(requests.length).toBe(2);
-
-    // 关旗:idle 驱动器完全不生效——即使进程内 armed 标志被置位、目标仍 active,
-    // 也不会从空闲沿预约下一回合。
-    await sessionStore.setTarget({
-      objective: "Second legacy target",
-      sessionID: sessionId,
-    });
-    (runtime as unknown as { goalRoundDriverArmed?: boolean }).goalRoundDriverArmed = true;
-    const requestCount = requests.length;
-    runtime.scheduleIdleGoalRound();
-    await delay(50);
-    expect(requests.length).toBe(requestCount);
-    expect(runtime.hasActiveOrQueuedTurnWork()).toBe(false);
-  });
-
   it("plain executeTurn does not run post-turn active target loop without opt-in", async () => {
     const sessionId = createSessionId("runtime-target-loop-prompt-no-opt-in");
     const eventStore = createTestSessionEventStore();
@@ -3678,161 +3617,6 @@ describe("AgentRuntime tool loop", () => {
     expect(requestOrder).toEqual(["prompt"]);
   });
 
-  it("runs the restored post-turn continuation when continueActiveTargetAfterTurn is set off-flag", async () => {
-    const sessionId = createSessionId("runtime-goal-layer-off-prompt-trigger");
-    const eventStore = createTestSessionEventStore();
-    const sessionStore = new RecordingSessionStore();
-    const requestOrder: string[] = [];
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      {
-        mode: "build",
-        workingDirectory: "/tmp/zcode-runtime-goal-layer-off-prompt",
-      },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            const latestText = providerContentToText(
-              latestTurnInputMessages(request).at(-1)?.content,
-            );
-            if (latestText.includes("finish target after prompt")) {
-              requestOrder.push("prompt");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: "prompt done",
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            if (latestText.includes("Verify whether the active session goal")) {
-              const passed = requestOrder.filter((step) => step === "verifier-fail").length === 1;
-              requestOrder.push(passed ? "verifier-pass" : "verifier-fail");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: JSON.stringify({
-                  nextAction: passed ? "" : "Keep going.",
-                  passed,
-                  reason: passed ? "Done." : "More work remains.",
-                }),
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            if (latestText.includes("Continue working toward the active session goal.")) {
-              requestOrder.push("continuation");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: "legacy post-turn continuation",
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            throw new Error(`unexpected request: ${latestText}`);
-          },
-        } as never),
-        sessionStore,
-      },
-    );
-
-    await runtime.ensureSessionPersistedForExternalActivity("/goal Prompt trigger");
-    await sessionStore.setTarget({
-      objective: "Finish through the restored prompt trigger",
-      sessionID: sessionId,
-    });
-
-    // 关旗:input-facade 会设置 continueActiveTargetAfterTurn,这里直接模拟同一选项。
-    const result = await runtime.executeTurn("finish target after prompt", undefined, {
-      continueActiveTargetAfterTurn: true,
-    });
-
-    expect(result.response).toBe("legacy post-turn continuation");
-    expect(requestOrder).toEqual(["prompt", "verifier-fail", "continuation", "verifier-pass"]);
-  });
-
-  it("runs the restored task-notification continuation when the goal layer is off", async () => {
-    const sessionId = createSessionId("runtime-goal-layer-off-notification-trigger");
-    const eventStore = createTestSessionEventStore();
-    const sessionStore = new RecordingSessionStore();
-    const requestOrder: string[] = [];
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      {
-        mode: "build",
-        workingDirectory: "/tmp/zcode-runtime-goal-layer-off-notification",
-      },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            const latestText = providerContentToText(
-              latestTurnInputMessages(request).at(-1)?.content,
-            );
-            if (latestText.includes("background build finished")) {
-              requestOrder.push("notification");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: "notification handled",
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            if (latestText.includes("Verify whether the active session goal")) {
-              const passed = requestOrder.includes("continuation");
-              requestOrder.push(passed ? "verifier-pass" : "verifier-fail");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: JSON.stringify({
-                  nextAction: passed ? "" : "Keep going.",
-                  passed,
-                  reason: passed ? "Done." : "More work remains.",
-                }),
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            if (latestText.includes("Continue working toward the active session goal.")) {
-              requestOrder.push("continuation");
-              return {
-                finishReason: "stop",
-                providerMetadata: undefined,
-                text: "legacy notification continuation",
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            throw new Error(`unexpected request: ${latestText}`);
-          },
-        } as never),
-        sessionStore,
-      },
-    );
-
-    await runtime.ensureSessionPersistedForExternalActivity("/goal Notification trigger");
-    await sessionStore.setTarget({
-      objective: "Finish after the background notification",
-      sessionID: sessionId,
-    });
-
-    runtime.enqueueBackgroundTaskNotification({
-      text: "background build finished",
-      traceContext: {
-        queryId: "notification-trigger" as never,
-        sessionId,
-        traceId: "trace-notification-trigger" as never,
-      } as never,
-    });
-
-    await waitForCondition(() => requestOrder.includes("verifier-pass"));
-    expect(requestOrder).toEqual([
-      "notification",
-      "verifier-fail",
-      "continuation",
-      "verifier-pass",
-    ]);
-  });
-
   it("manual active target loop starts without first verification", async () => {
     const sessionId = createSessionId("runtime-target-loop-manual-no-verify");
     const eventStore = createTestSessionEventStore();
@@ -3842,6 +3626,7 @@ describe("AgentRuntime tool loop", () => {
     const runtime = createTestAgentRuntime(
       sessionId,
       {
+        goalLayerEnabled: true,
         mode: "build",
         workingDirectory: "/tmp/zcode-runtime-target-loop-manual",
       },
@@ -4710,6 +4495,64 @@ describe("AgentRuntime tool loop", () => {
     // Phase 3 goal↔workflow 互锁(设计 §3.3「workflow 在途时目标 disarm,消除双重驱动」):
     // 后台任务检查不再被 verifyBeforeContinue 门住——手动续跑语义(verify=false)同样让位,
     // run 终态的回填通知轮排空后才在空闲沿续跑。
+    await expect(
+      runtime.continueActiveTargetIfIdle({ verifyBeforeContinue: false }),
+    ).resolves.toBeNull();
+    expect(requests).toEqual([]);
+  });
+
+  it("defers manual goal continuation while a workflow run is in flight even with the goal layer flag off", async () => {
+    // 验收场景 6 要求互锁「无论开旗关旗」：executeTargetContinuationCommand 的后台
+    // 在途检查是无条件的（不读 isGoalLayerEnabled）。关旗（goalLayerEnabled 缺席）
+    // 时手动续跑同样让位、零模型请求——防未来把互锁误挂回旗门。
+    const sessionId = createSessionId("runtime-target-defers-workflow-flag-off");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const runtimeTaskRegistry = new InMemoryRuntimeTaskRegistry();
+    const requests: any[] = [];
+
+    runtimeTaskRegistry.register({
+      agentId: "wf_goal_inflight_off",
+      agentType: "local_dynamic_workflow",
+      description: "fan-out verification run",
+      isBackgrounded: true,
+      startedAt: new Date(0),
+      status: "running",
+      taskId: "wf_goal_inflight_off",
+      taskType: "local_dynamic_workflow",
+      type: "local_dynamic_workflow",
+    });
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-target-defer-workflow-flag-off",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(request);
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "unexpected request while the workflow run is in flight",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        runtimeTaskRegistry,
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Wait for the run");
+    await sessionStore.setTarget({
+      objective: "Adjudicate the workflow result when it returns",
+      sessionID: sessionId,
+    });
+
     await expect(
       runtime.continueActiveTargetIfIdle({ verifyBeforeContinue: false }),
     ).resolves.toBeNull();
@@ -5618,7 +5461,10 @@ describe("AgentRuntime tool loop", () => {
     expect(requestOrder).toEqual(["first-prompt", "second-prompt", "verifier"]);
   });
 
-  it("keeps target continuation history and appends goal state change reminders on following user turns", async () => {
+  it("keeps target continuation history without injecting goal state reminders (zero-injection)", async () => {
+    // 设计 M11 零注入：goal 状态变更不再写模型上下文 reminder。goal_state_change
+    // 合成 notice 的写入路径（goal-state-reminder.ts）已删除；UI/审计由 TargetChanged
+    // 投影承担。此测试保留续跑历史覆盖，并断言后续用户回合不含 pause reminder 文本。
     const sessionId = createSessionId("runtime-target-stop-reminder-filter");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -5658,9 +5504,7 @@ describe("AgentRuntime tool loop", () => {
       sessionID: sessionId,
       status: "paused",
     });
-    await runtime.recordGoalStateChangeReminder({
-      text: "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.",
-    });
+    // 零注入：不再调用 recordGoalStateChangeReminder（该方法已删除）。
     await runtime.executeTurn("nihao");
 
     const goalContinuationRequestText = providerMessagesToText(capturedRequests[0] ?? []);
@@ -5671,650 +5515,13 @@ describe("AgentRuntime tool loop", () => {
     );
     expect(goalContinuationRequestText).toContain("<untrusted_objective>");
     expect(followupRequestText).toContain("nihao");
-    expect(followupRequestText).toContain("Continue working toward the active session goal.");
-    expect(followupRequestText).toContain(
+    // 续跑历史仍在模型上下文中（"Continue working toward the active session goal." 来自
+    // 目标状态注入），但不再有 pause reminder 文本（零注入）。
+    expect(followupRequestText).not.toContain(
       "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.",
     );
-    expect(
-      followupRequestText.indexOf("Continue working toward the active session goal."),
-    ).toBeLessThan(followupRequestText.indexOf("The active session goal is paused."));
-  });
-
-  it("keeps a paused goal state change after an interrupted target continuation", async () => {
-    const sessionId = createSessionId("runtime-target-stop-reminder-without-assistant-boundary");
-    const eventStore = createTestSessionEventStore();
-    const sessionStore = new RecordingSessionStore();
-    const continuationAbortController = new AbortController();
-    const continuationRequestStarted = deferred();
-    const capturedRequests: any[][] = [];
-    const pauseReminder =
-      "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-stop-order" },
-      {
-        eventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            capturedRequests.push(withoutAgentListingMessages(request.messages));
-            if (capturedRequests.length === 1) {
-              continuationRequestStarted.resolve();
-              await waitForAbort(request.abortSignal);
-              throw request.abortSignal.reason ?? new Error("target continuation cancelled");
-            }
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "follow-up completed",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-      },
-    );
-
-    await runtime.recordExternalUserPrompt("Interrupted target continuation");
-    await sessionStore.setTarget({
-      objective: "Interrupted target continuation",
-      sessionID: sessionId,
-    });
-    const pendingContinuation = runtime.continueActiveTargetIfIdle({
-      abortSignal: continuationAbortController.signal,
-      inputId: "client-interrupted-target-run",
-    });
-
-    await continuationRequestStarted.promise;
-    await sessionStore.updateTargetStatus({
-      sessionID: sessionId,
-      status: "paused",
-    });
-    await runtime.recordGoalStateChangeReminder({ text: pauseReminder });
-    continuationAbortController.abort(new Error("stop active goal"));
-
-    await expect(pendingContinuation).rejects.toMatchObject({
-      type: CoreErrorType.TurnCancelled,
-    });
-    await expect(runtime.executeTurn("Follow-up after Stop")).resolves.toMatchObject({
-      response: "follow-up completed",
-    });
-
-    const followupMessages = capturedRequests[1] ?? [];
-    const followupMessageTexts = followupMessages.map((message) =>
-      providerContentToText(message.content),
-    );
-    const continuationIndexes = followupMessageTexts
-      .map((text, index) =>
-        text.includes("Continue working toward the active session goal.") ? index : -1,
-      )
-      .filter((index) => index >= 0);
-    const pauseReminderIndex = followupMessageTexts.findIndex((text) =>
-      text.includes(pauseReminder),
-    );
-    const followupQueryIndex = followupMessageTexts.findIndex((text) =>
-      text.includes("Follow-up after Stop"),
-    );
-
-    expect(capturedRequests).toHaveLength(2);
-    expect(continuationIndexes).toHaveLength(1);
-    expect(continuationIndexes[0]).toBeLessThan(pauseReminderIndex);
-    expect(pauseReminderIndex).toBeLessThan(followupQueryIndex);
-    await expect(sessionStore.readTarget({ sessionID: sessionId })).resolves.toMatchObject({
-      status: "paused",
-    });
-  });
-
-  it("closes a tool call before materializing a goal pause when Stop lands before scheduling", async () => {
-    const sessionId = createSessionId("runtime-goal-pause-before-tool-scheduling");
-    const persistenceOrder: string[] = [];
-    const sessionStore = new GoalReminderOrderingSessionStore(persistenceOrder);
-    const pendingToolPartPersisted = deferred();
-    const releasePendingToolPart = deferred();
-    const savePart = sessionStore.savePart.bind(sessionStore);
-    sessionStore.savePart = async (input) => {
-      await savePart(input);
-      if (
-        input.type === "tool" &&
-        input.callID === "blocked-before-scheduling" &&
-        input.state.status === "pending"
-      ) {
-        pendingToolPartPersisted.resolve();
-        await releasePendingToolPart.promise;
-      }
-    };
-    const baseEventStore = createTestSessionEventStore();
-    const appendEvent = baseEventStore.append.bind(baseEventStore);
-    baseEventStore.append = async (event) => {
-      const stored = await appendEvent(event);
-      if (event.type === SessionEventType.TurnComplete) {
-        persistenceOrder.push("turn_terminal");
-      }
-      return stored;
-    };
-    const registry = createToolRegistry();
-    const abortController = new AbortController();
-    const capturedRequests: any[][] = [];
-    const pauseReminder =
-      "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-    let handlerStarted = false;
-    let modelCallCount = 0;
-
-    registry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "BlockedBeforeScheduling",
-        needsApproval: false,
-        readOnly: true,
-        riskLevel: "low",
-        sideEffectScope: "none",
-      },
-      handler: async () => {
-        handlerStarted = true;
-        return "unexpected tool execution";
-      },
-    });
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-goal-pause-before-scheduling" },
-      {
-        eventStore: baseEventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            capturedRequests.push(withoutAgentListingMessages(request.messages));
-            modelCallCount += 1;
-            if (modelCallCount === 1) {
-              return {
-                finishReason: "tool-calls",
-                providerMetadata: undefined,
-                text: "",
-                toolCalls: [
-                  {
-                    id: "blocked-before-scheduling",
-                    name: "BlockedBeforeScheduling",
-                    input: {},
-                  },
-                ],
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "next request completed",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-        toolRegistry: registry,
-      },
-    );
-
-    await sessionStore.setTarget({
-      objective: "Keep tool grammar closed before scheduling",
-      sessionID: sessionId,
-      status: "active",
-    });
-    const pendingTurn = runtime.executeTurn("start a tool", undefined, {
-      abortSignal: abortController.signal,
-    });
-    let pendingTurnSettled = false;
-
-    try {
-      await pendingToolPartPersisted.promise;
-      await sessionStore.updateTargetStatus({ sessionID: sessionId, status: "paused" });
-      await runtime.recordGoalStateChangeReminder({ text: pauseReminder });
-      abortController.abort(new Error("stop before tool scheduling"));
-      releasePendingToolPart.resolve();
-
-      await expect(pendingTurn).rejects.toMatchObject({
-        type: CoreErrorType.TurnCancelled,
-      });
-      pendingTurnSettled = true;
-    } finally {
-      releasePendingToolPart.resolve();
-      if (!abortController.signal.aborted) {
-        abortController.abort(new Error("test cleanup"));
-      }
-      if (!pendingTurnSettled) {
-        await pendingTurn.catch(() => undefined);
-      }
-    }
-
-    const stoppedTurnPersistenceOrder = [...persistenceOrder];
-    await expect(runtime.executeTurn("next query after early stop")).resolves.toMatchObject({
-      response: "next request completed",
-    });
-    const followupMessages = capturedRequests[1] ?? [];
-    const toolResultIndex = followupMessages.findIndex(
-      (message) => message.role === "tool" && message.toolCallId === "blocked-before-scheduling",
-    );
-    const pauseReminderIndex = followupMessages.findIndex((message) =>
-      providerContentToText(message.content).includes(pauseReminder),
-    );
-
-    expect(handlerStarted).toBe(false);
-    expect(stoppedTurnPersistenceOrder).toEqual([
-      "tool_result:blocked-before-scheduling",
-      "goal_state_change",
-      "turn_terminal",
-    ]);
-    expect(toolResultIndex).toBeGreaterThanOrEqual(0);
-    expect(pauseReminderIndex).toBeGreaterThan(toolResultIndex);
-  });
-
-  it("closes sibling tool results before a goal pause when checkpoint creation is cancelled", async () => {
-    const sessionId = createSessionId("runtime-goal-pause-during-tool-checkpoint");
-    const persistenceOrder: string[] = [];
-    const sessionStore = new GoalReminderOrderingSessionStore(persistenceOrder);
-    const checkpointStarted = deferred();
-    const artifactStore: ToolArtifactStorePort = {
-      async writeToolResultArtifact(_request, options) {
-        checkpointStarted.resolve();
-        await waitForAbort(options?.signal);
-        throw options?.signal?.reason ?? new Error("checkpoint cancelled");
-      },
-      async readToolResultArtifact(request) {
-        throw new Error(`unexpected artifact read: ${request.uri}`);
-      },
-    };
-    const baseEventStore = createTestSessionEventStore();
-    const appendEvent = baseEventStore.append.bind(baseEventStore);
-    baseEventStore.append = async (event) => {
-      const stored = await appendEvent(event);
-      if (event.type === SessionEventType.TurnComplete) {
-        persistenceOrder.push("turn_terminal");
-      }
-      return stored;
-    };
-    const registry = createToolRegistry();
-    const abortController = new AbortController();
-    const capturedRequests: any[][] = [];
-    const pauseReminder =
-      "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-    let modelCallCount = 0;
-
-    registry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "CheckpointMutation",
-        needsApproval: false,
-        readOnly: false,
-        riskLevel: "medium",
-        sideEffectScope: "workspace",
-      },
-      handler: async () => ({
-        content: "export const value = 2;\n",
-        filePath: "/tmp/zcode-goal-pause-checkpoint/src/checkpoint.ts",
-        originalFile: "export const value = 1;\n",
-        structuredPatch: [
-          {
-            oldStart: 1,
-            oldLines: 1,
-            newStart: 1,
-            newLines: 1,
-            lines: ["-export const value = 1;", "+export const value = 2;"],
-          },
-        ],
-        type: "update",
-      }),
-    });
-    registry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "CheckpointSibling",
-        needsApproval: false,
-        readOnly: true,
-        riskLevel: "low",
-        sideEffectScope: "none",
-      },
-      handler: async () => "sibling completed",
-    });
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { mode: "yolo", workingDirectory: "/tmp/zcode-goal-pause-checkpoint" },
-      {
-        artifactStore,
-        eventStore: baseEventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            capturedRequests.push(withoutAgentListingMessages(request.messages));
-            modelCallCount += 1;
-            if (modelCallCount === 1) {
-              return {
-                finishReason: "tool-calls",
-                providerMetadata: undefined,
-                text: "",
-                toolCalls: [
-                  { id: "checkpoint-mutation", name: "CheckpointMutation", input: {} },
-                  { id: "checkpoint-sibling", name: "CheckpointSibling", input: {} },
-                ],
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "next request completed",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-        toolRegistry: registry,
-      },
-    );
-
-    await sessionStore.setTarget({
-      objective: "Close sibling results around checkpoint cancellation",
-      sessionID: sessionId,
-      status: "active",
-    });
-    const pendingTurn = runtime.executeTurn("run checkpoint siblings", undefined, {
-      abortSignal: abortController.signal,
-    });
-    let pendingTurnSettled = false;
-
-    try {
-      await checkpointStarted.promise;
-      await sessionStore.updateTargetStatus({ sessionID: sessionId, status: "paused" });
-      await runtime.recordGoalStateChangeReminder({ text: pauseReminder });
-      abortController.abort(new Error("stop during checkpoint creation"));
-
-      await expect(pendingTurn).rejects.toMatchObject({
-        type: CoreErrorType.TurnCancelled,
-      });
-      pendingTurnSettled = true;
-    } finally {
-      if (!abortController.signal.aborted) {
-        abortController.abort(new Error("test cleanup"));
-      }
-      if (!pendingTurnSettled) {
-        await pendingTurn.catch(() => undefined);
-      }
-    }
-
-    const stoppedTurnPersistenceOrder = [...persistenceOrder];
-    await expect(runtime.executeTurn("next query after checkpoint stop")).resolves.toMatchObject({
-      response: "next request completed",
-    });
-    const followupMessages = capturedRequests[1] ?? [];
-    const toolResultIndexes = followupMessages
-      .map((message, index) =>
-        message.role === "tool" &&
-        (message.toolCallId === "checkpoint-mutation" ||
-          message.toolCallId === "checkpoint-sibling")
-          ? index
-          : -1,
-      )
-      .filter((index) => index >= 0);
-    const pauseReminderIndex = followupMessages.findIndex((message) =>
-      providerContentToText(message.content).includes(pauseReminder),
-    );
-
-    expect(stoppedTurnPersistenceOrder).toEqual([
-      "tool_result:checkpoint-mutation",
-      "tool_result:checkpoint-sibling",
-      "goal_state_change",
-      "turn_terminal",
-    ]);
-    expect(toolResultIndexes).toHaveLength(2);
-    expect(pauseReminderIndex).toBeGreaterThan(Math.max(...toolResultIndexes));
-  });
-
-  it("materializes a late active-turn goal pause before the terminal event", async () => {
-    const sessionId = createSessionId("runtime-goal-pause-during-terminal-persistence");
-    const persistenceOrder: string[] = [];
-    const sessionStore = new GoalReminderOrderingSessionStore(persistenceOrder);
-    const terminalPersistenceStarted = deferred();
-    const releaseTerminalPersistence = deferred();
-    const baseEventStore = createTestSessionEventStore();
-    const appendEvent = baseEventStore.append.bind(baseEventStore);
-    let blockNextTerminalEvent = true;
-    baseEventStore.append = async (event) => {
-      if (event.type === SessionEventType.TurnComplete && blockNextTerminalEvent) {
-        blockNextTerminalEvent = false;
-        terminalPersistenceStarted.resolve();
-        await releaseTerminalPersistence.promise;
-      }
-      const stored = await appendEvent(event);
-      if (event.type === SessionEventType.TurnComplete) {
-        persistenceOrder.push("turn_terminal");
-      }
-      return stored;
-    };
-    const abortController = new AbortController();
-    const capturedRequests: any[][] = [];
-    const pauseReminder =
-      "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-goal-pause-during-terminal" },
-      {
-        eventStore: baseEventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            capturedRequests.push(withoutAgentListingMessages(request.messages));
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "request completed",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-      },
-    );
-
-    await sessionStore.setTarget({
-      objective: "Persist late pause before terminal",
-      sessionID: sessionId,
-      status: "active",
-    });
-    const pendingTurn = runtime.executeTurn("complete this turn", undefined, {
-      abortSignal: abortController.signal,
-    });
-    let pendingTurnSettled = false;
-
-    try {
-      await terminalPersistenceStarted.promise;
-      await sessionStore.updateTargetStatus({ sessionID: sessionId, status: "paused" });
-      await runtime.recordGoalStateChangeReminder({ text: pauseReminder });
-      abortController.abort(new Error("stop while terminal event is pending"));
-      releaseTerminalPersistence.resolve();
-      await pendingTurn.catch(() => undefined);
-      pendingTurnSettled = true;
-    } finally {
-      releaseTerminalPersistence.resolve();
-      if (!abortController.signal.aborted) {
-        abortController.abort(new Error("test cleanup"));
-      }
-      if (!pendingTurnSettled) {
-        await pendingTurn.catch(() => undefined);
-      }
-    }
-
-    const stoppedTurnPersistenceOrder = [...persistenceOrder];
-    await expect(runtime.executeTurn("next query after late stop")).resolves.toMatchObject({
-      response: "request completed",
-    });
-    const followupMessages = capturedRequests[1] ?? [];
-    const pauseReminderIndex = followupMessages.findIndex((message) =>
-      providerContentToText(message.content).includes(pauseReminder),
-    );
-
-    expect(stoppedTurnPersistenceOrder).toEqual(["goal_state_change", "turn_terminal"]);
-    expect(pauseReminderIndex).toBeGreaterThanOrEqual(0);
-  });
-
-  it("materializes an active-turn goal pause reminder after cancelled sibling tool results", async () => {
-    const sessionId = createSessionId("runtime-goal-pause-after-tool-results");
-    const persistenceOrder: string[] = [];
-    const sessionStore = new GoalReminderOrderingSessionStore(persistenceOrder);
-    const baseEventStore = createTestSessionEventStore();
-    const appendEvent = baseEventStore.append.bind(baseEventStore);
-    baseEventStore.append = async (event) => {
-      const stored = await appendEvent(event);
-      if (event.type === SessionEventType.TurnComplete) {
-        persistenceOrder.push("turn_terminal");
-      }
-      return stored;
-    };
-    const registry = createToolRegistry();
-    const waitingToolStarted = deferred();
-    const abortController = new AbortController();
-    const capturedRequests: any[][] = [];
-    const pauseReminder =
-      "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-    const resumeReminder = "The session goal is active again and will be pursued.";
-
-    registry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "FastSibling",
-        needsApproval: false,
-        readOnly: true,
-        riskLevel: "low",
-        sideEffectScope: "none",
-      },
-      handler: async () => "fast sibling completed",
-    });
-    registry.register({
-      inputSchema: {},
-      metadata: {
-        concurrentSafe: true,
-        destructive: false,
-        name: "WaitForGoalPause",
-        needsApproval: false,
-        readOnly: true,
-        riskLevel: "low",
-        sideEffectScope: "none",
-      },
-      handler: async (_input, context: ToolExecutionContext) => {
-        waitingToolStarted.resolve();
-        await waitForAbort(context.abortSignal);
-        throw context.abortSignal.reason ?? new Error("tool cancelled");
-      },
-    });
-
-    let modelCallCount = 0;
-    const runtime = createTestAgentRuntime(
-      sessionId,
-      { mode: "build", workingDirectory: "/tmp/zcode-goal-pause-order" },
-      {
-        eventStore: baseEventStore,
-        modelFactory: createTestModelFactory({
-          async generateText(request: any) {
-            capturedRequests.push(withoutAgentListingMessages(request.messages));
-            modelCallCount += 1;
-            if (modelCallCount === 1) {
-              return {
-                finishReason: "tool-calls",
-                providerMetadata: undefined,
-                text: "",
-                toolCalls: [
-                  { id: "fast-sibling", name: "FastSibling", input: {} },
-                  { id: "waiting-sibling", name: "WaitForGoalPause", input: {} },
-                ],
-                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-              };
-            }
-            return {
-              finishReason: "stop",
-              providerMetadata: undefined,
-              text: "next request completed",
-              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            };
-          },
-        } as never),
-        sessionStore,
-        toolRegistry: registry,
-      },
-    );
-
-    await sessionStore.setTarget({
-      objective: "Pause only after tool results close",
-      sessionID: sessionId,
-      status: "active",
-    });
-    const pendingTurn = runtime.executeTurn("run sibling tools", undefined, {
-      abortSignal: abortController.signal,
-    });
-    let pendingTurnSettled = false;
-
-    try {
-      await waitingToolStarted.promise;
-      await sessionStore.updateTargetStatus({ sessionID: sessionId, status: "paused" });
-      await runtime.recordGoalStateChangeReminder({ text: pauseReminder });
-
-      expect(persistenceOrder).not.toContain("goal_state_change");
-
-      abortController.abort(new Error("stop active goal"));
-      await expect(pendingTurn).rejects.toMatchObject({
-        type: CoreErrorType.TurnCancelled,
-      });
-      pendingTurnSettled = true;
-    } finally {
-      if (!abortController.signal.aborted) {
-        abortController.abort(new Error("test cleanup"));
-      }
-      if (!pendingTurnSettled) {
-        await pendingTurn.catch(() => undefined);
-      }
-    }
-
-    expect(persistenceOrder).toEqual([
-      "tool_result:fast-sibling",
-      "tool_result:waiting-sibling",
-      "goal_state_change",
-      "turn_terminal",
-    ]);
-
-    await sessionStore.updateTargetStatus({ sessionID: sessionId, status: "active" });
-    await runtime.recordGoalStateChangeReminder({ text: resumeReminder });
-    expect(persistenceOrder).toEqual([
-      "tool_result:fast-sibling",
-      "tool_result:waiting-sibling",
-      "goal_state_change",
-      "turn_terminal",
-      "goal_state_change",
-    ]);
-
-    await expect(runtime.executeTurn("next query after stop")).resolves.toMatchObject({
-      response: "next request completed",
-    });
-    const followupMessages = capturedRequests[1] ?? [];
-    const siblingResultIndexes = followupMessages
-      .map((message, index) =>
-        message.role === "tool" &&
-        (message.toolCallId === "fast-sibling" || message.toolCallId === "waiting-sibling")
-          ? index
-          : -1,
-      )
-      .filter((index) => index >= 0);
-    const pauseReminderIndex = followupMessages.findIndex((message) =>
-      providerContentToText(message.content).includes(pauseReminder),
-    );
-    const resumeReminderIndex = followupMessages.findIndex((message) =>
-      providerContentToText(message.content).includes(resumeReminder),
-    );
-
-    expect(siblingResultIndexes).toHaveLength(2);
-    expect(pauseReminderIndex).toBeGreaterThan(Math.max(...siblingResultIndexes));
-    expect(resumeReminderIndex).toBeGreaterThan(pauseReminderIndex);
+    // 目标状态注入（authoritative goal state）仍随请求进入模型上下文。
+    expect(followupRequestText).toContain("Continue working toward the active session goal.");
   });
 
   it("does not continue targets while in plan mode", async () => {
@@ -15765,30 +14972,6 @@ class RecordingSessionStore implements SessionStorePort {
       revert: null,
       summary: null,
     });
-  }
-}
-
-class GoalReminderOrderingSessionStore extends RecordingSessionStore {
-  constructor(private readonly persistenceOrder: string[]) {
-    super();
-  }
-
-  override async savePart(input: MessagePart): Promise<void> {
-    await super.savePart(input);
-    if (
-      input.type === "tool" &&
-      (input.state.status === "completed" || input.state.status === "error")
-    ) {
-      this.persistenceOrder.push(`tool_result:${input.callID}`);
-      return;
-    }
-    if (
-      input.type === "text" &&
-      input.synthetic === true &&
-      input.metadata?.source === "goal_state_change"
-    ) {
-      this.persistenceOrder.push("goal_state_change");
-    }
   }
 }
 

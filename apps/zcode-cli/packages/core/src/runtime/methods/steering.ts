@@ -35,7 +35,6 @@ import { acceptSubmissionModelSelection, recordPublishedModelSelection } from ".
 import { createRuntimeModel } from "./runtime-model.js";
 import {
   buildUserContentFromTurn,
-  isGoalLayerEnabled,
   measureUtf8Bytes,
   MAX_TURN_STEER_INPUT_BYTES,
   previewInput,
@@ -59,22 +58,6 @@ function hasSteerInput(request: Pick<TurnSteerInput, "attachments" | "input" | "
     Boolean(request.attachments?.length) ||
     Boolean(request.intent?.conversationQuotes?.length)
   );
-}
-
-/**
- * 关旗时 inject 车道不存在:不扩 TurnSteerRejectReason 外部契约,降级为普通 queue 并
- * 记 warn。v4 wire 本就只发 queue/guide,只有嵌入方/旧会话事件会走到这里。
- */
-function degradeInjectDelivery(
-  runtime: AgentRuntimeInternal,
-  traceContext: TraceContext | undefined,
-): "queue" {
-  runtime.logger?.warn("Inject delivery is disabled by the goal layer flag; falling back to queue", {
-    ...traceContextToLogContext(traceContext ?? runtime.rootTraceContext),
-    event: "turn.steer.inject_degraded",
-    module: "core.runtime",
-  });
-  return "queue";
 }
 
 export async function steerTurn(
@@ -139,11 +122,8 @@ export async function steerTurn(
   const queryId = request.queryId ?? (request.inputId as QueryId | undefined) ?? createQueryId();
   const commandKind = request.commandKind;
   const source: TurnSteerSource | undefined = request.source;
-  // 关旗时核心不识别 inject 车道:降级 queue 并 warn(不扩外部拒收契约)。
-  const delivery =
-    request.delivery === "inject" && !isGoalLayerEnabled(this.config)
-      ? degradeInjectDelivery(this, request.traceContext)
-      : request.delivery;
+  // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
+  const delivery = request.delivery;
   const toolDisallowlist = request.toolDisallowlist;
   const queuePosition = activeTurn.pendingInputs.length;
   const intent = request.intent
@@ -275,10 +255,8 @@ export async function enqueueDeferredInput(
   const queryId = request.queryId ?? (request.inputId as QueryId | undefined) ?? createQueryId();
   const commandKind = request.commandKind;
   const source: TurnSteerSource | undefined = request.source;
-  const delivery =
-    request.delivery === "inject" && !isGoalLayerEnabled(this.config)
-      ? degradeInjectDelivery(this, request.traceContext)
-      : (request.delivery ?? "queue");
+  // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
+  const delivery = request.delivery ?? "queue";
   const toolDisallowlist = request.toolDisallowlist;
   const pendingInputId =
     request.pendingInputId ??
@@ -369,7 +347,6 @@ export function beginActiveTurn(
   }
 
   const activeTurn: ActiveTurnSteeringState = {
-    goalStateChangeReminderDeferralOpen: false,
     kind,
     pendingInputs: [],
     steerable,
@@ -1383,8 +1360,6 @@ export async function hydrateDeferredInjectInputsForTurnStart(
   events: SessionEvent[],
   traceContext: TraceContext,
 ): Promise<number> {
-  // 关旗:没有 inject 车道,回合起点也不从投影水化 inject 收件箱。
-  if (!isGoalLayerEnabled(this.config)) return 0;
   if (this.permissionFullAccessPending || this.activeTurn !== activeTurn) return 0;
   if (activeTurn.pendingInputs.length > 0) return 0;
   const projection = await this.rebuildProjection();
@@ -1463,9 +1438,10 @@ export async function discardPersistedPendingSteerInputs(
   traceContext: TraceContext,
 ): Promise<number> {
   // （重启不保留队列）：先清扫账本残留 admitted——事件日志是
-  // 内存的，崩溃后投影里什么都没有，账本是唯一痕迹（含 background wake：后台
-  // 子进程随 CLI 重启已死，其未消费通知不可恢复）。留痕（discarded/session_resumed）
-  // 不静默，用户/诊断可查「这条输入去哪了」。
+  // 内存的，崩溃后投影里什么都没有，账本是唯一痕迹（含 background wake：常规
+  // wake 不可恢复；workflow 终态窄结果另由 background-wake-refeed 在本清扫之后
+  // 按账本重投，见 docs/architecture/super-agent-wake-refeed-spec.md）。留痕
+  // （discarded/session_resumed）不静默，用户/诊断可查「这条输入去哪了」。
   try {
     const admitted =
       (await this.sessionStore?.listSessionInputs?.({

@@ -32,6 +32,27 @@ import type { ToolPermissionRulePolicy } from "../tool/types.js";
 /** 草稿免确认的规则号。 */
 const WORKFLOW_DRAFT_PREAPPROVED_RULE_ID = "tool.workflowDraft.preapproved";
 
+/** M4 例外①：控制面自会话（裁决 / watchdog-llm）的基础设施 mandateId。 */
+export const INFRASTRUCTURE_MANDATE_ID = "infrastructure";
+
+/** mandate 档位（与 super-agent-mandate 的 MandateTier 同词汇，spec §1.4）。 */
+export type PermissionMandateTier = "record_only" | "speculative" | "auto";
+
+/** prompt admission 异步解析后注入的 mandate 结论（M4：管线内只读，不再查库）。 */
+export interface PermissionMandateFacts {
+  tier: PermissionMandateTier;
+  /** 命中的显式 mandateId；基础设施豁免用 INFRASTRUCTURE_MANDATE_ID。 */
+  mandateId?: string;
+  /** epoch ms；null/缺席 = 不设过期。turn 内过期不中断，下一 admission 边界 revalidate。 */
+  expiresAt?: number | null;
+}
+
+/**
+ * 工具调用来源（M4 例外②）：user-origin 回合短路 mandate 检查；只有事件驱动的
+ * 工具调用受 mandate fail-closed 门约束。缺省按 user 处理（flag 关字节兼容）。
+ */
+export type PermissionOrigin = "user" | "event";
+
 export interface PermissionContext {
   toolName: string;
   input: unknown;
@@ -44,6 +65,10 @@ export interface PermissionContext {
    * 可选：拿不到工作目录的调用方照常按其余规则判定，不会因此少一层确认。
    */
   workingDirectory?: string;
+  /** M4：prompt admission 注入的 mandate 结论；flag 关/用户回合时缺席。 */
+  mandate?: PermissionMandateFacts;
+  /** M4 例外②：缺省 user（既有调用方零行为变化）；事件驱动回合必须显式 event。 */
+  origin?: PermissionOrigin;
 }
 
 export interface PermissionToolCapability {
@@ -105,6 +130,10 @@ export class PermissionService {
     rulePolicy?: ToolPermissionRulePolicy,
   ): PermissionDecisionResult {
     const capability = this.resolveCapability(context, toolCapability);
+    // M4：mandate 同步 fail-closed 门——插入点必须在 plan-transition 解析之前（管线最前端）。
+    // 只认 admission 注入的 typed 结论，本层不查库（同步管线无法查库）。
+    const mandateGate = this.resolveMandateGate(context, capability);
+    if (mandateGate) return mandateGate;
     const planModeTransition = resolvePlanModeTransitionPermission(context);
 
     if (planModeTransition) {
@@ -263,6 +292,62 @@ export class PermissionService {
     }
 
     return this.checkBuildMode(context, capability);
+  }
+
+  /**
+   * M4 mandate 同步 fail-closed 门（设计原文三条例外）：
+   * - ② origin=user 回合短路（缺省 user，既有调用方零行为变化）；
+   * - ① 基础设施 mandateId（裁决 / watchdog-llm 自会话）豁免；
+   * - 写操作要求显式有效 mandate：缺失 / 过期 / record_only ⇒ deny；
+   *   speculative/auto 且缺 mandateId ⇒ deny（例外③：originMeta 必带 mandateId）。
+   * 只读（无副作用的 none 域）工具不受限：mandate 管「这件事轮不轮到你主动做」，
+   * 不是读工具闸。返回 undefined = 放行到后续既有管线。
+   */
+  private resolveMandateGate(
+    context: PermissionContext,
+    capability: ResolvedPermissionCapability,
+  ): PermissionDecisionResult | undefined {
+    if ((context.origin ?? "user") !== "event") return undefined;
+    if (!this.isWriteOperation(capability)) return undefined;
+    const mandate = context.mandate;
+    if (mandate?.mandateId === INFRASTRUCTURE_MANDATE_ID) return undefined;
+    if (!mandate) {
+      return this.deny(
+        context,
+        capability,
+        "mandate.missing",
+        "Event-origin tool call has no mandate verdict (fail-closed)",
+      );
+    }
+    if (mandate.expiresAt != null && mandate.expiresAt <= Date.now()) {
+      return this.deny(
+        context,
+        capability,
+        "mandate.expired",
+        "Mandate expired; revalidation is required at the next admission boundary",
+      );
+    }
+    if (mandate.tier === "record_only") {
+      return this.deny(
+        context,
+        capability,
+        "mandate.recordOnly",
+        "Record-only mandate cannot execute write operations",
+      );
+    }
+    if (!mandate.mandateId) {
+      return this.deny(
+        context,
+        capability,
+        "mandate.missingId",
+        "Speculative/auto turn must carry a mandateId",
+      );
+    }
+    return undefined;
+  }
+
+  private isWriteOperation(capability: ResolvedPermissionCapability): boolean {
+    return capability.destructive || !capability.readOnly || capability.sideEffectScope !== "none";
   }
 
   private matchesProjectRules(

@@ -24,6 +24,15 @@ export {
   type SessionConfigState,
   type SessionModelTransition,
 } from "./session-config.js";
+import { pendingWouldAcceptCardSchema } from "./would-accept.js";
+export {
+  pendingWouldAcceptCardSchema,
+  wouldAcceptSourceSchema,
+  wouldAcceptSuggestedTierSchema,
+  type PendingWouldAcceptCard,
+  type WouldAcceptSource,
+  type WouldAcceptSuggestedTier,
+} from "./would-accept.js";
 // ── SessionControl ──
 export const sessionPhaseSchema = z.enum([
   // draft 裁决保留——纯内存态、sessions-index 可见、无 row、
@@ -536,6 +545,16 @@ export const conversationSnapshotSchema = z.object({
   // 旧快照/旧发送端不携带此字段 → 解析得 null,不破坏兼容性(遵守冻结规则)。
   // pendingCount === 0 时投影层置 null(提示条消失)。
   workspaceHookAdmission: workspaceHookAdmissionStateSchema.nullable().default(null),
+  // would-accept 收件箱（Phase 2，spec §5.5）：additive-optional。
+  // 刻意不带 default——键缺席 = 旧发送端未发布该投影（unknown≠0，UI 不得渲染成
+  // 「空收件箱」）；显式 [] 才是「已发布且零卡片」的空态。
+  pendingWouldAccept: z.array(pendingWouldAcceptCardSchema).optional(),
+  // spec §5.4 的 P2 additive 槽位：只定键名不填值（P2 零生产者零消费者，unknown≠0
+  // 语义同上——缺席=未知）。[] 形状来自 spec 记法，mandateState 形状未定先用 unknown
+  // 占位；后续各期到货时按同一纪律原位升级形状，键名已在 git 冻结、不再重走评估。
+  mandateState: z.unknown().optional(),
+  backgroundRuns: z.array(z.unknown()).optional(),
+  watchdogAlerts: z.array(z.unknown()).optional(),
   // （2026-09-12）：原 additive 字段 pluginUiSurfaces 已删除，插件面板 widgetState 只留在
   // 宿主 renderer 内存。
   // B 区

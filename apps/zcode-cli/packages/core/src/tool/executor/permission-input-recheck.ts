@@ -40,6 +40,11 @@ export function recheckPermissionHookModifiedInput(input: {
     toolName: input.toolCall.name,
     // 与首次判定同源：hook 改过 input 之后，草稿免确认仍要按同一个工作目录复核。
     workingDirectory,
+    // M4：mandate 结论与 origin 复用首次判定上下文，hook 不能靠改 input 绕过事件门。
+    ...(runtimePermissionContext.mandate
+      ? { mandate: runtimePermissionContext.mandate }
+      : {}),
+    ...(runtimePermissionContext.origin ? { origin: runtimePermissionContext.origin } : {}),
   };
   const rulePolicy = input.entry.resolvePermissionRulePolicy?.(
     input.modifiedInput,

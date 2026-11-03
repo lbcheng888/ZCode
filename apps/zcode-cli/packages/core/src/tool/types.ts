@@ -437,6 +437,17 @@ export interface ToolRuntimePermissionCapabilityContext {
   runtimeScope?: ToolRuntimeScope;
   workingDirectory?: string;
   workspaceRoot?: string;
+  /**
+   * M4：本回合 prompt admission 解析的 mandate 结论（结构 = PermissionMandateFacts）。
+   * 首次判定与 hook 修改输入后的 recheck 必须复用同一份结论，不能各自重新推导。
+   */
+  mandate?: {
+    tier: "record_only" | "speculative" | "auto";
+    mandateId?: string;
+    expiresAt?: number | null;
+  };
+  /** M4 例外②：user-origin 回合短路 mandate 门；缺省按 user 处理。 */
+  origin?: "user" | "event";
 }
 
 export interface ToolExecutionModelContext {

@@ -86,8 +86,10 @@ export function resolveRuntimeDynamicWorkflowToolsIncluded(runtime: {
 }
 
 /**
- * goal 灰度旗在 registerBuiltInTools 上的取值。**缺席即关闭**：只有 goalLayerEnabled 显式为
- * true 才把 GoalCreate/GoalUpdate/GoalBlock 放进模型工具面。两个注册入口共用这一推导。
+ * goal 灰度旗在 registerBuiltInTools 上的取值。字段极性**缺席即关闭**：只有
+ * goalLayerEnabled 显式为 true 才把 GoalCreate/GoalUpdate/GoalBlock 放进模型工具面
+ * （产品默认开启由配置解析链播种 features.goalLayer=true 后写入该字段，见 types.ts 注释）。
+ * 两个注册入口共用这一推导。
  */
 export function resolveRuntimeGoalToolsIncluded(runtime: {
   config: AgentRuntimeConfig;

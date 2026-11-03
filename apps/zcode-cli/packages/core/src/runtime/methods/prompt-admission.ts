@@ -1,15 +1,10 @@
-import {
-  createChildTraceContext,
-  createQueryId,
-  createTurnId,
-  traceContextToLogContext,
-} from "../deps.js";
+import { createChildTraceContext, createQueryId, createTurnId } from "../deps.js";
 import type { QueryId, TurnInputIntentMetadata } from "../deps.js";
 import type { PromptRuntimeCommand } from "../command-queue.js";
 import { createRuntimeCommandId } from "../command-queue.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
-import { isGoalLayerEnabled } from "../helpers/index.js";
 import { acceptSubmissionModelSelection, captureHighspeedFallbackSelection } from "./turn-model.js";
 import type {
   ActiveTurnStartReservation,
@@ -18,6 +13,24 @@ import type {
   PromptAdmissionReceipt,
   TurnResult,
 } from "../types.js";
+
+// 触发来源枚举与 wire schema 同源（设计 §7 Upgrade / spec §2.2「三处合同同步」）：
+// 枚举定义在 shared command.ts 的 promptTriggerSourceSchema，本文件只再导出 + 提供
+// 信封→来源的唯一推导函数，禁止在 admission 侧另写字面量枚举。
+export type { PromptTriggerSource };
+
+/**
+ * wire 信封 → prompt-admission 触发来源。envelope.triggerId 存在（非空）即
+ * super-agent EventRouter / human-explicit 分派器投递；缺省 = 宿主/用户直接输入。
+ * 组合根把信封映射进 admission options 时必须经本函数，不得自行判断字符串。
+ */
+export function promptTriggerSourceOf(envelope: {
+  triggerId?: string | null;
+}): PromptTriggerSource {
+  return typeof envelope.triggerId === "string" && envelope.triggerId.trim().length > 0
+    ? "trigger"
+    : "user";
+}
 
 /**
  * 每个 AgentRuntime 自己完成 prompt 的 admission：检查 busy 边界、建立 reservation、
@@ -58,17 +71,8 @@ export async function admitPrompt(
   const busy = this.hasActiveOrQueuedTurnWork() && !promotionLeaseOnly;
   // inject 目标(设计 §3.5):绝不唤醒——不 start turn、不占跑道。idle 时只落
   // next-step 收件箱,由下一个真正起跑的回合在其首个 step 边界消费。
-  // 关旗时核心不识别该车道:不落 inject 收件箱、不 steer inject,按普通 queue 准入,
-  // 并记 warn(不扩 TurnSteerRejectReason 外部契约)。
-  const injectRequested = options?.queueDelivery === "inject";
-  const wantsInject = injectRequested && isGoalLayerEnabled(this.config);
-  if (injectRequested && !wantsInject) {
-    this.logger?.warn("Inject delivery is disabled by the goal layer flag; admitting as queue", {
-      ...traceContextToLogContext(options?.traceContext ?? this.rootTraceContext),
-      event: "prompt.admission.inject_degraded",
-      module: "core.runtime",
-    });
-  }
+  // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
+  const wantsInject = options?.queueDelivery === "inject";
   if (!busy && wantsInject) {
     return await this.enqueueDeferredInput({
       attachments,

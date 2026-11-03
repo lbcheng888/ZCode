@@ -247,6 +247,16 @@ export interface ToolExecutorDeps {
   deliveryKind?: "desktop-continuous" | "web-remote-replayable";
   getMemoryRoot?: () => string | undefined;
   runtimeScope: ToolRuntimeScope;
+  /**
+   * M4：本回合 admission 解析的 mandate 结论与来源。runtime 在事件驱动回合注入；
+   * 缺省（）= 既有调用方零行为变化，权限层按 user-origin 短路。
+   */
+  permissionMandate?: {
+    tier: "record_only" | "speculative" | "auto";
+    mandateId?: string;
+    expiresAt?: number | null;
+  };
+  permissionOrigin?: "user" | "event";
   traceContext?: TraceContext;
   getMode: () => CollaborationMode;
   maxConcurrency: number;

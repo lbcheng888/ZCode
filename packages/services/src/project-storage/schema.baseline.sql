@@ -51,6 +51,25 @@ CREATE TABLE automations (
         updated_at INTEGER NOT NULL
       , project_id TEXT, host_id TEXT, additional_directories TEXT);
 
+CREATE TABLE dispatch_requests (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    command_id TEXT NOT NULL UNIQUE,
+    workspace_identity TEXT NOT NULL,
+    session_id TEXT,
+    payload TEXT,
+    status TEXT NOT NULL,
+    skip_reason TEXT,
+    dispatch_policy TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_at INTEGER,
+    pushed_at INTEGER,
+    acked_at INTEGER,
+    settled_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
 CREATE TABLE hosts (
  host_id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_json TEXT, membership_id TEXT,
  position INTEGER NOT NULL DEFAULT 0, last_connection_status TEXT, last_connection_error TEXT, last_opened_at INTEGER);
@@ -193,6 +212,12 @@ CREATE INDEX idx_automations_target_task ON automations(target_task_id) WHERE ta
 
 CREATE INDEX idx_automations_workspace
       ON automations (workspace_key);
+
+CREATE INDEX idx_dispatch_requests_status_updated
+  ON dispatch_requests (status, updated_at);
+
+CREATE INDEX idx_dispatch_requests_workspace_status
+  ON dispatch_requests (workspace_identity, status);
 
 CREATE UNIQUE INDEX idx_off_peak_bound_active ON off_peak_tasks(workspace_key,session_id) WHERE session_id IS NOT NULL AND status NOT IN ('completed','failed','cancelled');
 

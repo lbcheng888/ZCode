@@ -94,8 +94,9 @@ it("SILENTDB-01/02: reports maintenance separately and no migration for a prepar
       expect.objectContaining({
         migration: {
           kind: "initialize",
-          executedCount: 5,
-          committedCount: 5,
+          // 0007_dispatch_requests（§1.6 派发桥）计入 base 账本。
+          executedCount: 6,
+          committedCount: 6,
           lastAppliedMigrationId: null,
         },
       }),
@@ -104,7 +105,7 @@ it("SILENTDB-01/02: reports maintenance separately and no migration for a prepar
     await prepareTasksIndexStorage(path, (phase, migration) => second.push({ phase, migration }));
     expect(second.some((s) => s.phase === "migrating")).toBe(false);
     expect(second.at(-1)).toMatchObject({
-      migration: { lastAppliedMigrationId: "0006_task_group_admissions" },
+      migration: { lastAppliedMigrationId: "0007_dispatch_requests" },
     });
     expect(second.some((s) => s.phase === "maintaining")).toBe(true);
     expect(second).toContainEqual(
@@ -135,8 +136,8 @@ it("retains committed facts if closing the migration connection fails", async ()
     expect(states.at(-1)).toMatchObject({
       migration: {
         kind: "initialize",
-        executedCount: 5,
-        committedCount: 5,
+        executedCount: 6,
+        committedCount: 6,
         lastAppliedMigrationId: null,
       },
     });
@@ -188,7 +189,8 @@ it("keeps the pre-upgrade task ledger ID after committing the remaining migratio
         kind: "upgrade",
         executedCount: 1,
         committedCount: 1,
-        lastAppliedMigrationId: "0004_project_execution_scopes",
+        // 账本里 0007_dispatch_requests 保持已应用，基线 = 删除 0006 后账本最大 id。
+        lastAppliedMigrationId: "0007_dispatch_requests",
       },
     });
   } finally {

@@ -406,6 +406,8 @@ async function executeToolCallImpl(
         ...(guardedWorkingDirectory === undefined
           ? {}
           : { workingDirectory: guardedWorkingDirectory }),
+        ...(deps.permissionMandate ? { mandate: deps.permissionMandate } : {}),
+        ...(deps.permissionOrigin ? { origin: deps.permissionOrigin } : {}),
       },
     );
     if (!permissionResult.allowed) {

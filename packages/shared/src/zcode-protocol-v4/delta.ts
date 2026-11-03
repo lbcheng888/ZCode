@@ -29,6 +29,7 @@ import {
   subagentProjectionStateSchema,
   workspaceHookAdmissionStateSchema,
 } from "./snapshot.js";
+import { pendingWouldAcceptCardSchema } from "./would-accept.js";
 import {
   WORKFLOW_RUNS_LIMITS,
   workflowRunActorSchema,
@@ -61,6 +62,14 @@ export const statePatchSchema = z.object({
   plan: planStateSchema.nullable().optional(),
   // 软门禁：null = pending 清零(提示条消失);对象 = 待审核状态更新。
   workspaceHookAdmission: workspaceHookAdmissionStateSchema.nullable().optional(),
+  // would-accept 收件箱：键级整体替换。optional 缺席 = 不碰该键（coalesce 浅合并安全）；
+  // 语义与快照一致——缺席是 unknown，显式 [] 才是空态清零。
+  pendingWouldAccept: z.array(pendingWouldAcceptCardSchema).optional(),
+  // spec §5.4 P2 additive 槽位（与快照同名同形冻结；P2 无生产者）：StatePatch 是封闭
+  // 键集，只冻快照不冻这里，后续期发增量时还得重走一遍 closed-set 偏斜评估。
+  mandateState: z.unknown().optional(),
+  backgroundRuns: z.array(z.unknown()).optional(),
+  watchdogAlerts: z.array(z.unknown()).optional(),
 });
 export type StatePatch = z.infer<typeof statePatchSchema>;
 

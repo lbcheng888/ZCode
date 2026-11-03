@@ -62,10 +62,6 @@ import { finishOutputTokenRecovery } from "./turn-output-token-continuation.js";
 import { recordTurnUsageFact } from "./usage-observability.js";
 import { persistStableForkCompletionBoundary } from "./stable-fork-boundary.js";
 import {
-  closeGoalStateChangeReminderDeferral,
-  openGoalStateChangeReminderDeferral,
-} from "./goal-state-reminder.js";
-import {
   disposeProjectMemoryRecallPrefetch,
   startProjectMemoryRecallPrefetch,
 } from "../helpers/project-memory-recall.js";
@@ -903,14 +899,12 @@ export async function executeTurnCommand(
           userMessageId,
         };
 
-        openGoalStateChangeReminderDeferral(activeTurn);
         phaseStartedAt = startTurnPhase("regular_turn_loop");
         try {
           await runRegularTurnLoop.call(this, loopState);
           completeTurnPhase("regular_turn_loop", phaseStartedAt);
         } finally {
           finishOutputTokenRecovery(loopState.turnRequestState);
-          await closeGoalStateChangeReminderDeferral.call(this, activeTurn, turnTraceContext);
         }
         turnMachine = loopState.turnMachine;
 

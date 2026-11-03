@@ -3,7 +3,7 @@
 import type { CommandCenterApp } from "./command-center.js";
 import { listAppEffortOptions } from "./command-center/effort-options.js";
 import type { TuiPromptHandler } from "./tui-command-state.js";
-import type { TuiSessionMetadata } from "@zcode/tui";
+import { WouldAcceptUnavailableError, type TuiSessionMetadata } from "@zcode/tui";
 
 export async function readTuiSessionMetadata(app: CommandCenterApp): Promise<TuiSessionMetadata> {
   const modelOptions = (await app.listModels?.()) ?? [];
@@ -74,5 +74,22 @@ export const attachTuiAppQueries = (
     // 与 v4 冷物化同一条链：journal → 与 live
     // 同一种进度载荷 → 镜像的共享 reducer。
     return (await activeApp.replayDynamicWorkflowRuns?.(input)) ?? [];
+  };
+
+  // would-accept 可见面最后一公里（spec §8-11）：数据源 = 控制面读面（列表）与
+  // 批转写面（promote），不经快照中转——缺席（flag 关/宿主未注入）抛类型化
+  // unavailable，命令侧与缝缺席走同一如实呈现，不返回空表冒充「零卡片」。
+  submitPrompt.listWouldAcceptCards = async () => {
+    const activeApp = await getApp();
+    const plane = activeApp.superAgentControlPlane;
+    if (!plane) throw new WouldAcceptUnavailableError();
+    return plane.listPendingWouldAccept();
+  };
+
+  submitPrompt.promoteWouldAcceptCard = async (cardId) => {
+    const activeApp = await getApp();
+    const plane = activeApp.superAgentControlPlane;
+    if (!plane) throw new WouldAcceptUnavailableError();
+    await plane.promoteWouldAccept(cardId);
   };
 };

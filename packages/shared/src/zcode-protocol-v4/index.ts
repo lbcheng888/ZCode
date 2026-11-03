@@ -45,6 +45,7 @@ export * from "./command.js";
 export * from "./workflow-run-settings-command.js";
 export * from "./shared-context-ref.js";
 export * from "./shared-context-import.js";
+export * from "./would-accept.js";
 export * from "./input-intent.js";
 export * from "./submission.js";
 export * from "./fork.js";

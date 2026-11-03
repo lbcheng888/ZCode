@@ -2,6 +2,11 @@ import React from "react";
 import type { ModelSelection } from "@zcode/shared";
 import type { SessionEvent, TurnId } from "@zcode/contracts";
 import { submitDuringActiveTurn, submitIdleTurn } from "./app-submit.js";
+import {
+  parseWouldAcceptCommand,
+  submitWouldAcceptInboxCommand,
+  submitWouldAcceptPromoteCommand,
+} from "./app-would-accept.js";
 import type {
   DraftAttachment,
   Message,
@@ -43,6 +48,30 @@ export function useSubmitValue(input: {
       const modelSelection = input.resolveSubmittedModel?.(submittedValue);
       if (!text) {
         input.setStatus(input.emptyPromptStatus);
+        return;
+      }
+
+      // `/would-accept`（list）与 `/would-accept promote <cardId>` 是本地命令：
+      // 不进模型、不建回合，busy 时也可用。
+      const wouldAccept = parseWouldAcceptCommand(text);
+      if (wouldAccept) {
+        input.setDraftValue("");
+        input.setSelection(undefined);
+        input.setSlashSelection(undefined);
+        if (wouldAccept.kind === "list") {
+          await submitWouldAcceptInboxCommand({
+            listWouldAcceptCards: input.options.listWouldAcceptCards,
+            setMessages: input.setMessages,
+            setStatus: input.setStatus,
+          });
+        } else {
+          await submitWouldAcceptPromoteCommand({
+            cardId: wouldAccept.cardId,
+            promoteWouldAcceptCard: input.options.promoteWouldAcceptCard,
+            setMessages: input.setMessages,
+            setStatus: input.setStatus,
+          });
+        }
         return;
       }
 
