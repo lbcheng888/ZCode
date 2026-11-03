@@ -31,10 +31,12 @@
         "**/apps/zcode-cli/packages/core/src/runtime/methods/steering.ts",
         "**/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts",
         "**/apps/zcode-cli/packages/core/src/runtime/methods/turn-model-step.ts",
+        "**/apps/zcode-cli/packages/core/src/tool/executor/background-tasks.ts",
         // core 包内以 --no-ignore 运行时，oxlint 按 cwd 相对路径匹配同一组存量文件。
         "src/runtime/methods/steering.ts",
         "src/runtime/methods/turn.ts",
         "src/runtime/methods/turn-model-step.ts",
+        "src/tool/executor/background-tasks.ts",
         "**/packages/ui/src/remote-connection-flow/index.ts"
       ],
       "rules": {
