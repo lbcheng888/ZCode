@@ -5,6 +5,7 @@
 import { z } from "zod";
 
 import type { MessageId, PartId, ToolCallId, TraceId, TurnId } from "../interfaces/shared.js";
+import { RecallResourceIdSchema } from "../tools/recall.js";
 
 export const CompactTrigger = {
   Manual: "manual",
@@ -176,6 +177,27 @@ export type CompactPreservedSegment = {
   tailMessageId: MessageId;
 };
 
+/**
+ * compact 结构化恢复指针（M9）：摘要里强制输出的机器可读 anchor，
+ * 随 CompactionPart.compactBoundary 持久化，compact 后与 resume 时由程序重挂。
+ * recallSeedIds 只许是真实见过的 Recall 资源 ID（zod refine 挡住模型编造的形态）。
+ */
+export const compactRecoveryPointerSchema = z
+  .object({
+    objective: z.string().min(1).max(4_000),
+    criterion: z.string().min(1).max(4_000),
+    fileMap: z.array(z.string().min(1).max(512)).max(64).default([]),
+    openQuestions: z.array(z.string().min(1).max(1_000)).max(32).default([]),
+    recallSeedIds: z.array(RecallResourceIdSchema).max(32).default([]),
+  })
+  .strict();
+
+export type CompactRecoveryPointer = z.infer<typeof compactRecoveryPointerSchema>;
+
+export function parseCompactRecoveryPointer(input: unknown): CompactRecoveryPointer {
+  return compactRecoveryPointerSchema.parse(input);
+}
+
 export const compactBoundaryPayloadSchema = z
   .object({
     boundaryId: z.string().min(1),
@@ -212,6 +234,8 @@ export const compactBoundaryPayloadSchema = z
     keptMessageCount: z.number().int().nonnegative().optional(),
     lastSummarizedMessageId: z.string().min(1).optional(),
     preservedSegment: compactPreservedSegmentSchema.optional(),
+    // M9 结构化恢复指针：旧 boundary 无此字段，strict schema 仍解析通过（向后兼容）。
+    recoveryPointer: compactRecoveryPointerSchema.optional(),
     summaryMessageIds: z.array(z.string().min(1)).default([]),
     attachmentMessageIds: z.array(z.string().min(1)).optional(),
     hookResultMessageIds: z.array(z.string().min(1)).optional(),

@@ -1,3 +1,8 @@
+import {
+  compactRecoveryPointerSchema,
+  type CompactRecoveryPointer,
+} from "@zcode/contracts";
+
 const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
 - Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
@@ -42,6 +47,15 @@ Your summary should include the following sections:
 8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
                        If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
+10. Recovery Pointer (REQUIRED): End your <summary> with a machine-readable block on its own lines, exactly in this form:
+
+<recovery_pointer>
+{"objective":"<1-2 sentences: the user's primary objective>","criterion":"<how completion will be judged, verifiable outcomes>","fileMap":["<paths most critical to continuing the work>"],"openQuestions":["<unresolved questions blocking progress>"],"recallSeedIds":["<stable resource ids you actually saw in this conversation>"]}
+</recovery_pointer>
+
+   - objective / criterion are plain strings; fileMap / openQuestions / recallSeedIds are JSON arrays (use [] when empty).
+   - recallSeedIds must be ids you really saw (forms like target:..., wf-run:..., session:..., artifact:...). Never invent ids; use [] if you saw none.
+   - The runtime reads this block after compaction to restore the anchor. Do not wrap it in markdown code fences.
 
 Here's an example of how your output should be structured:
 
@@ -162,4 +176,63 @@ ${formatCompactSummary(summary)}`;
   }
 
   return message;
+}
+
+const RECOVERY_POINTER_BLOCK_PATTERN =
+  /<recovery_pointer>\s*([\s\S]*?)\s*<\/recovery_pointer>/i;
+
+export interface ExtractCompactRecoveryPointerResult {
+  /** 剥离指针块之后的原文（喂给 formatCompactSummary 的输入）。 */
+  text: string;
+  pointer?: CompactRecoveryPointer;
+  /** 块在场但 JSON/schema 非法时的诊断片段——调用方落 warn，不失败 compact。 */
+  invalid?: string;
+}
+
+/**
+ * 从 compact 模型原文剥离 <recovery_pointer> 块并解析（M9）。
+ * 宽进：块缺失 → 无指针；块在场但 JSON/schema 非法 → invalid 诊断 + 无指针。
+ * 决策记录见 docs/architecture/super-agent-context-recall-spec.md §7：
+ * compact 失败在 context-exceeded 场景会楔死会话，指针是增强不是 compact 的核心契约。
+ */
+export function extractCompactRecoveryPointer(rawText: string): ExtractCompactRecoveryPointerResult {
+  const match = RECOVERY_POINTER_BLOCK_PATTERN.exec(rawText);
+  if (!match) return { text: rawText };
+
+  const raw = match[1].trim();
+  const text = rawText.replace(RECOVERY_POINTER_BLOCK_PATTERN, "").trim();
+  try {
+    const parsed = compactRecoveryPointerSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) return { text, pointer: parsed.data };
+    return { text, invalid: parsed.error.issues.map((issue) => issue.message).join("; ") };
+  } catch (error) {
+    return { text, invalid: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * 重挂 anchor 时给模型的固定投影。compact 后的 post-compact reminder 与 resume 冷恢复
+ * 的 attachment 共用这一个实现——两处措辞分叉会让模型以为是两份不同的上下文。
+ */
+export function formatCompactRecoveryPointerForModel(pointer: CompactRecoveryPointer): string {
+  const lines = [
+    "Recovery anchor (restored after compaction; authoritative continuation context):",
+    "Objective:",
+    `<recovery_objective>${pointer.objective}</recovery_objective>`,
+    "Completion criterion:",
+    `<recovery_criterion>${pointer.criterion}</recovery_criterion>`,
+  ];
+  if (pointer.fileMap.length > 0) {
+    lines.push("Critical files:", ...pointer.fileMap.map((entry) => `- ${entry}`));
+  }
+  if (pointer.openQuestions.length > 0) {
+    lines.push("Open questions:", ...pointer.openQuestions.map((entry) => `- ${entry}`));
+  }
+  if (pointer.recallSeedIds.length > 0) {
+    lines.push(
+      "Recall seed ids (full resources are outside the context window; call Recall with these ids to reload them):",
+      ...pointer.recallSeedIds.map((entry) => `- ${entry}`),
+    );
+  }
+  return lines.join("\n");
 }

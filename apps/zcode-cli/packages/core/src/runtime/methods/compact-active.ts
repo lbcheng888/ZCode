@@ -53,8 +53,13 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import type { CompactAttemptOutcome } from "./turn-loop-state.js";
 import {
   legacySyntheticRuntimeMetadata,
+  systemReminderAttachmentEntry,
   type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
+import {
+  extractCompactRecoveryPointer,
+  formatCompactRecoveryPointerForModel,
+} from "../../compact/prompt.js";
 import { selectPersistedCompactTail } from "../helpers/compact-preservation.js";
 import {
   buildCompactSummaryRequestMessages,
@@ -516,7 +521,27 @@ async function compactActiveConversationImpl(
         break;
       }
 
-      const summary = formatCompactSummaryOrThrow(this, result);
+      // M9 结构化恢复指针：先从模型原文剥离 <recovery_pointer> 块再做摘要格式化。
+      // 宽进（缺失/非法只 warn 不失败）的决策记录见 super-agent-context-recall-spec.md §7。
+      const extractedPointer = extractCompactRecoveryPointer(result.text);
+      if (extractedPointer.invalid !== undefined) {
+        this.logger?.warn("Compact recovery pointer block was present but invalid", {
+          ...traceContextToLogContext(modelTraceContext),
+          event: "compact.recovery_pointer.invalid",
+          invalidDetail: extractedPointer.invalid,
+          module: "core.runtime",
+        });
+      } else if (extractedPointer.pointer === undefined) {
+        this.logger?.warn("Compact summary did not include a recovery pointer block", {
+          ...traceContextToLogContext(modelTraceContext),
+          event: "compact.recovery_pointer.missing",
+          module: "core.runtime",
+        });
+      }
+      const summary = formatCompactSummaryOrThrow(this, {
+        ...result,
+        text: extractedPointer.text,
+      });
       const persistedSummary = summary;
       const planFileReferenceEntry = this.fileSystemPort
         ? await readApprovedPlanFileReferenceEntry({
@@ -559,6 +584,16 @@ async function compactActiveConversationImpl(
           readFileState: this.readFileState,
         }),
         ...(toolAnnouncement ? [toolAnnouncement] : []),
+        // M9 重挂路径一：指针合法时当场把结构化 anchor 交回模型（与 read-state 提醒
+        // 同族、同持久化通道）；boundary 上的 recoveryPointer 是它的持久化权威。
+        ...(extractedPointer.pointer
+          ? [
+              systemReminderAttachmentEntry(
+                "resume_referenced_session_context",
+                formatCompactRecoveryPointerForModel(extractedPointer.pointer),
+              ),
+            ]
+          : []),
       ];
 
       const modelCompleteEvent = this.createEvent(
@@ -601,31 +636,38 @@ async function compactActiveConversationImpl(
         useMidConversationSystem,
       });
       const providerPostCompactTokenCount = getUsageTotalTokens(result.usage);
-      const compactBoundary = buildManualCompactBoundary({
-        ...discovery,
-        autoCompactThreshold: options.autoCompactThreshold,
-        compactReason,
-        customInstructions,
-        lastSummarizedMessageId,
-        phase,
-        postCompactTokenCount: providerPostCompactTokenCount,
-        preCompactTokenCount,
-        summarizedMessageCount: entriesToSummarize.length,
-        summaryMessageId,
-        traceContext: turnTraceContext,
-        trigger,
-        ...(currentSelection.groupsPreserved > 0
-          ? {
-              keptMessageCount: preservation.keptMessageCount,
-            }
+      const compactBoundary = {
+        ...buildManualCompactBoundary({
+          ...discovery,
+          autoCompactThreshold: options.autoCompactThreshold,
+          compactReason,
+          customInstructions,
+          lastSummarizedMessageId,
+          phase,
+          postCompactTokenCount: providerPostCompactTokenCount,
+          preCompactTokenCount,
+          summarizedMessageCount: entriesToSummarize.length,
+          summaryMessageId,
+          traceContext: turnTraceContext,
+          trigger,
+          ...(currentSelection.groupsPreserved > 0
+            ? {
+                keptMessageCount: preservation.keptMessageCount,
+              }
+            : {}),
+          preservedSegment: preservation.preservedSegment,
+          truePostCompactTokenCount,
+          willRetriggerNextTurn:
+            options.autoCompactThreshold !== undefined
+              ? truePostCompactTokenCount >= options.autoCompactThreshold
+              : undefined,
+        }),
+        // M9：recoveryPointer 随 CompactionPart.compactBoundary 持久化（不改 boundary
+        // 恢复/切片语义；resume 冷恢复从 active part 反查它重挂 anchor）。
+        ...(extractedPointer.pointer
+          ? { recoveryPointer: extractedPointer.pointer }
           : {}),
-        preservedSegment: preservation.preservedSegment,
-        truePostCompactTokenCount,
-        willRetriggerNextTurn:
-          options.autoCompactThreshold !== undefined
-            ? truePostCompactTokenCount >= options.autoCompactThreshold
-            : undefined,
-      });
+      };
 
       // 发现检查点跟随 summary 原子保存；持久化成功后才替换 Runtime 历史。
       await this.persistCompactSummary(

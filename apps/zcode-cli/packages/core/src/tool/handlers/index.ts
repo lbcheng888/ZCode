@@ -67,6 +67,7 @@ import { fillWorkflowHoleToolEntry } from "./fill-workflow-hole.js";
 import { taskOutputToolEntry } from "./task-output.js";
 import { taskStopToolEntry } from "./task-stop.js";
 import { readSessionContextToolEntry } from "./read-session-context.js";
+import { recallToolEntry } from "./recall.js";
 import { amendWorkflowToolEntry } from "./amend-workflow.js";
 import { createWorkflowToolEntry } from "./create-workflow.js";
 import { saveWorkflowToolEntry } from "./save-workflow.js";
@@ -120,6 +121,9 @@ export const builtInTools: ToolEntry[] = [
   taskOutputToolEntry,
   taskStopToolEntry,
   readSessionContextToolEntry,
+  // M9 引用图链式召回：与 ReadSessionContext 同档的常驻只读发现面（ToolSearch 下非
+  // resident）。裁决回合与 worker 都可用——只读、scope 过滤，没有可关的门。
+  recallToolEntry,
   replyToChannelToolEntry,
   agentToolEntry,
   taskToolEntry,

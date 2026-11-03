@@ -1,6 +1,7 @@
 import {
   CoreErrorType,
   createCoreError,
+  recallArtifactIdFromUri,
   traceContextToLogContext,
   type ModelMessageContent,
   type ModelMessageContentBlock,
@@ -111,6 +112,9 @@ export async function serializeOutput(
       )
     : undefined;
   const resolvedArtifactPath = artifact?.path ?? artifact?.uri ?? artifactPath;
+  // M9：溢写产物的 URI（zcode-artifact://<session>/<id>）是 recall 可解析 ID；
+  // envelope 里的 Recall 指引由 appendArtifactRecallHint 统一补（artifact strategy 分支）。
+  const resolvedArtifactUri = artifact?.uri;
 
   if (
     entry.modelContentProtection === OFFICIAL_CUA_FRAME_MODEL_CONTENT_PROTECTION &&
@@ -191,13 +195,16 @@ export async function serializeOutput(
 
   if (effectiveBudget.strategy === "artifact" && effectiveBudget.artifact?.enabled === true) {
     if (artifact && resolvedArtifactPath) {
-      const persistedOutputContent = formatPersistedOutputContent({
-        content,
-        entry,
-        originalBytes,
-        output,
-        persistedPath: resolvedArtifactPath,
-      });
+      const persistedOutputContent = appendArtifactRecallHint(
+        formatPersistedOutputContent({
+          content,
+          entry,
+          originalBytes,
+          output,
+          persistedPath: resolvedArtifactPath,
+        }),
+        resolvedArtifactUri,
+      );
       const persistedContent = stringifyModelContentForSerialization(persistedOutputContent);
       return {
         content: persistedContent,
@@ -375,6 +382,23 @@ function formatPersistedOutputContent(input: {
     originalBytes: input.originalBytes,
     persistedPath: input.persistedPath,
   });
+}
+
+/**
+ * M9：溢写 envelope 里补一行 Recall 指引。产物 URI 与 recall 的 artifact ID 是同一资源，
+ * 模型拿到指引才能在后续回合链式取回全文——路径只服务 Read，不能替代召回入口。
+ */
+function appendArtifactRecallHint(
+  content: ModelMessageContent,
+  uri: string | undefined,
+): ModelMessageContent {
+  if (uri === undefined) return content;
+  const artifactId = recallArtifactIdFromUri(uri);
+  if (artifactId === undefined) return content;
+  const hint = `Recall the full output later with Recall: ids=["artifact:${artifactId}"].`;
+  if (typeof content === "string") return `${content}\n${hint}`;
+  if (Array.isArray(content)) return [...content, { type: "text", text: hint }];
+  return content;
 }
 
 function findArtifactPath(output: unknown): string | undefined {

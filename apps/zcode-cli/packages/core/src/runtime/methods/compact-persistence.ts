@@ -6,6 +6,10 @@ import {
   createPartId,
   traceContextToLogContext,
 } from "../deps.js";
+import {
+  compactRecoveryPointerSchema,
+  type CompactRecoveryPointer,
+} from "@zcode/contracts";
 import type {
   CompactBoundaryPayload,
   CompactTimelinePayload,
@@ -378,4 +382,26 @@ export async function persistCompactSummary(
     await removeRuntimePersistenceMessagesBestEffort.call(this, persistedMessageIds, traceContext);
     throw error;
   }
+}
+
+/**
+ * M9 resume 重挂：在（已应用 rewind 过滤的）active 消息里反查最新一份带
+ * recoveryPointer 的 compaction part。被 rewind 掉的分支不会出现在输入里，
+ * 因此分支切片语义天然保持——本函数只读，不改任何 part。
+ */
+export function findLatestActiveRecoveryPointer(
+  messages: readonly MessageWithParts[],
+): CompactRecoveryPointer | undefined {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const parts = messages[messageIndex].parts;
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const part = parts[partIndex];
+      if (part.type !== "compaction") continue;
+      const candidate = part.compactBoundary?.recoveryPointer;
+      if (!candidate) continue;
+      const parsed = compactRecoveryPointerSchema.safeParse(candidate);
+      if (parsed.success) return parsed.data;
+    }
+  }
+  return undefined;
 }
