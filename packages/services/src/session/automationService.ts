@@ -24,6 +24,36 @@ import {
   scheduleRuleDefinition,
 } from "#src/session/automationCron.js";
 
+/**
+ * M8 行级所有权投影钩子（super-agent-watchdog；结构兼容子集，完整契约见
+ * docs/architecture/super-agent-watchdog-spec.md §1.3）。组合根把 watchdog 的投影端口
+ * 经 setAutomationRunProjection 绑进来；接缝未挂载时（undefined）以下钩子为 no-op。
+ * 定时 run 的 claim/settle 在 automationRepo/scheduler（本 lane 之外，spec §7-3）。
+ */
+export interface AutomationRunProjectionPort {
+  register(row: {
+    id: string;
+    kind: "automation";
+    owner: "automation";
+    ownerSession?: string;
+    workspaceKey?: string;
+  }): void;
+  settle(
+    id: string,
+    owner: "automation",
+    state: "completed" | "failed" | "cancelled" | "dropped",
+    opts?: { narrowResultRef?: string },
+  ): void;
+  touch(id: string, owner: "automation", patch: { ownerSession?: string }): void;
+}
+
+let automationRunProjection: AutomationRunProjectionPort | undefined;
+
+/** 组合根接线点（spec §7-2）：挂载/卸载 automation 行的 M8 投影端口。 */
+export function setAutomationRunProjection(port: AutomationRunProjectionPort | undefined): void {
+  automationRunProjection = port;
+}
+
 /** 写/单查操作的 workspace 归属；用于跨 workspace 隔离校验。 */
 export interface AutomationWorkspaceScope {
   workspacePath: string;
@@ -401,7 +431,18 @@ export class AutomationService {
     const workspaceKey = resolveScopeKey(scope);
     const existing = await this.repo.get(automationId, workspaceKey);
     if (!existing) return null;
-    return this.repo.runNow(automationId, { now: Date.now() }, workspaceKey);
+    const result = await this.repo.runNow(automationId, { now: Date.now() }, workspaceKey);
+    // M8 注册钩子（spec §1.3）：manual run 建行即入 BackgroundRun registry（owner=automation）。
+    if (result) {
+      automationRunProjection?.register({
+        id: result.run.runId,
+        kind: "automation",
+        owner: "automation",
+        ...(result.run.sessionId ? { ownerSession: result.run.sessionId } : {}),
+        workspaceKey: result.run.workspaceKey ?? workspaceKey,
+      });
+    }
+    return result;
   }
 
   async listRuns(
@@ -411,6 +452,10 @@ export class AutomationService {
     return this.repo.listRuns(automationId, resolveScopeKey(scope));
   }
   async deleteRun(runId: string, scope?: AutomationWorkspaceScope): Promise<void> {
-    return this.repo.deleteRun(runId, resolveScopeKey(scope));
+    // M8：owner 终态回写（删除 = dropped；spec §1.2）——先落库成功再投影，避免
+    // DB 删除失败时投影先行谎报终态。
+    const result = await this.repo.deleteRun(runId, resolveScopeKey(scope));
+    automationRunProjection?.settle(runId, "automation", "dropped");
+    return result;
   }
 }

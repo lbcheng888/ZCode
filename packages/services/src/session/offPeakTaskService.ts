@@ -33,6 +33,28 @@ export const OFF_PEAK_SYNC_MIN_INTERVAL_MS = 5_000;
 export const OFF_PEAK_SYNC_MAX_INTERVAL_MS = 5 * 60_000;
 const SYNC_FAILURE_BASE_MS = 10_000;
 
+/**
+ * M8 行级所有权投影钩子（super-agent-watchdog；结构兼容子集，完整契约见
+ * docs/architecture/super-agent-watchdog-spec.md §1.3）。组合根把 watchdog 的投影端口
+ * 经 deps.runProjection 绑进来；接缝未挂载时（undefined）以下钩子为 no-op。
+ */
+export interface OffPeakRunProjectionPort {
+  register(row: {
+    id: string;
+    kind: "offpeak";
+    owner: "offpeak";
+    ownerSession?: string;
+    workspaceKey?: string;
+  }): void;
+  settle(
+    id: string,
+    owner: "offpeak",
+    state: "completed" | "failed" | "cancelled" | "dropped",
+    opts?: { narrowResultRef?: string },
+  ): void;
+  touch(id: string, owner: "offpeak", patch: { ownerSession?: string }): void;
+}
+
 export interface OffPeakTaskServiceDeps {
   repo: OffPeakTaskRepo;
   prepareProjectExecution?: (projectId: string) => Promise<ProjectExecutionSnapshot>;
@@ -60,6 +82,8 @@ export interface OffPeakTaskServiceDeps {
   }) => Promise<void>;
   /** 列表变化广播钩子（UI 刷新）。 */
   onTasksChanged?: () => void;
+  /** M8 BackgroundRun registry 注册钩子（spec §1.3；缺省 undefined = 投影未挂载）。 */
+  runProjection?: OffPeakRunProjectionPort;
   /** 测试注入时钟。 */
   now?: () => number;
   /** disposeAll 附加清理（如关闭 mock 网关）。 */
@@ -145,6 +169,8 @@ export class OffPeakTaskService implements IOffPeakTaskService {
           queuePosition: null,
           now: this.now(),
         });
+        // M8：owner 触碰进度指针（spec §1.2）。
+        this.deps.runProjection?.touch(taskId, "offpeak", {});
         this.emitChanged();
       },
       release: (ticketId) => this.releaseExecutionTicket(ticketId),
@@ -306,6 +332,19 @@ export class OffPeakTaskService implements IOffPeakTaskService {
     this.deps.logger.info(
       `off-peak task created id=${offPeakTaskId} ticket=${ticket.ticketId} state=${ticket.state}`,
     );
+    // M8 注册钩子（spec §1.3）：创建成功即入 BackgroundRun registry（owner=offpeak）。
+    this.deps.runProjection?.register({
+      id: offPeakTaskId,
+      kind: "offpeak",
+      owner: "offpeak",
+      ...(normalizedParams.boundSessionId
+        ? { ownerSession: normalizedParams.boundSessionId }
+        : {}),
+      workspaceKey: resolveWorkspaceKey({
+        workspacePath: normalizedParams.workspacePath,
+        workspaceIdentity: normalizedParams.workspaceIdentity,
+      }),
+    });
     this.emitChanged();
     this.ensureSyncScheduled(0);
     if (ticket.state === "ready") {
@@ -336,6 +375,8 @@ export class OffPeakTaskService implements IOffPeakTaskService {
       endedAt: this.now(),
     });
     if (!cancelled) return this.deps.repo.get(offPeakTaskId);
+    // M8：owner 原子回写终态（spec §1.2）。
+    this.deps.runProjection?.settle(offPeakTaskId, "offpeak", "cancelled");
     if (this.residentExecutions.has(offPeakTaskId)) {
       try {
         await this.residentExecutions.cancel(offPeakTaskId);
@@ -523,8 +564,10 @@ export class OffPeakTaskService implements IOffPeakTaskService {
       now: this.now(),
     });
     if (!current()) {
-      if (this.residentExecutions.isUserOwned(offPeakTaskId))
+      if (this.residentExecutions.isUserOwned(offPeakTaskId)) {
         await this.deps.repo.markRunning(offPeakTaskId, { startedAt: this.now() });
+        this.deps.runProjection?.touch(offPeakTaskId, "offpeak", {});
+      }
       return;
     }
     if (!requeued) {
@@ -578,6 +621,7 @@ export class OffPeakTaskService implements IOffPeakTaskService {
             schedulable: false,
             now: this.now(),
           });
+          this.deps.runProjection?.touch(offPeakTaskId, "offpeak", {});
         }
         return;
       }

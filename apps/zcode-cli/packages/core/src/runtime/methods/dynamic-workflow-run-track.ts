@@ -1,5 +1,6 @@
 import { CREATE_WORKFLOW_TOOL_NAME, type TraceContext } from "@zcode/contracts";
 import type { ExecutableToolCall } from "../../tool/types.js";
+import { getBackgroundRunProjection } from "../../tool/executor/background-task-registry.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { activateDynamicWorkflowTools } from "./dynamic-workflow-activation.js";
 
@@ -39,6 +40,15 @@ export async function trackResumedDynamicWorkflowRun(
     traceContext,
     undefined,
   );
+  // M8 注册钩子（spec §1.3）：resume 追踪后确保 workflow 行在投影里，且携带 stall 时钟
+  // 指针（cancel-stalled 资格判据）。上一行若已由 background-task-registry 钩子按同 owner
+  // 登记，这里是一次同 owner upsert（补 stallClockRef），不会产生第二写者。
+  getBackgroundRunProjection()?.register({
+    id: input.runId,
+    kind: "workflow",
+    owner: "dynamic-workflow",
+    stallClockRef: `dwf-run:${input.runId}`,
+  });
   // GUI Resume 成功即激活工具面（launch.md「On demand: activation」）：run 的终态通知会让模型
   // 去调 GetWorkflowRun，没有那个工具它就卡住。
   await activateDynamicWorkflowTools.call(this, { source: "run_control", traceContext });

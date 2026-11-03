@@ -25,6 +25,7 @@ import {
   registerRuntimeBackgroundTask,
   releaseRuntimeBackgroundTaskNotification,
   removeRuntimeBackgroundTask,
+  touchRuntimeBackgroundTaskHeartbeat,
   updateRuntimeBackgroundTask,
 } from "./background-task-registry.js";
 import { backgroundTaskOutputMetadata } from "./background-task-output.js";
@@ -83,6 +84,21 @@ interface BackgroundTaskLifecycleProvider {
   cancellable?: boolean;
 }
 
+/**
+ * owner 心跳回写周期（ms）：poll running 分支按它周期调 `touchRuntimeBackgroundTaskHeartbeat`
+ * （与快照签名去重解耦，见 watchdog spec §9 实施偏差 1）。
+ *
+ * 必须**严格小于** watchdog `stalenessCapMs`（默认 60_000；probes.ts registry-stall 判据是
+ * `now - updatedAt > stalenessCapMs` 严格大于），并留出轮询粒度（BACKGROUND_TASK_POLL_INTERVAL_MS）
+ * 与 watchdog 30s tick 的对齐余量：最坏采样龄 = 30_000 + 1_000 = 31_000 < 60_000。
+ * 取 60_000 等于上限即竞态——心跳实际触达落在 [周期, 周期+粒度] 窗口，会以非零概率被采样成
+ * 健康行误判 registry-stall 并 notify-user。取 30_000（= tickIntervalMs 的 1 倍）留 29s 余量。
+ */
+export const HEARTBEAT_TOUCH_PERIOD_MS = 30_000;
+
+/** 后台快照轮询粒度（ms）；心跳周期余量计算与跨包常量关系测试锚共用。 */
+export const BACKGROUND_TASK_POLL_INTERVAL_MS = 1_000;
+
 export class BackgroundTaskTracker {
   private readonly backgroundPollers = new Set<string>();
 
@@ -105,7 +121,14 @@ export class BackgroundTaskTracker {
     if (!taskId || this.backgroundPollers.has(taskId)) return;
 
     this.backgroundPollers.add(taskId);
-    registerRuntimeBackgroundTask(this.deps, toolCall, taskId, output, turnId);
+    // 快照提供者判定必须提到 register 之前：heartbeat 声明与 poll 周期 touch 同源——只有会起
+    // 1s 轮询（hasSnapshotProvider）的行才声明心跳；只带 waitForTerminal 没有 getSnapshot 的行
+    // 不起轮询定时器，声明了也永远等不到 touch，会被 registry-stall 误判（spec §9 实施偏差 1）。
+    const hasSnapshotProvider = this.hasBackgroundTaskSnapshotProvider(toolCall);
+    const hasDirectWaiter = this.hasDirectBackgroundTaskWaiter(toolCall);
+    registerRuntimeBackgroundTask(this.deps, toolCall, taskId, output, turnId, {
+      heartbeat: hasSnapshotProvider,
+    });
     try {
       await this.emitBackgroundTaskEvent(
         SessionEventType.BackgroundTaskStarted,
@@ -119,8 +142,6 @@ export class BackgroundTaskTracker {
       throw error;
     }
 
-    const hasSnapshotProvider = this.hasBackgroundTaskSnapshotProvider(toolCall);
-    const hasDirectWaiter = this.hasDirectBackgroundTaskWaiter(toolCall);
     this.deps.logger?.info?.("Background task tracking started", {
       ...traceContextToLogContext(traceContext),
       event: "background_task.tracking.started",
@@ -160,6 +181,8 @@ export class BackgroundTaskTracker {
     }
 
     let lastSnapshotSignature = "";
+    // 心跳节流基准：register 刚把投影行 updatedAt 盖成此刻，首个周期从这里起算。
+    let lastHeartbeatTouchAt = Date.now();
     let completing = false;
     let polling = false;
     let stopped = false;
@@ -315,6 +338,14 @@ export class BackgroundTaskTracker {
 
         if (snapshot.status === "running") {
           await emitRunningUpdate(snapshot);
+          // owner 心跳（registry-stall 判活）：与签名去重解耦的周期 touch，仅到期才写。
+          // workflow 行在 helper 内按 owner 拦下（no-op），其 updatedAt 留给 20min
+          // cancel-stalled 独立时钟——见 touchRuntimeBackgroundTaskHeartbeat 注释。
+          const now = Date.now();
+          if (now - lastHeartbeatTouchAt >= HEARTBEAT_TOUCH_PERIOD_MS) {
+            lastHeartbeatTouchAt = now;
+            touchRuntimeBackgroundTaskHeartbeat(this.deps, toolCall, taskId);
+          }
           return;
         }
 
@@ -352,7 +383,7 @@ export class BackgroundTaskTracker {
     if (hasSnapshotProvider) {
       timer = setInterval(() => {
         void poll();
-      }, 1_000);
+      }, BACKGROUND_TASK_POLL_INTERVAL_MS);
       timer.unref?.();
       await poll();
     }

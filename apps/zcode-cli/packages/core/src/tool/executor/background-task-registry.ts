@@ -44,12 +44,124 @@ export function isDynamicWorkflowRunDispatchToolName(name: string): boolean {
   );
 }
 
+// ============================================================
+// M8 BackgroundRun registry 注册钩子（super-agent-watchdog 行级所有权投影）
+// ============================================================
+// 结构兼容子集：完整契约在 bootstrap super-agent-watchdog（docs/architecture/
+// super-agent-watchdog-spec.md §1）。core 禁止 import bootstrap（层方向），由组合根把
+// watchdog 的投影端口经 setBackgroundRunProjection 绑进来；接缝未挂载时以下钩子为
+// no-op（注册缺席不是状态兜底，见 spec §7-2）。
+// owner 分配：local_dynamic_workflow → "dynamic-workflow"（行权威在 workflow 子系统）；
+// 其余 taskType → "runtime-background-task"（本 registry 即 owner）。
+
+export type BackgroundRunProjectionKind = "workflow" | "background_task";
+export type BackgroundRunProjectionOwner = "dynamic-workflow" | "runtime-background-task";
+export type BackgroundRunProjectionTerminalState =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "killed"
+  | "lost"
+  | "dropped";
+
+export interface BackgroundRunProjectionPort {
+  register(row: {
+    id: string;
+    kind: BackgroundRunProjectionKind;
+    owner: BackgroundRunProjectionOwner;
+    stallClockRef?: string;
+    narrowResultRef?: string;
+    /** owner 心跳声明（watchdog spec §1.1）；仅 runtime-background-task 行可声明，workflow 行禁止。 */
+    heartbeat?: boolean;
+  }): void;
+  settle(
+    id: string,
+    owner: BackgroundRunProjectionOwner,
+    state: BackgroundRunProjectionTerminalState,
+    opts?: { narrowResultRef?: string },
+  ): void;
+  touch(id: string, owner: BackgroundRunProjectionOwner, patch: Record<string, never>): void;
+}
+
+let backgroundRunProjection: BackgroundRunProjectionPort | undefined;
+
+/** 组合根接线点（spec §7-2）：挂载/卸载 M8 投影端口。 */
+export function setBackgroundRunProjection(port: BackgroundRunProjectionPort | undefined): void {
+  backgroundRunProjection = port;
+}
+
+export function getBackgroundRunProjection(): BackgroundRunProjectionPort | undefined {
+  return backgroundRunProjection;
+}
+
+function backgroundRunProjectionShape(
+  taskType: RuntimeTaskType,
+  taskId: string,
+): { kind: BackgroundRunProjectionKind; owner: BackgroundRunProjectionOwner; stallClockRef?: string } {
+  if (taskType === "local_dynamic_workflow") {
+    // workflow run 一律携带 stall 时钟指针：cancel-stalled 资格的唯一判据（spec §2）。
+    return { kind: "workflow", owner: "dynamic-workflow", stallClockRef: `dwf-run:${taskId}` };
+  }
+  return { kind: "background_task", owner: "runtime-background-task" };
+}
+
+/**
+ * owner 心跳回写（watchdog registry-stall 判活；spec §9 实施偏差 1/2）。
+ *
+ * owner 与 register 同源：从 taskType 推导，调用方禁止硬编码。workflow 行一律 no-op——
+ * 它的 updatedAt 同时是 20min cancel-stalled 独立时钟（watchdog probes.ts
+ * isWorkflowStallCandidate 在 stalledSince 缺席时按 updatedAt 独立命中），而 dwf 快照签名
+ * 恒定使签名变化 touch 基本缺席，心跳若刷新 updatedAt 会把 liveness 双计成 progress，
+ * cancel-stalled 在 stalledSince 接缝落地前永久失效。
+ */
+export function touchRuntimeBackgroundTaskHeartbeat(
+  deps: ToolExecutorDeps,
+  toolCall: ExecutableToolCall,
+  taskId: string,
+): void {
+  const taskType = runtimeTaskTypeForToolCall(toolCall);
+  if (!taskType || !deps.runtimeTaskRegistry) return;
+  const shape = backgroundRunProjectionShape(taskType, taskId);
+  if (shape.owner !== "runtime-background-task") return;
+  backgroundRunProjection?.touch(taskId, shape.owner, {});
+}
+
+/** runtime status → 投影终态（normalize 的输出面收敛到 M8 枚举；running 由调用方分流）。 */
+function toProjectionTerminalState(
+  status: RuntimeTaskSnapshot["status"],
+): BackgroundRunProjectionTerminalState {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "lost":
+      return "lost";
+    case "cancelled":
+    case "stopped":
+      return "cancelled";
+    case "killed":
+      return "killed";
+    case "running":
+      // 调用方已分流；防御性落到 failed 而不是静默丢终态。
+      return "failed";
+    default:
+      return "failed";
+  }
+}
+
 export function registerRuntimeBackgroundTask(
   deps: ToolExecutorDeps,
   toolCall: ExecutableToolCall,
   taskId: string,
   output: Record<string, unknown>,
   turnId?: RuntimeTaskSnapshot["turnId"],
+  opts?: {
+    /**
+     * 心跳声明（watchdog spec §1.1）：仅「本行有周期快照轮询」（调用方 hasSnapshotProvider）
+     * 时传 true。声明与 touch 同源——声明了却没有周期 touch 的行会被 registry-stall 误判；
+     * workflow 行即使传 true 也在此按 owner 拦下（见 touchRuntimeBackgroundTaskHeartbeat）。
+     */
+    heartbeat?: boolean;
+  },
 ): void {
   const taskType = runtimeTaskTypeForToolCall(toolCall);
   if (!taskType || !deps.runtimeTaskRegistry) return;
@@ -106,13 +218,27 @@ export function registerRuntimeBackgroundTask(
     // 上一轮是谁停的，与新生命无关。
     stopInitiator: rearm ? undefined : existing?.stopInitiator,
   };
+  // 心跳声明与 touch 同源（spec §9 实施偏差 1）：仅 runtime-background-task 行且调用方确认
+  // 本行有周期快照轮询时声明；workflow 行按 owner 拦下，绝不声明——它的 updatedAt 是
+  // 20min cancel-stalled 独立时钟，心跳会把 liveness 双计成 progress（实施偏差 2）。
+  const projectionShape = backgroundRunProjectionShape(taskType, taskId);
+  const projectionRow = {
+    id: taskId,
+    ...projectionShape,
+    ...(opts?.heartbeat === true && projectionShape.owner === "runtime-background-task"
+      ? { heartbeat: true as const }
+      : {}),
+  };
   if (existing && !newLife) {
     deps.runtimeTaskRegistry.update(taskId, () => next);
+    // M8 投影：同 owner upsert（刷新进度指针）；registry 侧按行级所有权复核。
+    backgroundRunProjection?.register(projectionRow);
     return;
   }
   // 首次登记或新生命：剥掉继承来的 branchGeneration，交给 register 按当前 active 分支盖章。
   const { branchGeneration: _previousLife, ...fresh } = next;
   deps.runtimeTaskRegistry.register(fresh);
+  backgroundRunProjection?.register(projectionRow);
 }
 
 export function updateRuntimeBackgroundTask(
@@ -145,6 +271,16 @@ export function updateRuntimeBackgroundTask(
           type: taskType,
         }),
   }));
+  // M8 投影：owner 原子回写终态 / running 触碰进度指针（spec §1.2）。
+  const shape = backgroundRunProjectionShape(taskType, taskId);
+  const normalized = normalizeRuntimeTaskStatus(status);
+  if (normalized === "running") {
+    backgroundRunProjection?.touch(taskId, shape.owner, {});
+  } else {
+    backgroundRunProjection?.settle(taskId, shape.owner, toProjectionTerminalState(normalized), {
+      narrowResultRef: runtimeTaskResultText(toolCall, status, snapshot),
+    });
+  }
 }
 
 /**
@@ -196,8 +332,15 @@ export function removeRuntimeBackgroundTask(
   toolCall: ExecutableToolCall,
   taskId: string,
 ): void {
-  if (!runtimeTaskTypeForToolCall(toolCall) || !deps.runtimeTaskRegistry) return;
+  const taskType = runtimeTaskTypeForToolCall(toolCall);
+  if (!taskType || !deps.runtimeTaskRegistry) return;
   deps.runtimeTaskRegistry.remove(taskId);
+  // M8 投影：注册失败回滚 = owner settle "dropped"（spec §1.2）。
+  backgroundRunProjection?.settle(
+    taskId,
+    backgroundRunProjectionShape(taskType, taskId).owner,
+    "dropped",
+  );
 }
 
 function runtimeTaskTypeForToolCall(toolCall: ExecutableToolCall): RuntimeTaskType | undefined {
