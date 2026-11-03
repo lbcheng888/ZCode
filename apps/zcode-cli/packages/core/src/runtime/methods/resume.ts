@@ -42,6 +42,9 @@ import {
   restoreWorkspaceFileRewindEntries,
 } from "./workspace-checkpoint-persistence.js";
 import { mainTurnCacheHitAggregateFromMessages } from "./turn-model-step-usage.js";
+import { refeedRecoverableBackgroundWakes } from "./background-wake-refeed.js";
+import { findLatestActiveRecoveryPointer } from "./compact-persistence.js";
+import { formatCompactRecoveryPointerForModel } from "../../compact/prompt.js";
 
 export function toScheduleState(
   this: AgentRuntimeInternal,
@@ -245,6 +248,16 @@ export async function resumeFromStore(
   const resumedTarget = await this.readSessionTargetForContext(traceContext);
   this.injectTargetStateIntoMessageHistory(resumedTarget);
 
+  // M9 重挂路径二：冷恢复从 active 消息（已应用 rewind 过滤）反查最新
+  // recoveryPointer，程序化重挂 anchor——目标/判据跨压缩+重启存活不再押模型自由文本。
+  const recoveredRecoveryPointer = findLatestActiveRecoveryPointer(activeMessages);
+  if (recoveredRecoveryPointer) {
+    this.messageHistory.addAttachment(
+      "resume_referenced_session_context",
+      formatCompactRecoveryPointerForModel(recoveredRecoveryPointer),
+    );
+  }
+
   const resumedEvent = this.createEvent(
     SessionEventType.SessionResumed,
     {
@@ -322,6 +335,11 @@ export async function resumeFromStore(
     sessionId: this.sessionId,
     status: "completed",
   });
+
+  // 终态唤醒再投喂（spec: docs/architecture/super-agent-wake-refeed-spec.md）：sweep 之后
+  // 扫 discarded wake，主体仍可恢复的终态 workflow 窄结果幂等重投。放在 SessionResumed 事件
+  // 与 session-start hooks 之后——入队即触发 drain（通知回合），不得先于 SessionResumed 进事件流。
+  await refeedRecoverableBackgroundWakes.call(this, traceContext);
 
   return {
     ...hydration,

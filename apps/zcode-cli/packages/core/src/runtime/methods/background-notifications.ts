@@ -1,15 +1,89 @@
 import { createMessageId, traceContextToLogContext } from "../deps.js";
 import type { MessageId, TraceContext } from "../deps.js";
 import type { BackgroundResultOriginMeta } from "@zcode/contracts";
-import { createRuntimeCommandId, type TaskNotificationRuntimeCommand } from "../command-queue.js";
+import {
+  createRuntimeCommandId,
+  type RuntimeCommandId,
+  type TaskNotificationRuntimeCommand,
+} from "../command-queue.js";
 import { runtimeInputMetadata } from "../../agent/runtime-input-presentation.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import type { SealBackgroundTaskNotificationsInput } from "../types.js";
 import { shouldSuppressSealedSubagentBashNotification } from "../../runtime-task/notification-policy.js";
 
+/**
+ * claim 键行落库（at-most-once 的认领凭证）。成功返回 true；账本缺席或写失败返回 false
+ * （fail-closed，调用方据此不入队/不认领，留待下次 resume 重试）。
+ */
+export async function persistBackgroundTaskNotificationClaim(
+  this: AgentRuntimeInternal,
+  input: {
+    commandId: string;
+    originMeta?: BackgroundResultOriginMeta;
+    taskId?: string;
+    text: string;
+    traceContext: TraceContext;
+  },
+): Promise<boolean> {
+  const claim = this.sessionStore?.saveSessionInput?.({
+    id: input.commandId,
+    sessionID: this.sessionId,
+    kind: "backgroundNotification",
+    delivery: "queue",
+    payload: {
+      text: input.text,
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      ...(input.originMeta ? { originMeta: input.originMeta } : {}),
+    },
+  });
+  if (!claim) {
+    this.logger?.warn("Background notification claim unavailable: ledger missing", {
+      ...traceContextToLogContext(input.traceContext),
+      commandId: input.commandId,
+      event: "runtime.background_task_notification.claim_unavailable",
+      module: "core.runtime",
+      taskId: input.taskId,
+    });
+    return false;
+  }
+  try {
+    await this.trackResidencyBlockingWork(claim);
+    return true;
+  } catch (error) {
+    this.logger?.warn("Failed to persist background notification claim", {
+      ...traceContextToLogContext(input.traceContext),
+      commandId: input.commandId,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      event: "session_input.claim_persist_failed",
+      module: "core.runtime",
+      status: "failed",
+      taskId: input.taskId,
+    });
+    return false;
+  }
+}
+
+/**
+ * 常规入队（同步 void，既有调用方零改动）：先入队、账本行 fire-and-forget。
+ *
+ * 带 `commandId` 的 claim 路径（仅 wake re-feed）不走这里——重投必须先 await claim 键行
+ * 落库、确认成功再入队，否则键行写失败而通知已投递时，下一次 resume 会把同一条 wake
+ * 再投一次（at-most-once 退化为 at-least-once）。claim 路径见 refeed 的
+ * persistBackgroundTaskNotificationClaim + 本函数 `claimPersisted: true`。
+ */
 export function enqueueBackgroundTaskNotification(
   this: AgentRuntimeInternal,
   notification: {
+    /**
+     * 稳定幂等键（重投路径从 taskId 派生，如 `refeed_<runId>`）：在场时作为 runtime 命令 id
+     * 与账本行 id，claim-once 据此吸收重复。缺席时维持进程内序列 id——既有调用方零改动。
+     */
+    commandId?: string;
+    /**
+     * claim 路径专用：调用方已 await claim 键行落库成功（persistBackgroundTaskNotificationClaim），
+     * 本函数跳过账本写入——键行已在场，重复 upsert 无意义且必须保持「先落库后入队」的代码序。
+     */
+    claimPersisted?: boolean;
     originMeta?: BackgroundResultOriginMeta;
     taskId?: string;
     text: string;
@@ -41,7 +115,9 @@ export function enqueueBackgroundTaskNotification(
     });
     return;
   }
-  const commandId = createRuntimeCommandId();
+  const commandId = notification.commandId
+    ? (notification.commandId as RuntimeCommandId)
+    : createRuntimeCommandId();
   this.enqueueRuntimeCommand({
     branchGeneration,
     createdAt: new Date(),
@@ -55,9 +131,11 @@ export function enqueueBackgroundTaskNotification(
     toolName: notification.toolName,
     traceContext: notification.traceContext,
   });
-  // wake 入账本（admitted）。runtime 命令队列是纯内存的，账本是唯一
-  // durable 痕迹——崩溃重启后后台子进程已死、通知不可恢复，resume 会把残留
-  // admitted 收口为 discarded(session_resumed)（留痕不静默，同一语义）。
+  if (notification.claimPersisted) return;
+  // wake 入账本（admitted）。runtime 命令队列是纯内存的，账本是唯一 durable 痕迹——
+  // 崩溃重启后 resume 把残留 admitted 收口为 discarded(session_resumed)（留痕不静默）；
+  // 其中主体仍存活的终态 workflow 窄结果由 wake re-feed（background-wake-refeed.ts）
+  // 以稳定键幂等重投，死 Bash/死 subagent 维持丢弃。
   const admission = this.sessionStore?.saveSessionInput?.({
     id: String(commandId),
     sessionID: this.sessionId,
