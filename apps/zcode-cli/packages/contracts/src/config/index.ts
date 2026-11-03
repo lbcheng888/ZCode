@@ -37,6 +37,10 @@ export const ConfigKey = {
   FeatureSkill: "features.skill",
   FeatureMcp: "features.mcp",
   FeatureGoalLayer: "features.goalLayer",
+  FeatureEventRouter: "features.eventRouter",
+  FeatureMandateGate: "features.mandateGate",
+  FeatureSpecWriteLease: "features.specWriteLease",
+  FeatureDurableSchedulerDispatch: "features.durableSchedulerDispatch",
 
   // Memory
   MemoryUse: "memory.use",
@@ -104,20 +108,26 @@ export type ConfigValue<K extends ConfigKey> = K extends "modelStream.idleTimeou
           : K extends "network.timeout"
             ? number
             : K extends
-                  | "features.compact"
-                  | "features.rewind"
-                  | "features.subagent"
-                  | "features.memory"
-                  | "features.skill"
-                  | "features.mcp"
-                  | "features.goalLayer"
-                  | "skills.enabled"
-                  | "skills.includeInstructions"
-              ? boolean
-              : K extends "memory.use"
-                ? boolean
-                : K extends "skills.metadataBudget"
-                  ? number
+                  | "features.eventRouter"
+                  | "features.mandateGate"
+                  | "features.specWriteLease"
+                  | "features.durableSchedulerDispatch"
+                ? boolean | undefined
+                : K extends
+                      | "features.compact"
+                      | "features.rewind"
+                      | "features.subagent"
+                      | "features.memory"
+                      | "features.skill"
+                      | "features.mcp"
+                      | "features.goalLayer"
+                      | "skills.enabled"
+                      | "skills.includeInstructions"
+                  ? boolean
+                  : K extends "memory.use"
+                    ? boolean
+                    : K extends "skills.metadataBudget"
+                      ? number
                   : K extends "skills.roots"
                     ? string[]
                     : K extends "skill" | "command"
@@ -228,6 +238,13 @@ export interface RuntimeConfig {
     skill: boolean;
     mcp: boolean;
     goalLayer: boolean;
+    // super-agent 触发子系统（spec §5.4）：缺省全 false/undefined = legacy 直路；按灰度逐个开启。
+    // optional：DefaultRuntimeConfig 播种 false，adapters ConfigPort.getAll 的既有字面量不回填
+    // 这些键时为 undefined——读取方一律按 `=== true` 判开（与 goalLayerEnabled 同款显式开语义）。
+    eventRouter?: boolean;
+    mandateGate?: boolean;
+    specWriteLease?: boolean;
+    durableSchedulerDispatch?: boolean;
   };
   memory: {
     use: boolean;
@@ -315,7 +332,15 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     memory: true,
     skill: true,
     mcp: true,
-    goalLayer: false,
+    // goal layer 已转正（设计 M11 / Phase 1）：默认开启，--goal-layer off / features.goalLayer=false 仍可关闭。
+    goalLayer: true,
+    // super-agent Phase 2 开关缺省关（spec §5.4）：eventRouter=false = TriggerSink 注入 no-op 直通
+    // （legacy bots 直路 = kill-switch）；mandateGate/specWriteLease 分别等 Phase 3/5 接线；
+    // durableSchedulerDispatch=false = dispatchPolicy 缺省 in-window。
+    eventRouter: false,
+    mandateGate: false,
+    specWriteLease: false,
+    durableSchedulerDispatch: false,
   },
   memory: {
     use: true,

@@ -848,8 +848,8 @@ describe("session persistence", () => {
           admittedDelivery: "startNow",
         },
       });
-      // goal 灰度旗默认 off:旧世界没有回合预算,persist 层显式 null 而不是 256。
-      expect(target.turnBudget).toBeNull();
+      // goal layer 已转正:默认开,回合预算应用 256 缺省(不再显式 null)。
+      expect(target.turnBudget).toBe(256);
       const session = await store.getSession(app.sessionId);
       const messages = await store.messages({ sessionID: app.sessionId });
       const events = await eventStore.getEvents(app.sessionId);
@@ -1061,9 +1061,13 @@ describe("session persistence", () => {
     }
   });
 
-  it("persists model-only goal state change reminders for goal lifecycle changes", async () => {
+  it("persists no model-visible goal state reminders for goal lifecycle changes (zero-injection)", async () => {
+    // 设计 M11 零注入：goal 状态变更不再写模型上下文 reminder（goal-state-reminder.ts
+    // 已删除）。UI/审计可见性只由 TargetChanged 投影承担。此测试断言：状态变更
+    // 不产生任何 goal_state_change 合成 notice，且 TargetChanged 事件照常广播。
     const tempRoot = await mkdtemp(join(tmpdir(), "zcode-bootstrap-goal-state-reminders-"));
     const dbPath = join(tempRoot, "session.sqlite");
+    const eventStore = createInMemorySessionEventStore();
     const store = await createSqliteSessionStore({ dbPath });
 
     try {
@@ -1071,6 +1075,7 @@ describe("session persistence", () => {
         env: {
           ZCODE_STORAGE_DIR: tempRoot,
         },
+        eventStore,
         modelExecutor: {
           async generateText() {
             return {
@@ -1110,24 +1115,16 @@ describe("session persistence", () => {
           .map((part) => ({ message, part })),
       );
 
-      expect(reminderParts.map(({ part }) => part.text)).toEqual([
-        "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.",
-        "The session goal is active again and will be pursued.",
-        "The session goal has been cleared. Do not continue pursuing any previous goal unless the user sets a new goal.",
-      ]);
-      for (const { message, part } of reminderParts) {
-        expect(message.info).toMatchObject({
-          role: "user",
-          source: "goal_state_change",
-          synthetic: true,
-          visibility: "model-only",
-        });
-        expect(part.metadata).toMatchObject({
-          runtimeMessage: { source: "goal_state_change" },
-          source: "goal_state_change",
-          visibility: "model-only",
-        });
-      }
+      // 零注入：模型上下文中不含任何 goal_state_change 合成 notice。
+      expect(reminderParts).toEqual([]);
+
+      // UI 投影仍触发：每个状态变更都广播 TargetChanged（不再依赖 reminder）。
+      const events = await eventStore.getEvents(app.sessionId);
+      const targetChangedEvents = events.filter(
+        (event) => event.type === SessionEventType.TargetChanged,
+      );
+      // set(active) + paused + set(active) + cleared = 4 次状态变更 → 4 个 TargetChanged。
+      expect(targetChangedEvents.length).toBeGreaterThanOrEqual(4);
     } finally {
       store.close();
       await rm(tempRoot, { recursive: true, force: true });

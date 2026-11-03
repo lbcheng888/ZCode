@@ -227,9 +227,13 @@ export interface AgentRuntimeConfig {
    */
   dynamicWorkflowToolsOnDemand?: boolean;
   /**
-   * long-horizon goal 灰度旗。**缺席即关闭**（与 dynamicWorkflowEnabled 的极性刻意相反）：
-   * 只有显式 true 才启用 idle 回合驱动器、三维目标预算、target_anchor、inject 车道、
-   * 目标状态 auto-drain 闸门与 5/5 todo 提醒；缺席/false 时逐项恢复旧行为。
+   * long-horizon goal 旗（已转正，设计 M11）。本字段自身极性是**缺席即关闭**
+   * （isGoalLayerEnabled = `=== true`）：只有显式 true 才启用 idle 回合驱动器与
+   * 三维目标预算；显式 false / 缺席都削减到剩余语义（inject 车道恒可用，
+   * 旧忙碌循环已删除）。产品默认开启由配置解析链保证——contracts
+   * DefaultRuntimeConfig.features.goalLayer=true 播种 System 基线，bootstrap
+   * resolveAppRuntimeConfig 回落该值后写入本字段；进程内嵌入方若绕过该链自行构造
+   * AgentRuntimeConfig 而不写本字段，拿到的是关闭世界。
    * 独立 CLI 按 --goal-layer 显式写入；协议服务端读 features.goalLayer。
    */
   goalLayerEnabled?: boolean;
@@ -495,11 +499,6 @@ export interface ExecuteTurnOptionsBase {
     tabCount: number;
     currentUrl?: string;
   };
-  /**
-   * 灰度旗关闭时的旧触发源：prompt 回合结束后在同一前台执行里续跑 active 目标。
-   * 开旗时该触发源被 idle 驱动器取代，调用方不得设置。
-   */
-  continueActiveTargetAfterTurn?: boolean;
   displayInput?: string;
   /**
    * `input` 从此下标起是调用方追加的引擎文本（dwf ask 尾注 / nudge）。只进 TurnStarted 与用户
@@ -880,12 +879,6 @@ export interface PreparedImageData {
 
 export interface ActiveTurnSteeringState {
   kind: ActiveTurnKind;
-  // active turn 被 Stop 时，goal reminder 不能插进尚未闭合的 tool results。
-  // deferral 只在 regular model/tool loop 内打开，退出 loop 时先关闭再物化 pending。
-  goalStateChangeReminderDeferralOpen: boolean;
-  pendingGoalStateChangeReminder?: {
-    text: string;
-  };
   pendingInputs: PendingTurnInput[];
   steerable: boolean;
   traceContext: TraceContext;

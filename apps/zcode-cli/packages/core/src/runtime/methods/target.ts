@@ -27,7 +27,6 @@ import { hasRunningBackgroundRuntimeTask } from "../../runtime-task/registry.js"
 import { wrapSystemReminderForSource } from "../../system-reminder/source.js";
 import { verifyActiveTargetCompletionForContinuation } from "./target-completion-verification.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
-import { enqueueActiveTargetContinuationLoop } from "./target-continuation-loop.js";
 import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
 
 export async function recordTargetChanged(
@@ -85,21 +84,18 @@ export async function continueActiveTargetIfIdle(
 
 /**
  * 手动 goal 续跑入口(/goal set/resume、v4 sendGoalCommand/resumeGoal 共用)。
- * 开旗：只做「驱动器 arm + 立即预约一个回合」(设计 §3.2/§3.6):
+ * 恒做「驱动器 arm + 立即预约一个回合」(设计 §3.2/§3.6):
  * - arm:idle 驱动器从此外围边缘自动预约后续回合,直至 paused/blocked/complete;
  * - 预约-准入:本命令执行时才做候选闸门与预算边界检查;预约入队后机器即非
  *   idle,驱动器不会重复预约;
  * - 用户消息不消耗回合预算(仅 inputSource=goal-continuation 的回合计数)。
- * 关旗：回到旧行为——占用 runtime command queue 跑 while 忙碌循环
- * (target-continuation-loop.ts)，不 arm、不预约 idle 驱动器。
+ * 旧 while 忙碌循环已删除(设计 M11 Remove 清单);关闭 --goal-layer 时
+ * scheduleIdleGoalRound 早退,故只跑本条显式预约的单回合。
  */
 export async function continueActiveTargetLoop(
   this: AgentRuntimeInternal,
   options: ContinueActiveTargetLoopOptions,
 ): Promise<TurnResult | null> {
-  if (!isGoalLayerEnabled(this.config)) {
-    return await enqueueActiveTargetContinuationLoop.call(this, options);
-  }
   const traceContext = options.traceContext ?? this.rootTraceContext;
   // goal↔workflow 桥(设计 §3.3):goal 回合是 workflow run 的发起方。onDemand 灰度会话
   // 出生不注册十个工作流工具,模型在 goal 回合内看不见 CreateWorkflow 就无法发起 run——
@@ -132,14 +128,14 @@ export async function continueActiveTargetLoop(
 /**
  * idle 驱动器(设计 §3.2):整机 idle(无 pending 命令、无在途/预留回合、无在途
  * 后台任务)的边缘上预约下一个 goal 回合。挂在 drainRuntimeCommandQueue 的空闲沿
- * (与 workflowBlockedReminder.sessionIdle 同点),取代旧的三处触发源(手动循环、
- * continueActiveTargetAfterTurn、task-notification 回填循环)。
+ * (与 workflowBlockedReminder.sessionIdle 同点),是 goal 续跑的唯一自动触发源
+ * (旧 while 循环 / continueActiveTargetAfterTurn / task-notification 回填已删)。
  * 预约未兑现(命令返回 null:目标非 active/后台任务在跑/verifier 基建失败)时
  * 驱动器站到一边(standing-down),只消费下一个外部边缘,避免空转轮询;
  * 预约兑现则继续在下一个 idle 边缘预约,goal 循环由此在边缘间展开。
  */
 export function scheduleIdleGoalRound(this: AgentRuntimeInternal): void {
-  // 灰度旗关闭:旧世界没有 idle 驱动器,goal 回合只由手动续跑与回合收尾触发源产生。
+  // 关闭 --goal-layer:没有 idle 驱动器,goal 回合只由手动续跑入口产生。
   if (!isGoalLayerEnabled(this.config)) return;
   // 上一次预约未兑现:消费该信号后保持静默,等待下一个外部事件(用户输入、
   // 通知、手动续跑)制造的真正边缘。否则任何非终态 null 都会变成轮询循环。
@@ -216,12 +212,9 @@ export async function executeTargetContinuationCommand(
   // 驱动器(scheduleIdleGoalRound 的整机 idle 闸门)同受此约束;终态回填的通知轮排空后
   // 产生新的空闲沿,goal 回合在那里拿到窄结果继续裁决。旧实现只在 verifyBeforeContinue
   // 时检查,手动 resume 会在 run 在途时照跑回合,形成双重驱动。
-  // 开旗:任何续跑都让位给在途后台任务。关旗恢复旧行为:只有带完成判定的续跑
-  // (verifyBeforeContinue)才检查;手动续跑照跑。
-  if (
-    (isGoalLayerEnabled(this.config) || options.verifyBeforeContinue === true) &&
-    (await hasRunningBackgroundTaskForGoalContinuation.call(this))
-  ) {
+  // 任何续跑都让位给在途后台任务(设计 M5「无条件 interlock」):旧循环删除后,
+  // 手动 resume 也必须让位,否则与 workflow run 形成双重驱动。
+  if (await hasRunningBackgroundTaskForGoalContinuation.call(this)) {
     this.logger?.info("Goal continuation deferred while background tasks are running", {
       ...traceContextToLogContext(traceContext),
       event: "target.continuation.deferred_background_running",

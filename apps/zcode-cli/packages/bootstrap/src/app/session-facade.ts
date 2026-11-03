@@ -243,15 +243,11 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
       const cleared = await deps.sessionStore.clearTarget({
         sessionID: deps.sessionId,
       });
-      if (cleared) {
-        await deps.runtime.recordGoalStateChangeReminder({
-          text: goalStateChangeReminderText("cleared"),
-          traceContext: deps.traceContext,
-        });
-      }
       // TUI 和协议客户端可能在重连或恢复后仍缓存旧 goal。
       // 即使 session store 已经是空，也要把显式 clear 投影成 target:null，
       // 让客户端不能只因为“No goal to clear.”这条文本而继续保留旧面板。
+      // UI/审计可见性只由 TargetChanged 承担（设计 M11 零注入：不再写 goal 状态
+      // reminder 到模型上下文）。
       await deps.runtime.recordTargetChanged({
         action,
         previousTarget,
@@ -273,19 +269,8 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
           traceContext: deps.traceContext,
         });
       }
-      const reminderAction =
-        input.status === "paused" && previousTarget?.status !== "paused"
-          ? "paused"
-          : input.status === "active" && previousTarget?.status === "paused"
-            ? "resumed"
-            : undefined;
-      const reminderText = goalStateChangeReminderText(reminderAction);
-      if (reminderText) {
-        await deps.runtime.recordGoalStateChangeReminder({
-          text: reminderText,
-          traceContext: deps.traceContext,
-        });
-      }
+      // UI/审计可见性只由 TargetChanged 承担（设计 M11 零注入：不再写 goal 状态
+      // reminder 到模型上下文）。
       await deps.runtime.recordTargetChanged({
         action,
         previousTarget,
@@ -948,28 +933,6 @@ async function persistSessionModelSelection(deps: CreateSessionFacadeDeps): Prom
 /** 仅供仍以 provider/model 字符串工作的内部 App facade；不是 ModelSelection 序列化。 */
 function formatLegacyRuntimeModelValue(selection: ModelSelection | undefined): string {
   return selection ? `${selection.providerId}/${selection.modelId}` : "";
-}
-
-type GoalStateChangeReminderAction = "paused" | "resumed" | "cleared";
-
-function goalStateChangeReminderText(action: GoalStateChangeReminderAction): string;
-function goalStateChangeReminderText(action: undefined): undefined;
-function goalStateChangeReminderText(
-  action: GoalStateChangeReminderAction | undefined,
-): string | undefined;
-function goalStateChangeReminderText(
-  action: GoalStateChangeReminderAction | undefined,
-): string | undefined {
-  switch (action) {
-    case "paused":
-      return "The active session goal is paused. Do not continue pursuing it unless the user resumes or replaces the goal.";
-    case "resumed":
-      return "The session goal is active again and will be pursued.";
-    case "cleared":
-      return "The session goal has been cleared. Do not continue pursuing any previous goal unless the user sets a new goal.";
-    default:
-      return undefined;
-  }
 }
 
 function readUserModelSelection(deps: CreateSessionFacadeDeps): ModelSelection | undefined {

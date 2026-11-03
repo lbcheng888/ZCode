@@ -89,7 +89,7 @@ function createRecordingDeps(): { deps: RunDependencies; seen: RuntimeConfigSeen
   return { deps, seen };
 }
 
-// 未传 --goal-layer 时不写该字段(由 features.goalLayer 兜底,默认 false)。
+// 未传 --goal-layer 时不写该字段(由 features.goalLayer 兜底,默认 true)。
 const DISABLED_PAIR = {
   dynamicWorkflowEnabled: false,
   dynamicWorkflowToolsOnDemand: false,
@@ -189,7 +189,7 @@ test("an unknown --workflow-mode value fails before any app is created", async (
   assert.deepEqual(seen, []);
 });
 
-// ── goal-layer 灰度旗（默认 off，与 dynamicWorkflowEnabled 极性相反）─────────
+// ── goal-layer 旗（已转正，默认 on；--goal-layer off 仍可关闭）─────────────────
 
 test("TUI with --goal-layer on writes goalLayerEnabled true", async () => {
   const { deps, seen } = createRecordingDeps();

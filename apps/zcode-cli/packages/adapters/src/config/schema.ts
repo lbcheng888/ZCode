@@ -38,6 +38,11 @@ const featuresSchema = z.object({
   skill: z.boolean().optional(),
   mcp: z.boolean().optional(),
   goalLayer: z.boolean().optional(),
+  // super-agent 灰度开关（super-agent-harness-design §7 Phase 2/3/5）：缺省关=legacy 路径。
+  eventRouter: z.boolean().optional(),
+  mandateGate: z.boolean().optional(),
+  specWriteLease: z.boolean().optional(),
+  durableSchedulerDispatch: z.boolean().optional(),
 });
 
 const memorySchema = z.object({

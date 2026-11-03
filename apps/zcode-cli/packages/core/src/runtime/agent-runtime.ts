@@ -636,10 +636,6 @@ export interface AgentRuntime {
   amendWorkflowRunSettings(
     input: AmendWorkflowRunSettingsInput,
   ): Promise<AmendWorkflowRunSettingsResult>;
-  recordGoalStateChangeReminder(input: {
-    text: string;
-    traceContext?: TraceContext;
-  }): Promise<void>;
   continueActiveTargetIfIdle(options?: {
     abortSignal?: AbortSignal;
     inputId?: string;

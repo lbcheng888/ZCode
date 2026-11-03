@@ -111,7 +111,6 @@ import { readSessionTodosForContext } from "./resume.js";
 import { readSessionTargetForContext } from "./resume.js";
 import { injectTargetStateIntoMessageHistory } from "./resume.js";
 import { recordTargetChanged } from "./target.js";
-import { recordGoalStateChangeReminder } from "./goal-state-reminder.js";
 import { continueActiveTargetIfIdle } from "./target.js";
 import { continueActiveTargetLoop } from "./target.js";
 import { scheduleIdleGoalRound } from "./target.js";
@@ -320,7 +319,6 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.readSessionTargetForContext = readSessionTargetForContext;
   proto.injectTargetStateIntoMessageHistory = injectTargetStateIntoMessageHistory;
   proto.recordTargetChanged = recordTargetChanged;
-  proto.recordGoalStateChangeReminder = recordGoalStateChangeReminder;
   proto.continueActiveTargetIfIdle = continueActiveTargetIfIdle;
   proto.continueActiveTargetLoop = continueActiveTargetLoop;
   proto.scheduleIdleGoalRound = scheduleIdleGoalRound;

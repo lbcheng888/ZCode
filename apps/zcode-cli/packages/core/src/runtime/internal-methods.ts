@@ -342,10 +342,6 @@ export interface AgentRuntimeCoreMethods {
   readSessionTargetForContext(traceContext: TraceContext): Promise<SessionGoal | null>;
   injectTargetStateIntoMessageHistory(target: SessionGoal | null): void;
   recordTargetChanged(input: TargetChangedPayload & { traceContext: TraceContext }): Promise<void>;
-  recordGoalStateChangeReminder(input: {
-    text: string;
-    traceContext?: TraceContext;
-  }): Promise<void>;
   continueActiveTargetIfIdle(options?: {
     traceContext?: TraceContext;
     abortSignal?: AbortSignal;

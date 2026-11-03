@@ -400,17 +400,18 @@ describe("config adapters", () => {
     expect(parseEnvConfig({ ZCODE_GOAL_LAYER: "maybe" }).features).toBeUndefined();
   });
 
-  it("defaults features.goalLayer to off and reads the file override", async () => {
+  it("defaults features.goalLayer to on and reads the file override", async () => {
     const dir = await mkdtemp(join(tmpdir(), "zcode-config-goal-layer-"));
     const path = join(dir, "config.json");
 
     try {
       const defaults = createConfig({ env: {}, skipUserConfig: true });
-      expect(defaults.config.features.goalLayer).toBe(false);
+      // goal layer 已转正：默认开启，显式配置仍可关闭。
+      expect(defaults.config.features.goalLayer).toBe(true);
 
-      await writeFile(path, JSON.stringify({ features: { goalLayer: true } }));
+      await writeFile(path, JSON.stringify({ features: { goalLayer: false } }));
       const overridden = createConfig({ env: {}, userConfigPath: path });
-      expect(overridden.config.features.goalLayer).toBe(true);
+      expect(overridden.config.features.goalLayer).toBe(false);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }

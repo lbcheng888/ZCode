@@ -128,6 +128,14 @@ class ConfigStore {
         this.set(ConfigKey.FeatureMcp, config.features.mcp, scope);
       if (config.features.goalLayer !== undefined)
         this.set(ConfigKey.FeatureGoalLayer, config.features.goalLayer, scope);
+      if (config.features.eventRouter !== undefined)
+        this.set(ConfigKey.FeatureEventRouter, config.features.eventRouter, scope);
+      if (config.features.mandateGate !== undefined)
+        this.set(ConfigKey.FeatureMandateGate, config.features.mandateGate, scope);
+      if (config.features.specWriteLease !== undefined)
+        this.set(ConfigKey.FeatureSpecWriteLease, config.features.specWriteLease, scope);
+      if (config.features.durableSchedulerDispatch !== undefined)
+        this.set(ConfigKey.FeatureDurableSchedulerDispatch, config.features.durableSchedulerDispatch, scope);
     }
     if (config.memory) {
       if (config.memory.use !== undefined) this.set(ConfigKey.MemoryUse, config.memory.use, scope);
@@ -289,7 +297,13 @@ export class ConfigPortImpl implements ConfigPort {
         memory: this.store.get(ConfigKey.FeatureMemory) ?? true,
         skill: this.store.get(ConfigKey.FeatureSkill) ?? true,
         mcp: this.store.get(ConfigKey.FeatureMcp) ?? true,
-        goalLayer: this.store.get(ConfigKey.FeatureGoalLayer) ?? false,
+        goalLayer: this.store.get(ConfigKey.FeatureGoalLayer) ?? DefaultConfig.features.goalLayer,
+        eventRouter: this.store.get(ConfigKey.FeatureEventRouter) ?? DefaultConfig.features.eventRouter,
+        mandateGate: this.store.get(ConfigKey.FeatureMandateGate) ?? DefaultConfig.features.mandateGate,
+        specWriteLease: this.store.get(ConfigKey.FeatureSpecWriteLease) ?? DefaultConfig.features.specWriteLease,
+        durableSchedulerDispatch:
+          this.store.get(ConfigKey.FeatureDurableSchedulerDispatch) ??
+          DefaultConfig.features.durableSchedulerDispatch,
       },
       memory: {
         use: this.store.get(ConfigKey.MemoryUse) ?? DefaultConfig.memory.use,
@@ -410,6 +424,14 @@ function getDefaultValue(key: ConfigKey): unknown {
       return defaults.features.mcp;
     case ConfigKey.FeatureGoalLayer:
       return defaults.features.goalLayer;
+    case ConfigKey.FeatureEventRouter:
+      return defaults.features.eventRouter;
+    case ConfigKey.FeatureMandateGate:
+      return defaults.features.mandateGate;
+    case ConfigKey.FeatureSpecWriteLease:
+      return defaults.features.specWriteLease;
+    case ConfigKey.FeatureDurableSchedulerDispatch:
+      return defaults.features.durableSchedulerDispatch;
     case ConfigKey.MemoryUse:
       return defaults.memory.use;
     case ConfigKey.McpServers:

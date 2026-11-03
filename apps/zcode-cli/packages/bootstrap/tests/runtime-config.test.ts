@@ -749,7 +749,7 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
     expect(runtimeConfig.dynamicWorkflowToolsOnDemand).toBe(expected);
   });
 
-  // goal 灰度旗 fail-closed:显式 session 值优先,否则读 features.goalLayer(缺省 false)。
+  // goal layer 已转正：features.goalLayer 缺省 true；显式 session 值优先。
   it("resolves goalLayerEnabled with the session value taking precedence", () => {
     const configResult = createConfigResult();
     const base = {
@@ -757,28 +757,38 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
       subagentOutputRootDir: "/tmp/zcode-subagent-output",
       workingDirectory,
     };
+    // 缺省 features.goalLayer=true → goalLayerEnabled=true。
     expect(
       resolveAppRuntimeConfig({ ...base, configResult, options: {} }).runtimeConfig.goalLayerEnabled,
-    ).toBe(false);
+    ).toBe(true);
 
-    const enabledConfig = {
+    // 显式 features.goalLayer=false 仍可关闭。
+    const disabledConfig = {
       ...configResult,
       config: {
         ...configResult.config,
-        features: { ...configResult.config.features, goalLayer: true },
+        features: { ...configResult.config.features, goalLayer: false },
       },
     };
     expect(
-      resolveAppRuntimeConfig({ ...base, configResult: enabledConfig, options: {} }).runtimeConfig
+      resolveAppRuntimeConfig({ ...base, configResult: disabledConfig, options: {} }).runtimeConfig
         .goalLayerEnabled,
-    ).toBe(true);
+    ).toBe(false);
 
+    // 会话级显式值优先于配置。
     expect(
       resolveAppRuntimeConfig({
         ...base,
-        configResult: enabledConfig,
+        configResult,
         options: { runtimeConfig: { goalLayerEnabled: false } },
       }).runtimeConfig.goalLayerEnabled,
     ).toBe(false);
+    expect(
+      resolveAppRuntimeConfig({
+        ...base,
+        configResult: disabledConfig,
+        options: { runtimeConfig: { goalLayerEnabled: true } },
+      }).runtimeConfig.goalLayerEnabled,
+    ).toBe(true);
   });
 });

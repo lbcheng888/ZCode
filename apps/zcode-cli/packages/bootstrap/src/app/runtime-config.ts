@@ -130,8 +130,8 @@ export function resolveAppRuntimeConfig(input: {
     // 只写了几个 allowedTools 的用户突然丢失其余全部工具。
     toolAllowlist: options.runtimeConfig?.toolAllowlist,
     toolDisallowlist: options.runtimeConfig?.toolDisallowlist,
-    // 灰度旗 fail-closed:会话级显式值优先(CLI --goal-layer / Host),否则读用户配置,
-    // 配置缺省 false。与 dynamicWorkflowEnabled 的「缺席即开启」极性刻意相反。
+    // goal layer 已转正(设计 M11 / Phase 1):会话级显式值优先(CLI --goal-layer / Host),
+    // 否则读用户配置 features.goalLayer,配置缺省 true。显式 off 仍可关闭。
     goalLayerEnabled:
       options.runtimeConfig?.goalLayerEnabled ?? configResult.config.features.goalLayer,
     embeddedSearchBackend:
