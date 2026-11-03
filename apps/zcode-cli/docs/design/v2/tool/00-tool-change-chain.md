@@ -1,5 +1,99 @@
 # Tool Change Chain Spec
 
+## workflow child profile/processEnv 接缝（2026-11-03）
+
+super-agent-spec-lane-spec §6-1 的 Y-Task1 定稿接线：workflow child runtime 增两可选入参，
+**无模型工具 schema/权限模型变化**，只把既有过滤链接到 workflow 路径。
+
+- `createScriptWorkflowAgentRuntime`（bootstrap `script-workflow-child-runtime.ts`）与
+  `createWorkflowChildRuntime`（bootstrap `workflow-facade.ts`，已导出供测试）增
+  `profile?: AgentProfile`（`@zcode/shared`）与 `processEnv?: Record<string, string>`。
+- 工具面：`profile.tools`（优先于 script 路径的 `request.opts.tools`；expert 路径只有
+  `profile.tools`）经 `filterWorkflowChildToolface`（bootstrap `workflow-actor-tools.ts`）
+  过滤——既有链 `filterSpecRestrictedToolNames(filterSubagentChildToolNames(base,
+  buildSpecRestrictedDisallowRules(profile.disallowedTools)))` 的等价展开：内层精确名段
+  用根导出的 `buildSpecRestrictedDisallowRules` 组本地 Set（跳过字面量 `mcp__*` 前缀规则），
+  外层照旧根导出的 `filterSpecRestrictedToolNames`（出站精确名别名归一 + 全部 `mcp__*` 前缀）。
+  `filterSubagentChildToolNames` 未进 `core/src/subagent/index.ts` 命名导出清单（分区外），
+  待 core 侧补导出后可换回原函数。
+- 减法表：`profile.disallowedTools` 在 `configOverrides` 展开后与 `toolDisallowlist`
+  取并集（script 路径）/ 与继承的 `toolDisallowlist` 取并集（facade 路径）；仅非空时落键，
+  缺省两入参时配置与 env 字节同现状。
+- `workflowActorToolPolicy(profile?)`（同文件）：`ACTOR_DISALLOWED_TOOLS ∪
+  profile.disallowedTools`；缺席/空返回原数组引用。
+- `processEnv`：在场时两处 `createNodeExecutionAdapter({ processEnv })` 直接采用，缺席回落
+  `deps.appOptions.env ?? process.env`（script 约 line 248、facade 约 line 317）；调用方约定
+  传 `buildSpecRunEnv`（adapters `subprocess-env.ts`，白名单键、无凭据）。仅执行适配器，
+  httpClientPort / contextSourcePort 的 env 不动。
+- `ExpertWorkflowAgentRunInput`（core `workflow/expert/types.ts`）增可选
+  `profile` / `processEnv` 透传；facade `workflowAgentRunner.run` 转发给 child runtime。
+  phase-runner / dispatcher 侧的填充与 spec-trigger 出站禁令放开归 X 车道。
+- 验证：`bootstrap/tests/script-workflow-child-runtime.test.ts`（spec profile 剔出站与
+  `mcp__` 动态名、processEnv 字节断言、缺省字节一致、`workflowActorToolPolicy` 合并）。
+- review 修复（2026-11-03，a-workflow-child-profile）：同一接缝内三处 fail-closed 补齐——
+  ① 两处 `createNodeExecutionAdapter` 构造点在 `processEnv` 在场时执行适配器 `network`
+  改从 processEnv 派生（`httpProxy` 取 `HTTP_PROXY`/`http_proxy`、`noProxy` 取
+  `NO_PROXY ?? ""`，缺代理键抛错不回退直连；`caCertFile` 仍取用户 config）：spawn 链路
+  `buildExecutionEnv` 会先 sanitize 剔掉代理键、再只按 network 回填，沿用用户 config 会让
+  子进程拿到用户代理/直连（spec egress 代理被旁路），用户 noProxy 还会注入 NO_PROXY 违反
+  §3「noProxy 空、含 localhost 也过代理」；② `processEnv`/`profile` 与
+  `appOptions.executionPort` 同在直接抛错——共享执行端口携带宿主 env（含凭据），会静默
+  丢弃无凭据的 spec env；③ script 路径 profile 过滤后的 `toolAllowlist` 在
+  `configOverrides` 之后再落一次键，防 `configOverrides.toolAllowlist` 整体覆盖过滤结果
+  （旁路出站剔除，与 toolDisallowlist 同侧反压）。JSDoc 同步写明 processEnv 生效前提。
+  验证：两测试文件 43 passed，含 spawn 层真命令断言（子进程 env 含 spec 代理、
+  NO_PROXY 缺席、无凭据字节、用户代理不泄漏）。
+
+## would-accept 快照投影接线（2026-11-02）
+
+`pendingWouldAccept[]`（spec `docs/architecture/super-agent-trigger-subsystem-spec.md` §5.5；
+schema 在 `packages/shared/src/zcode-protocol-v4/would-accept.ts`，键已冻结 additive-optional）
+补数据源接线：`features.eventRouter=true` 时 create-app 装配 super-agent 控制面
+（`bootstrap/src/app/super-agent-control-plane.ts`），`buildSessionSnapshot` 读
+`app.superAgentControlPlane.listPendingWouldAccept()`（decision_log(would_accept) ×
+trigger_events 摘要联读，P2 suggestedTier=隐式 record_only）写入快照；flag 关 /
+控制面缺席时该键不发布（unknown≠0，UI 不得渲染成空收件箱），显式数组（可为空）才是
+已发布零卡片。StatePatch 增量键仍归后续批。
+可见面与批转（2026-11-02 lane B，spec §8-11/§8-14）已接：
+- 协议宿主准入：`zcode-protocol/server-operations.ts` 构建 app options 处注入
+  `options.superAgent`（`v4Gateway.handleCommand` 延迟绑定 + 无 bots 状态的群内 IM 守卫
+  响亮失败面 + super-agent/tasks-index 同根库路径；backfillSeeds 缺省不注入），flag-on
+  不再启动期响亮失败、flag-off 零变化。
+- TUI 命令面：`/would-accept` 列表缝 `listWouldAcceptCards` 经 CLI 宿主
+  （`tui-prompt-handler-queries.ts`）接 `app.superAgentControlPlane.listPendingWouldAccept()`；
+  新增本地子命令 `/would-accept promote <cardId>`（不进模型、不建回合，busy 可用）接
+  `promoteWouldAccept(cardId)`——控制面写显式 mandate(tier=auto) 行 + decision_log
+  (`would_accept_convert`) 行（同事务），读面过滤已批卡；M4 边界在命令文案如实呈现
+  （auto 执行档 Phase 3 才生效）。能力缺席（flag 关/未注入）抛类型化
+  `WouldAcceptUnavailableError`，与缝缺席同一 unavailable 呈现，不返回空表冒充零卡片。
+- 仍归其它批：`packages/ui` `WouldAcceptInbox` desktop/web 渲染点、StatePatch 增量键。
+- review 修复补记（2026-11-02）：tasks-index 未迁移（缺文件）时装配先 `existsSync`
+  探测再开库——node:sqlite 开库会先落文件，原先在抛 no such table 前留下 0 字节空库
+  污染「未迁移」现场，现不建库不落文件、仍按 §8-6 响亮失败（回归用例在
+  `control-plane-assembly.test.ts`）；`/would-accept` 解析面无调用方的孤儿导出
+  `wouldAcceptCommandFromText` 及其测试断言删除（生产路径走 `parseWouldAcceptCommand`）。
+无模型工具 schema/权限/执行变化；验证见
+`bootstrap/tests/super-agent/{control-plane-assembly,control-plane-create-app,
+protocol-host-admission,would-accept-promote}.test.ts` 与
+`tui/tests/tui-would-accept{,-submit-controller}.test.ts`。
+
+## Recall 只读召回工具（2026-11-02）
+
+M9 引用图链式召回：新增常驻只读工具 `Recall`（contracts `tools/recall.ts` +
+core `handlers/recall.ts`，注册在 builtInTools 的 ReadSessionContext 之后）。
+按稳定 ID（`session:/target:/target-event:/wf-run:/wf-event:/artifact:`，接受
+`zcode-artifact://` URI 作 artifact ID）从 session store / session_target_event /
+dwf journal / tool-artifact store 只读取回；每页自带 refs 下一跳，scope 按
+workspace/session 过滤，越界回 `scope_denied`；`trigger`/`subscription` 是预留
+kind，端口接入前回 `capability_absent`。resultBudget 走 inline truncate（分页即
+有界），不进 workflow child 禁用名单（worker 可用是设计前提）。artifact 溢写
+envelope 追加一行 Recall 指引（result-serialization.ts）。compact 摘要第 10 节
+强制 `<recovery_pointer>`，runtime 剥离后存进 boundary 并在 compact 后/resume 时
+重挂（compact/prompt.ts、compact-active.ts、resume.ts）。完整规格见
+`20-recall.md` 与 `docs/architecture/super-agent-context-recall-spec.md`；
+契约/链式走查/重启往返测试分别在 contracts `tests/recall.test.ts`、core
+`tests/recall-tool.test.ts`、`tests/compact-recovery-pointer.test.ts`。
+
 ## Bash 临时输出路径隔离
 
 主应用及 workflow 子运行时装配 tmp 父目录 → execution adapter 实际准备具名输出文件 →
@@ -1852,3 +1946,29 @@ TodoWrite 成功写库后新增会话事件 `todos_updated`（`TodosUpdatedPaylo
 - 验证：core todo-tool、bootstrap product-projection / cold-event-merge /
   product-projection-cold-hydration / v4-cold-resume；ui todoPanel /
   v4SessionPaneLayoutParity（桌面 + compact 挂载位置与进度计数）。
+
+### 2026-11-03 Super-agent mandate 执行档 / spec-trigger / M6 方案卡
+
+工具执行链路新增「事件来源」权限门（默认关闭，flag = `features.mandateGate`）：
+
+- `core/src/permission/service.ts`：`PermissionContext` 增加可选 `mandate`
+  （tier / mandateId / expiresAt）与 `origin`（user|event）；`checkPermission` 在
+  plan-transition 之前同步 fail-closed——event-origin 写操作缺 mandate / 过期 /
+  record_only / speculative-auto 缺 mandateId 一律 deny。user-origin 与基础设施
+  mandateId 短路，flag 关时既有调用方不传两字段，零行为变化。
+- prompt admission 数据通路未接：`PromptAdmissionOptions.mandateFacts/triggerSource`
+  与 `envelope.triggerId → promptTriggerSourceOf` 的生产调用点仍缺（见
+  super-agent-trigger-subsystem-spec §8-15②），当前只有消费侧契约与门。
+- `super-agent-trigger.applyVerdicts`：accept 按 mandate 三档分派；speculative/auto
+  在事务 commit 后异步经 `specRun` 端口启动受限 run；`TriggerSubsystemDeps` 新增
+  additive-optional `mandate/specRun/proposalGate/onError`。
+- M6 方案卡：裁决 verdict schema/prompt 增五字段 `scheme`；`decision_log` 追加
+  `card_payload` 列（迁移 `0002_decision_log_card_payload`）；v4 快照
+  `pendingWouldAccept[].scheme` additive-optional；出口门缺字段不外发并计数。
+- `spec-lane/dispatcher.ts`：egress → 无凭据 env → spec restricted profile →
+  subagent launch → stop 的固定序列；缺代理/env 拒绝启动。生产 `buildSpecRunEnv`
+  导出与 subagent `processEnv` 注入缝仍待接线（spec §8-15⑤）。
+- 验证：core permission-mandate-gate / permission-service；bootstrap
+  tests/super-agent（mandate / trigger-verdicts / trigger-verdicts-tier /
+  adjudication / would-accept-scheme / would-accept-promote / spec-run-dispatcher /
+  storage-migrations）全绿。
