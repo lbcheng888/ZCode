@@ -6,7 +6,8 @@
  *   1. lane.prepareSpecRunEgress({ workspaceRoot, allowHosts }) → plan（失败即 run 拒绝启动）；
  *   2. adapters buildSpecRunEnv({ proxyUrl: plan.proxyUrl, sourceEnv }) → 无凭据子进程 env；
  *   3. core buildSpecRestrictedProfile() → 受限 profile；
- *   4. 用 plan.networkPolicy + env 建执行适配器，用 profile 建 subagent run；
+ *   4. 用 plan.networkPolicy + env 建执行适配器，用 profile 建 subagent run
+ *      （生产 = createSpecRunSubagentLaunchPort → AgentRuntime.launchSubagent）；
  *   5. run 终态后 lane.stopSpecRunEgress(workspaceRoot)。
  */
 export {
@@ -31,4 +32,9 @@ export {
   type SpecRunLaunchPort,
   type SpecRunLaunchRequest,
 } from "./dispatcher.js";
+export {
+  createSpecRunSubagentLaunchPort,
+  type SpecRunExecutionPortInput,
+  type SpecRunSubagentLaunchPortDeps,
+} from "./launch.js";
 export { superAgentSpecLaneModule } from "./module.js";

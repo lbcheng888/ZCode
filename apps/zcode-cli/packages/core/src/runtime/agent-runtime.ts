@@ -51,6 +51,9 @@ import type {
   McpPort,
   DynamicWorkflowRunPort,
   ModelCatalogPort,
+  AgentOutput,
+  SubagentLaunchOptions,
+  SubagentLaunchRequest,
   SubagentPort,
   ToolArtifactStorePort,
   ToolCallId,
@@ -154,6 +157,22 @@ export class AgentRuntime {
       this as unknown as import("./internal.js").AgentRuntimeInternal,
       input,
     );
+  }
+  /**
+   * 程序化 subagent 启动（spec lane 等宿主路径）：委托本会话既有的 subagent 端口，
+   * 复用档案解析、child runtime、事件镜像与生命周期。会话未启用 subagents 时
+   * 响亮失败，不静默降级到其它执行形态。
+   */
+  launchSubagent(
+    request: SubagentLaunchRequest,
+    options?: SubagentLaunchOptions,
+  ): Promise<AgentOutput> {
+    if (!this.subagentPort) {
+      throw new Error(
+        "launchSubagent: subagent 端口未启用（config.subagents.enabled=false），拒绝启动",
+      );
+    }
+    return this.subagentPort.launch(request, options);
   }
   private sessionId: SessionId;
   private turnNumber: number;

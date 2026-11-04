@@ -3,8 +3,13 @@
 // 剔除表、dontAsk 权限模式、与既有 subagent tool-policy 合流。
 import { describe, expect, it } from "vitest";
 
-import type { McpPort } from "@zcode/contracts";
-import { createSessionId } from "@zcode/contracts";
+import type {
+  ExecutionPort,
+  ExecutionRequest,
+  McpPort,
+  ModelRequest,
+} from "@zcode/contracts";
+import { createRootTraceContext, createSessionId } from "@zcode/contracts";
 
 import { toMcpToolName } from "../src/mcp/index.js";
 import {
@@ -247,5 +252,87 @@ describe("spec restricted profile — production resolution path", () => {
     expect(childToolNames).not.toContain("WebSearch");
     expect(childToolNames).not.toContain("SendMessage");
     expect(childToolNames).not.toContain("Agent");
+  });
+
+  it("launchSubagent 显式 profile + executionPort：child 工具面受限、Bash 走宿主注入的执行端口", async () => {
+    const sessionId = createSessionId("spec-programmatic-launch");
+    const childRequests: ModelRequest[] = [];
+    const executions: ExecutionRequest[] = [];
+    const executionPort: ExecutionPort = {
+      async run(request) {
+        executions.push(request);
+        const now = new Date();
+        return {
+          status: "completed",
+          exitCode: 0,
+          stdout: { text: "ok", bytes: 2, truncated: false },
+          stderr: { text: "", bytes: 0, truncated: false },
+          durationMs: 1,
+          timedOut: false,
+          cancelled: false,
+          startedAt: now,
+          completedAt: now,
+        };
+      },
+      async close() {},
+    };
+    let step = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { workingDirectory: process.cwd() },
+      {
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory({
+          async generateText(request: ModelRequest) {
+            childRequests.push(request);
+            if (step === 0) {
+              step += 1;
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [
+                  { id: "call_bash", name: "Bash", input: { command: "echo ok" } },
+                ],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              } as never;
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            } as never;
+          },
+        } as never),
+      },
+    );
+
+    const output = await runtime.launchSubagent(
+      {
+        sessionId,
+        parentToolCallId: "spec-run-test",
+        agentType: SPEC_RESTRICTED_PROFILE_NAME,
+        description: "spec run",
+        prompt: "复现并修复",
+        workingDirectory: process.cwd(),
+        workspaceRoot: process.cwd(),
+        trace: createRootTraceContext({ sessionId }),
+      },
+      { profile: buildSpecRestrictedProfile(), executionPort },
+    );
+
+    expect(output.status).toBe("completed");
+    // 显式 profile 不经 registry 也生效：工具面来自 profile（出站/信道全无）。
+    expect(childRequests.length).toBeGreaterThanOrEqual(1);
+    const childToolNames = childRequests[0]!.tools.map((tool) => tool.name);
+    expect(childToolNames).toContain("Read");
+    expect(childToolNames).toContain("Bash");
+    for (const forbidden of ["WebFetch", "WebSearch", "SendMessage", "Agent", "RespondToCoordinator"]) {
+      expect(childToolNames).not.toContain(forbidden);
+    }
+    // Bash 子进程 I/O 走本次 run 的覆盖端口（spec env / egress network 的落点）。
+    expect(executions).toHaveLength(1);
+    expect(executions[0]!.command).toMatchObject({ mode: "shell", command: "echo ok" });
   });
 });

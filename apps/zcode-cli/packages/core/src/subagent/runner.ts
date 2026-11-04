@@ -156,7 +156,11 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
       rawRequest: SubagentLaunchRequest,
       launchOptions?: SubagentLaunchOptions,
     ): Promise<AgentOutput> {
-      const { profile, request } = resolveAgentProfileForRequest(getProfiles(), rawRequest);
+      const { profile, request } = resolveAgentProfileForRequest(
+        getProfiles(),
+        rawRequest,
+        launchOptions?.profile,
+      );
       const executionRequest = toSubagentExecutionRequest(request);
       const backgroundRequested =
         rawRequest.runInBackground === true || profile.background === true;
@@ -180,6 +184,10 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           signal: launchOptions?.signal,
           ...(launchOptions?.model ? { model: launchOptions.model } : {}),
           ...(launchOptions?.modelOverride ? { modelOverride: launchOptions.modelOverride } : {}),
+          ...(launchOptions?.profile ? { profile: launchOptions.profile } : {}),
+          ...(launchOptions?.executionPort
+            ? { executionPort: launchOptions.executionPort }
+            : {}),
         });
       }
       return port.run(executionRequest, launchOptions);
@@ -189,7 +197,11 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
       rawRequest: SubagentRunRequest,
       runOptions?: SubagentRunOptions,
     ): Promise<AgentOutput> {
-      const { profile, request } = resolveAgentProfileForRequest(getProfiles(), rawRequest);
+      const { profile, request } = resolveAgentProfileForRequest(
+        getProfiles(),
+        rawRequest,
+        runOptions?.profile,
+      );
       const lifecycle = createSubagentLifecycle(options, request, profile);
       const startedAt = new Date(lifecycle.startedAt);
 
@@ -241,6 +253,9 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           signal: taskAbort.signal,
           ...(runOptions?.model ? { model: runOptions.model } : {}),
           ...(runOptions?.modelOverride ? { modelOverride: runOptions.modelOverride } : {}),
+          // 每次 run 的执行端口覆盖必须继续下传：runExploreAgent 用它建 child runtime，
+          // 丢了就静默回落到父执行端口（spec run 的无凭据 env 失守）。
+          ...(runOptions?.executionPort ? { executionPort: runOptions.executionPort } : {}),
         },
         {
           reportActivity: activityWatchdog.reportActivity,
@@ -453,7 +468,11 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
       rawRequest: SubagentStartRequest,
       startOptions?: SubagentStartOptions,
     ): Promise<AgentBackgroundedOutput> {
-      const { profile, request } = resolveAgentProfileForRequest(getProfiles(), rawRequest);
+      const { profile, request } = resolveAgentProfileForRequest(
+        getProfiles(),
+        rawRequest,
+        startOptions?.profile,
+      );
       const lifecycle = createSubagentLifecycle(options, request, profile);
       const startedAt = new Date(lifecycle.startedAt);
       const output = createAgentBackgroundedOutput(request, lifecycle);
@@ -489,6 +508,7 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
           signal: taskAbort.signal,
           ...(startOptions?.model ? { model: startOptions.model } : {}),
           ...(startOptions?.modelOverride ? { modelOverride: startOptions.modelOverride } : {}),
+          ...(startOptions?.executionPort ? { executionPort: startOptions.executionPort } : {}),
         },
         {
           onSessionReady: async (selection) => {
@@ -713,7 +733,28 @@ function createAutoBackgroundTimer(
 function resolveAgentProfileForRequest(
   profiles: readonly AgentProfile[],
   request: SubagentRunRequest,
+  profileOverride?: AgentProfile,
 ): { profile: AgentProfile; request: SubagentRunRequest } {
+  if (profileOverride) {
+    // 程序化启动（spec lane 等宿主路径）显式给档案：不走 registry 解析，但必须与
+    // agentType 同名，否则 child 事件/工具面/错误上下文会挂在两个不同身份上。
+    if (profileOverride.name !== request.agentType) {
+      throw createCoreError(
+        CoreErrorType.ToolExecutionFailed,
+        `Subagent profile override '${profileOverride.name}' does not match agentType '${request.agentType}'`,
+        {
+          context: {
+            code: AgentErrorCode.UNKNOWN_AGENT_TYPE,
+            agentType: request.agentType,
+            profileName: profileOverride.name,
+            parentToolCallId: request.parentToolCallId,
+          },
+          recoverable: false,
+        },
+      );
+    }
+    return { profile: profileOverride, request };
+  }
   const resolution = resolveAgentProfileByType(profiles, request.agentType);
   if (resolution.kind === "matched") {
     const { profile } = resolution;

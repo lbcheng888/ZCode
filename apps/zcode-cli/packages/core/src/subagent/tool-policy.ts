@@ -1,6 +1,7 @@
 import {
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  RESPOND_TO_COORDINATOR_TOOL_NAME,
 } from "@zcode/contracts";
 import type { AgentProfile, ModelSelection } from "@zcode/shared";
 import {
@@ -87,6 +88,10 @@ export const SPEC_RESTRICTED_OUTBOUND_DISALLOWED_TOOLS = [
   "WebSearch",
   "ReplyToChannel",
   "SendMessage",
+  // 子代理控制信道（向父 agent 投递消息）：spec run 由宿主程序驱动，不持有任何
+  // 跨 agent 信道；`resolveBuiltInToolAllowlist` 会对 subagent_child 无条件补进
+  // 工具面，必须靠 disallowedTools 注册门剔除（spec §2.2）。
+  RESPOND_TO_COORDINATOR_TOOL_NAME,
   "escalate",
   "submit_result",
   "js",

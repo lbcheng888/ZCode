@@ -108,49 +108,70 @@ function buildSpecRunPrompt(input: SpecRunDispatchInput): string {
 export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
   start(input: SpecRunDispatchInput): Promise<void>;
 } {
+  // per-workspace 串行队列：egress 契约是「同 workspace 再次 prepare = 先停旧实例再起
+  // 新实例」，并发 run 的 prepare/stop 会互相关掉对方的代理。一批评决可同时 dispatch
+  // 多个 accept，因此 prepare→launch→stop 必须按 workspace 原子串行。
+  const queues = new Map<string, Promise<void>>();
+
+  const runOnce = async (input: SpecRunDispatchInput, workspaceRoot: string): Promise<void> => {
+    const plan = await deps.egress.prepareSpecRunEgress({
+      workspaceRoot,
+      ...(deps.resolveAllowHosts
+        ? { allowHosts: deps.resolveAllowHosts(workspaceRoot) }
+        : {}),
+    });
+    try {
+      if (plan.proxyUrl.trim().length === 0) {
+        // 无代理 = 拒绝启动（spec §0：任何路径都不回退直连）。
+        throw new Error("spec run 拒绝启动：egress plan 缺 proxyUrl");
+      }
+      const processEnv = deps.buildProcessEnv(plan);
+      const proxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
+      if (proxy !== plan.proxyUrl) {
+        // env 未携带代理 = 无凭据/egress 三件套没有绑死，拒绝启动。
+        throw new Error(
+          "spec run 拒绝启动：processEnv 未携带 egress 代理（HTTP_PROXY 与 plan.proxyUrl 不一致）",
+        );
+      }
+      const profile = buildSpecRestrictedProfile();
+      if (profile.name !== SPEC_RESTRICTED_PROFILE_NAME) {
+        throw new Error(
+          `spec run 拒绝启动：profile 被替换为 ${profile.name}（必须是 ${SPEC_RESTRICTED_PROFILE_NAME}）`,
+        );
+      }
+      await deps.launch.launch({
+        workspaceRoot,
+        form: "subagent",
+        profile,
+        processEnv,
+        network: plan.networkPolicy,
+        prompt: buildSpecRunPrompt(input),
+        trigger: input,
+      });
+    } finally {
+      // 任何失败路径都停代理（不泄漏监听）；stop 自身失败原样上抛。
+      await deps.egress.stopSpecRunEgress(workspaceRoot);
+    }
+  };
+
   return {
     async start(input: SpecRunDispatchInput): Promise<void> {
       const workspaceRoot = deps.resolveWorkspaceRoot(input);
       if (workspaceRoot.trim().length === 0) {
         throw new Error("spec run 拒绝启动：workspaceRoot 为空");
       }
-      const plan = await deps.egress.prepareSpecRunEgress({
-        workspaceRoot,
-        ...(deps.resolveAllowHosts
-          ? { allowHosts: deps.resolveAllowHosts(workspaceRoot) }
-          : {}),
-      });
+      const previous = queues.get(workspaceRoot) ?? Promise.resolve();
+      // 前一个 run 的失败不阻断后续排队 run（各自 error 原样上抛给各自调用方）。
+      const current = previous.catch(() => undefined).then(() => runOnce(input, workspaceRoot));
+      const tail = current.then(
+        () => undefined,
+        () => undefined,
+      );
+      queues.set(workspaceRoot, tail);
       try {
-        if (plan.proxyUrl.trim().length === 0) {
-          // 无代理 = 拒绝启动（spec §0：任何路径都不回退直连）。
-          throw new Error("spec run 拒绝启动：egress plan 缺 proxyUrl");
-        }
-        const processEnv = deps.buildProcessEnv(plan);
-        const proxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
-        if (proxy !== plan.proxyUrl) {
-          // env 未携带代理 = 无凭据/egress 三件套没有绑死，拒绝启动。
-          throw new Error(
-            "spec run 拒绝启动：processEnv 未携带 egress 代理（HTTP_PROXY 与 plan.proxyUrl 不一致）",
-          );
-        }
-        const profile = buildSpecRestrictedProfile();
-        if (profile.name !== SPEC_RESTRICTED_PROFILE_NAME) {
-          throw new Error(
-            `spec run 拒绝启动：profile 被替换为 ${profile.name}（必须是 ${SPEC_RESTRICTED_PROFILE_NAME}）`,
-          );
-        }
-        await deps.launch.launch({
-          workspaceRoot,
-          form: "subagent",
-          profile,
-          processEnv,
-          network: plan.networkPolicy,
-          prompt: buildSpecRunPrompt(input),
-          trigger: input,
-        });
+        await current;
       } finally {
-        // 任何失败路径都停代理（不泄漏监听）；stop 自身失败原样上抛。
-        await deps.egress.stopSpecRunEgress(workspaceRoot);
+        if (queues.get(workspaceRoot) === tail) queues.delete(workspaceRoot);
       }
     },
   };

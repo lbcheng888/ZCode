@@ -9,6 +9,7 @@ import {
 import { createNodeLoggerFactory } from "@zcode/adapters/logging";
 import { createConfig, resolvePath } from "@zcode/adapters/config";
 import {
+  buildSpecRunEnv,
   createNodeExecutionAdapter,
   resolveEffectiveBashShellSelection,
 } from "@zcode/adapters/exec";
@@ -78,6 +79,11 @@ import {
   createSuperAgentControlPlane,
   type SuperAgentControlPlane,
 } from "./super-agent-control-plane.js";
+import {
+  createSpecRunDispatcher,
+  createSpecRunSubagentLaunchPort,
+  createSuperAgentSpecLane,
+} from "../super-agent/spec-lane/index.js";
 import { resolveAppRuntimeConfig, runtimeConfigLogContext } from "./runtime-config.js";
 import { resolveBundledSkillRoots } from "./bundled-skills.js";
 import { collectDynamicWorkflowDisabledSkillPaths } from "./dynamic-workflow-gate.js";
@@ -1032,10 +1038,46 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         );
       }
       superAgentAbort = new AbortController();
+      // leader 租约/回填/续期作用域：与协议 workspace 身份键同源（trim 缺省回退工作目录）。
+      const superAgentWorkspaceIdentity =
+        options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory;
+      // M5 spec run 生产装配（spec-lane §6-1 / §6-3）：egress 代理 → buildSpecRunEnv →
+      // restricted profile → 既有 subagent 端口。resolveAllowHosts 未接：repo config
+      // schema（specEgress.allowHosts）归 config lane，当前缺省 = 零 egress。
+      const specRunDispatcher = createSpecRunDispatcher({
+        egress: createSuperAgentSpecLane(),
+        buildProcessEnv: (plan) =>
+          buildSpecRunEnv({
+            proxyUrl: plan.proxyUrl,
+            sourceEnv: options.env ?? process.env,
+          }),
+        resolveWorkspaceRoot: (input) => {
+          // 组合根只承载本 workspace：身份不一致的事件不得在本目录静默执行。
+          if (input.workspaceIdentity !== superAgentWorkspaceIdentity) {
+            throw new Error(
+              `spec run 拒绝启动：workspaceIdentity 不属于本组合根（${input.workspaceIdentity} ≠ ${superAgentWorkspaceIdentity}）`,
+            );
+          }
+          return workingDirectory;
+        },
+        launch: createSpecRunSubagentLaunchPort({
+          parentSessionId: sessionId,
+          traceContext,
+          launchSubagent: (request, launchOptions) =>
+            getRuntime().launchSubagent(request, launchOptions),
+          createExecutionPort: ({ processEnv, network }) =>
+            createNodeExecutionAdapter({
+              outputRootDir: join(storageRoot, "cli", "exec", "spec-run"),
+              bashOutputTempDir: tmpdir(),
+              network,
+              processEnv,
+            }),
+          signal: superAgentAbort.signal,
+        }),
+      });
       superAgentControlPlane = await createSuperAgentControlPlane({
-        // leader 租约/回填/续期作用域：与协议 workspace 身份键同源（trim 缺省回退工作目录）。
-        workspaceIdentity:
-          options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory,
+        workspaceIdentity: superAgentWorkspaceIdentity,
+        specRun: specRunDispatcher,
         onError: (error, context) => {
           logger.warn("super-agent control plane error", {
             error: error instanceof Error ? error : new Error(String(error)),

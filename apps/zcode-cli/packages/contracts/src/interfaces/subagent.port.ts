@@ -2,9 +2,11 @@
 // Subagent Port - child agent execution boundary
 // ============================================================
 
+import type { AgentProfile } from "@zcode/shared";
 import type { AgentBackgroundedOutput, AgentOutput } from "../tools/agent.js";
 import type { Model, ModelSelection } from "../model/index.js";
 import type { ModelRequestDependencies } from "../model/invocation-context.js";
+import type { ExecutionPort } from "./execution.port.js";
 import type { SessionId, ToolCallId, TurnId } from "./shared.js";
 import type { TraceContext } from "../tracing/tracer.js";
 
@@ -31,6 +33,16 @@ export interface SubagentRunOptions {
     requestDependencies?: ModelRequestDependencies;
     background: "deny" | "allow";
   };
+  /**
+   * 程序化启动的显式档案覆盖（spec lane 等宿主路径）：name 必须与 request.agentType
+   * 一致；缺省从 runtime 的 agent registry 解析。Agent 工具路径不传，字节不变。
+   */
+  profile?: AgentProfile;
+  /**
+   * 本次 run 的执行端口覆盖（spec lane 无凭据 env + egress network）。缺省继承父
+   * runtime 的执行端口；子 runtime 的 Bash 等子进程 I/O 在本次 run 内走覆盖端口。
+   */
+  executionPort?: ExecutionPort;
 }
 
 export interface SubagentLaunchRequest extends SubagentRunRequest {

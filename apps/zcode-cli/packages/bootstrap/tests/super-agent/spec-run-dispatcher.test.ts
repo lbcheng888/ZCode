@@ -180,4 +180,66 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
     await dispatcher.start(specInput());
     expect(seen[0]?.allowHosts).toEqual(["registry.npmjs.org"]);
   });
+
+  it("同 workspace 并发 start 串行：prepare→launch→stop 原子，后一个 run 等前一个停代理", async () => {
+    // egress 契约是同 workspace 单代理：并发 prepare 会关掉对方的监听。一批 accept
+    // 可同时 dispatch 多个 run，因此 dispatcher 必须按 workspace 串行。
+    const events: string[] = [];
+    let prepareCount = 0;
+    let launchCount = 0;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const egress: SuperAgentSpecLaneContract = {
+      async prepareSpecRunEgress(request): Promise<SpecRunEgressPlan> {
+        prepareCount += 1;
+        events.push(`prepare:${prepareCount}`);
+        return {
+          workspaceRoot: request.workspaceRoot,
+          proxyUrl: "http://127.0.0.1:12345",
+          networkPolicy: { httpProxy: "http://127.0.0.1:12345", noProxy: "" },
+          allowHosts: [],
+        };
+      },
+      async stopSpecRunEgress(workspaceRoot): Promise<void> {
+        events.push(`stop:${workspaceRoot}`);
+      },
+    };
+    const dispatcher = createSpecRunDispatcher({
+      egress,
+      buildProcessEnv: proxyEnv,
+      resolveWorkspaceRoot: () => WORKSPACE_ROOT,
+      launch: {
+        launch: async () => {
+          launchCount += 1;
+          const current = launchCount;
+          events.push(`launch:${current}:start`);
+          if (current === 1) await firstGate;
+          events.push(`launch:${current}:end`);
+          return { runId: `run-${current}` };
+        },
+      },
+    });
+
+    const first = dispatcher.start(specInput());
+    const second = dispatcher.start(specInput());
+    while (!events.includes("launch:1:start")) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // 第一个 run 未结束前，第二个 run 不得 prepare（否则代理已被替换）。
+    expect(prepareCount).toBe(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual([
+      "prepare:1",
+      "launch:1:start",
+      "launch:1:end",
+      `stop:${WORKSPACE_ROOT}`,
+      "prepare:2",
+      "launch:2:start",
+      "launch:2:end",
+      `stop:${WORKSPACE_ROOT}`,
+    ]);
+  });
 });

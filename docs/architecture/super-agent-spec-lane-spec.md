@@ -54,7 +54,7 @@ const SPEC_RESTRICTED_OUTBOUND_DISALLOWED_TOOLS = [
   // 出站网络（sideEffectScope=network）与别名（web_search 经 normalizeToolNameAlias 归一）。
   "WebFetch", "WebSearch",
   // 信道句柄：会话回复、跨 agent 消息、升级、结果投递——spec run 不持有任何对外发声通道。
-  "ReplyToChannel", "SendMessage", "escalate", "submit_result",
+  "ReplyToChannel", "SendMessage", "RespondToCoordinator", "escalate", "submit_result",
   // node_repl：进程内任意 JS（fetch 不走代理 env），是出站旁路。
   "js",
   // 会派生未受限子运行的编排/调度工具：子运行不继承本 profile 的工具面与 env，是出站旁路。
@@ -150,7 +150,7 @@ interface SuperAgentSpecLaneContract {
    **Phase 3 只有 subagent 路径可用**（裁定 A，2026-11-02）：workflow 形态在 profile 接线前禁止启动 spec run——dispatcher 不得以 workflow 形态建 spec run；workflow 的 child runtime 尚不接受 profile/processEnv 注入，起 workflow spec run 等于把受限 profile 与无凭据 env 静默丢掉。接线接缝：给 workflow-facade / script-workflow-child-runtime 增加 `profile` / `processEnv` 入参后再评估 workflow 形态。
 2. **contracts config schema**：`specEgress.allowHosts` 的 repo 配置键与读取（config lane）。
 3. **执行适配器装配**：`create-app`/workflow-facade 把 `processEnv`+`network` 注入 `createNodeExecutionAdapter`（bootstrap app 组合根）。
-4. **`adapters/src/exec/index.ts` 一行再导出** `buildSpecRunEnv`（生产侧经 `@zcode/adapters/exec` 公共入口消费；测试已用相对路径验证实现）。
+4. **`adapters/src/exec/index.ts` 再导出 `buildSpecRunEnv`（已接，2026-11-03）**：生产侧经 `@zcode/adapters/exec` 公共入口消费（create-app 的 spec run 装配）。
 
 ## 7. 测试落点
 

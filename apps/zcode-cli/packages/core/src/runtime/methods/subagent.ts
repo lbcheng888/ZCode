@@ -43,6 +43,7 @@ import {
 import { mirrorSubagentToolEvent } from "../../subagent/tool-event-mirror.js";
 import { isBuiltInExploreAgentProfile } from "../../subagent/profile.js";
 import {
+  SPEC_RESTRICTED_PROFILE_NAME,
   buildSubagentChildDisallowRules,
   filterSubagentChildToolNames,
 } from "../../subagent/tool-policy.js";
@@ -115,6 +116,9 @@ export function createDefaultSubagentPort(
             },
           };
       }
+      // spec run 的无凭据 env + egress network 由宿主经 run 选项注入（单一子进程
+      // I/O 边界）；缺席继承父 runtime 的执行端口（Agent 工具路径字节不变）。
+      const childExecutionPort = options?.executionPort ?? deps.executionPort;
       try {
         request.reportActivity?.();
         const builtInExplore = isBuiltInExploreAgentProfile(request.profile);
@@ -324,7 +328,17 @@ export function createDefaultSubagentPort(
             // toolset 不能再依赖 DEFAULT_SUBAGENT_TYPE，否则默认通用 agent 会被误降级为只读搜索工具面。
             toolset: builtInExplore ? "explore" : "main",
             toolAllowlist: childToolAllowlist,
-            toolDisallowlist: this.config.toolDisallowlist,
+            // spec restricted profile 的 disallowedTools 并入注册期减法表（第二道闸，
+            // 与 workflow child 同一规则）；缺省不加键，Agent 工具路径字节不变。
+            toolDisallowlist:
+              request.profile.name === SPEC_RESTRICTED_PROFILE_NAME
+                ? [
+                    ...new Set([
+                      ...(this.config.toolDisallowlist ?? []),
+                      ...(request.profile.disallowedTools ?? []),
+                    ]),
+                  ]
+                : this.config.toolDisallowlist,
             embeddedSearchBackend: this.config.embeddedSearchBackend,
             nativeSearchEnhancementsEnabled: this.config.nativeSearchEnhancementsEnabled,
             subagents: {
@@ -366,7 +380,7 @@ export function createDefaultSubagentPort(
               ? new PermissionService(defaultPermissionConfig)
               : this.permissionService,
             toolScheduler: deps.toolScheduler ?? defaultScheduler,
-            executionPort: deps.executionPort,
+            executionPort: childExecutionPort,
             fileSystemPort: deps.fileSystemPort,
             // Explore 子运行时会暴露 WebFetch，但之前没有继承主 runtime 的
             // HTTP client port，导致工具在真正发请求前抛出配置错误，而不是网络请求失败。
@@ -608,6 +622,9 @@ function resolveSubagentToolAllowlist(
     ...(this.config.toolDisallowlist ?? []),
     ...(request.disallowedTools ?? []),
   ]);
+  // spec run 是宿主程序驱动的静默 run：RespondToCoordinator 是跨 agent 信道句柄
+  // （spec §2.2 零信道），不能被无条件补进工具面——其余 profile 保持既有行为。
+  const includeCoordinatorResponse = request.profile.name !== SPEC_RESTRICTED_PROFILE_NAME;
   const inheritsAvailableTools =
     request.allowedTools.length === 0 || request.allowedTools.includes("*");
   if (inheritsAvailableTools) {
@@ -627,14 +644,16 @@ function resolveSubagentToolAllowlist(
       [...new Set(availableToolNames)]
         .filter((toolName) => !isSubagentDispatchToolName(toolName))
         .filter((toolName) => filterSubagentChildToolNames([toolName], disallowedRules).length > 0),
+      includeCoordinatorResponse,
     );
   }
   if (request.allowedTools.length > 0) {
     return appendCoordinatorResponseTool(
       filterSubagentChildToolNames(request.allowedTools, disallowedRules),
+      includeCoordinatorResponse,
     );
   }
-  return appendCoordinatorResponseTool([]);
+  return appendCoordinatorResponseTool([], includeCoordinatorResponse);
 }
 
 function filterMcpToolNamesByParentAllowlist(
@@ -650,8 +669,11 @@ function isModelVisibleMcpToolName(toolName: string): boolean {
   return toolName.startsWith("mcp__");
 }
 
-function appendCoordinatorResponseTool(toolNames: readonly string[]): readonly string[] {
-  if (toolNames.includes(RESPOND_TO_COORDINATOR_TOOL_NAME)) {
+function appendCoordinatorResponseTool(
+  toolNames: readonly string[],
+  include: boolean,
+): readonly string[] {
+  if (!include || toolNames.includes(RESPOND_TO_COORDINATOR_TOOL_NAME)) {
     return toolNames;
   }
 
