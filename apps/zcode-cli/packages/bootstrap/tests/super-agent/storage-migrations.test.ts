@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openSuperAgentDatabase } from "../../src/super-agent/storage/index.js";
@@ -79,6 +80,36 @@ describe("super-agent-storage 域库迁移", () => {
       for (const table of DOMAIN_TABLES) expect(tables.has(table)).toBe(true);
     } finally {
       second.close();
+    }
+  });
+
+  it("restore 删 0002 账本行但保留列后重开不报 duplicate column（回滚闭环回归）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "super-agent-db-"));
+    tempDirs.push(dir);
+    const databasePath = join(dir, "super-agent.sqlite");
+
+    const first = await openSuperAgentDatabase({ databasePath });
+    first.close();
+
+    // 模拟 restore-sqlite-migration：账本回到 0001-only，但 card_payload 列留在 schema 里。
+    // 修复前此处重开会因非幂等 ALTER 报 duplicate column name，库直接打不开。
+    const raw = new DatabaseSync(databasePath);
+    raw.exec("delete from schema_migration where id = '0002_decision_log_card_payload'");
+    raw.close();
+
+    const reopened = await openSuperAgentDatabase({ databasePath });
+    try {
+      const journal = reopened.prepare("select id from schema_migration order by id").all() as {
+        id: string;
+      }[];
+      expect(journal.map((row) => row.id)).toContain("0002_decision_log_card_payload");
+      const hasColumn = reopened
+        .prepare("PRAGMA table_info(decision_log)")
+        .all()
+        .some((entry) => (entry as { name?: string }).name === "card_payload");
+      expect(hasColumn).toBe(true);
+    } finally {
+      reopened.close();
     }
   });
 

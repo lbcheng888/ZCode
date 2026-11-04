@@ -139,7 +139,9 @@ describe("M6 would-accept 方案卡出口门", () => {
         destroySession: () => undefined,
       },
       mandateGate: true,
-      now: () => NOW,
+      // 修复时间依赖 flake（2026-11-05）：注入固定 NOW 会让候选 createdAt 早于真实时钟 60s+，
+      // ingest 内 notifyCandidate 立即自动攒批并消费空 verdict 列表，整批降级 record-only。
+      // 本用例不断言时间戳，用真实时钟即可让手动 runBatch 成为唯一裁决者。
     });
     planes.push(plane);
     await plane.start();

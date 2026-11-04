@@ -134,9 +134,21 @@ export const SUPER_AGENT_MIGRATIONS: readonly SqliteMigration[] = [
   {
     // M6 五字段方案卡（2026-11-02 用户裁定）：would-accept 卡的结构化内容列。
     // additive：旧行 card_payload 为 NULL，收件箱出口按门禁决定是否呈现。
+    //
+    // 回滚闭环修复（2026-11-05 迁移审查 major）：restore 会按 backup.json 删除本迁移的账本行，
+    // 但 card_payload 列留在 schema 里；重开时非幂等 ALTER 会报 duplicate column name，库直接打不开。
+    // apply 先查 PRAGMA table_info 再 ALTER，幂等可重跑；sql 字符串保持逐字节不变——
+    // runner 的 checksum 只对 migration.sql 取 sha256，已落账库不会 mismatch。
     appVersion: "0.17.1",
     id: "0002_decision_log_card_payload",
     touchedTables: ["decision_log"],
     sql: `alter table decision_log add column card_payload text;`,
+    apply: (db) => {
+      const hasColumn = db
+        .prepare("PRAGMA table_info(decision_log)")
+        .all()
+        .some((entry) => (entry as { name?: string }).name === "card_payload");
+      if (!hasColumn) db.exec("alter table decision_log add column card_payload text;");
+    },
   },
 ];
