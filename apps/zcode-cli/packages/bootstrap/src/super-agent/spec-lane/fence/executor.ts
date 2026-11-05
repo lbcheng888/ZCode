@@ -6,6 +6,12 @@
  *   - 调用方（dispatcher）据此拒绝启动 spec run，绝不回退到协作式 env 代理；
  *   - teardown 幂等；清理失败原样上浮（保留原始错误链）。
  *
+ * Linux 机制（rootless）：prepare 时只启动宿主 AF_UNIX relay（socket 0600，位于
+ * fence 临时目录）并写入围栏内 Node relay 脚本；每条命令由 command-plan 包装成
+ * `unshare --user --map-root-user --net --fork`，新 netns 内启用 lo、启动 relay、
+ * 用 childBroker(127.0.0.1:relayPort) 代理 env 执行命令。命名空间随命令进程退出
+ * 由内核回收，不存在持久 netns/veth 残留。
+ *
  * 残留对账：每个围栏/probe 临时目录写 owner.json（runId + pid）。prepare 启动时
  * 扫描同前缀目录：存活 pid 的其他 run 一律保留；同 runId 的存活围栏视为
  * fence.residual_conflict；死 pid / 无 owner 且超过乐观等待窗的目录回收计数。
@@ -32,27 +38,22 @@ import {
   type SpecFenceHandle,
 } from "./contract.js";
 import {
-  DEFAULT_IP_PATH,
-  DEFAULT_NFT_PATH,
   DEFAULT_POSIX_SHELL_PATH,
   DEFAULT_SANDBOX_EXEC_PATH,
+  DEFAULT_UNSHARE_PATH,
+  LINUX_IP_CANDIDATE_PATHS,
   buildDarwinFenceProfile,
   buildFencedExecutionCommand,
   buildFenceCommandPlan,
-  buildLinuxFenceNetworkSetupCommands,
-  buildLinuxFenceRuleset,
-  buildLinuxFenceRulesetCommand,
+  buildLinuxFenceProbeScript,
+  buildLinuxFenceRelayScript,
+  resolveLinuxIpPath,
   type DarwinFenceCommandPlan,
+  type FenceArtifactPaths,
   type FenceCommandPlan,
   type LinuxFenceCommandPlan,
 } from "./command-plan.js";
-import {
-  cleanupLinuxNetwork,
-  execNetworkCommand,
-  execNetworkCommands,
-  startBrokerRelay,
-  type BrokerRelayHandle,
-} from "./linux-network.js";
+import { startUnixBrokerRelay, type UnixBrokerRelayHandle } from "./linux-network.js";
 import {
   createFenceTempDir,
   forgetFenceTempDir,
@@ -62,17 +63,21 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/** 探测用哨兵端口：只验证 ruleset 语法与权限，不指向真实 broker。 */
+/** 探测用哨兵端口：不指向真实 broker（Linux 探测自建 echo，不发外部请求）。 */
 const PROBE_BROKER_PORT = 65535;
 const PROBE_TIMEOUT_MS = 10_000;
+/** Linux 语义探测预算：relay 就绪 ≤10s + 转发读回 ≤5s。 */
+const LINUX_PROBE_TIMEOUT_MS = 20_000;
+/** Linux 语义探测的 echo 招呼串（netns 内经 relay 读回后逐字比对）。 */
+const LINUX_PROBE_GREETING = "spec-fence-probe-ok";
 /** 探测进程的临时目录 owner 标记（不是真实 run）。 */
 const PROBE_RUN_ID = "__probe__";
 /** sandbox-exec 语义探测：连接被拒绝时脚本的退出码。 */
 const PROBE_CONNECT_DENIED_EXIT = 42;
 
-/** Linux 网络计划默认熵（每次调用独立随机，避免 namespace/地址冲突）。 */
+/** Linux 网络端口熵：2 字节（与 command-plan 的 relay 端口派生一致）。 */
 function defaultLinuxEntropy(): Uint8Array {
-  return randomBytes(8);
+  return randomBytes(2);
 }
 
 interface ActiveFenceRecord extends FenceRunStatus {
@@ -87,9 +92,10 @@ export interface CreateSpecFenceOptions {
   platform?: NodeJS.Platform;
   shellPath?: string;
   ipPath?: string;
-  nftPath?: string;
+  unsharePath?: string;
+  nodePath?: string;
   sandboxExecPath?: string;
-  /** 网络计划熵（测试注入固定值）；缺省随机 8 字节。 */
+  /** relay 端口熵（测试注入固定值）；缺省随机 2 字节。 */
   linuxNetworkEntropy?: () => Uint8Array;
   /** 启动对账回收残留后的可观测钩子（计数）；钩子抛错按启动失败处理（fail-loud）。 */
   onResidualSwept?: (result: { removed: number }) => void;
@@ -176,6 +182,37 @@ async function closeProbeServer(server: NetServer | undefined): Promise<string |
   } catch (error) {
     return errorDetail(error);
   }
+}
+
+/**
+ * Linux 语义探测的本端 TCP echo：连接建立后回写招呼串。围栏内 relay 经宿主
+ * loopback TCP 转发到这里，读回同一串即证明字节链路完整。
+ */
+async function startProbeEchoServer(
+  greeting: string,
+): Promise<{ server: NetServer; port: number }> {
+  const server = createNetServer((socket) => {
+    socket.on("error", () => socket.destroy());
+    socket.end(`${greeting}\n`);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(0, "127.0.0.1");
+  });
+  const address = server.address();
+  if (typeof address !== "object" || address === null) {
+    throw new Error("围栏探测 echo 服务器端口解析失败");
+  }
+  return { server, port: address.port };
 }
 
 function buildConnectProbeScript(port: number): string {
@@ -267,22 +304,120 @@ async function verifyDarwinFenceSemantics(input: {
 }
 
 /**
- * Linux 围栏在子进程降权隔离落地前一律不可用（平台矩阵 status=unimplemented）。
+ * Linux 围栏能力探测（spec §3.4「探测不确定 = 拒绝」）。
  *
- * 只验证「netns/veth/nftables 能建」不构成安全证据：建网需要 init user namespace 的
- * CAP_SYS_ADMIN/CAP_NET_ADMIN，被围栏子进程与父进程同 UID/同 capabilities，可直接
- * `nft flush ruleset` 或 `nsenter -t 1 -n` 进入宿主 netns 出网（E1/E3 不成立）。
- * 因此这里绝不返回 available；命令脚手架保留供后续实现降权 + 逃逸负向验证。
+ * 不仅查 X_OK：在真实 netns 内跑生产同款 relay 启动脚本，并经 relay 读回宿主
+ * echo 的招呼串，证明「unshare + lo + relay + AF_UNIX 转发」整条链路可用
+ * （Electron 宿主缺 ELECTRON_RUN_AS_NODE、relay 起不来等情况在探测期暴露，
+ * 不会推迟到每条命令 2s 超时）。探测失败 = typed unavailable，调用方拒绝启动，
+ * 绝不回退 env 代理。
  */
-async function probeLinux(plan: LinuxFenceCommandPlan): Promise<FenceCapability> {
-  return {
+async function probeLinux(
+  plan: LinuxFenceCommandPlan,
+  options: CreateSpecFenceOptions,
+): Promise<FenceCapability> {
+  const platform: NodeJS.Platform = "linux";
+  const unavailable = (code: FenceErrorCode, detail: string): FenceCapability => ({
     available: false,
-    platform: "linux",
+    platform,
     mechanism: plan.mechanism,
-    code: "fence.unsupported_platform",
-    detail:
-      "Linux netns 围栏未启用：子进程与特权父进程同 UID/同 capabilities，可 nft flush 或进入宿主 netns；降权隔离与逃逸负向验证未实现（spec §3.3）",
-  };
+    code,
+    detail,
+  });
+  if (!(await fileExecutable(plan.unsharePath))) {
+    return unavailable("fence.startup_failed", `unshare 不可执行: ${plan.unsharePath}`);
+  }
+  if (!(await fileExecutable(plan.shellPath))) {
+    return unavailable("fence.startup_failed", `围栏内 shell 不可执行: ${plan.shellPath}`);
+  }
+  if (!(await fileExecutable(plan.nodePath))) {
+    return unavailable("fence.startup_failed", `relay Node 可执行文件不可用: ${plan.nodePath}`);
+  }
+  // PATH 不可靠（桌面/服务进程常缺 /usr/sbin）：解析绝对候选并让探测与 bootstrap
+  // 共用同一 ip 路径。
+  const ipPath = await resolveLinuxIpPath(options.ipPath, fileExecutable);
+  if (ipPath === undefined) {
+    return unavailable(
+      "fence.startup_failed",
+      `未找到可执行的 ip（候选绝对路径 ${LINUX_IP_CANDIDATE_PATHS.join(", ")}）；请显式配置 ipPath`,
+    );
+  }
+  const effectivePlan: LinuxFenceCommandPlan = { ...plan, ipPath };
+  let dir: string | undefined;
+  let echo: { server: NetServer; port: number } | undefined;
+  let relay: UnixBrokerRelayHandle | undefined;
+  // fail-closed 缺省：探测完成前一律按不可用。
+  let capability: FenceCapability = unavailable(
+    "fence.startup_failed",
+    "Linux 围栏语义探测未完成",
+  );
+  try {
+    dir = await createFenceTempDir(PROBE_RUN_ID);
+    const relayScriptPath = join(dir, "relay.mjs");
+    const unixSocketPath = join(dir, "relay.sock");
+    const readyFilePath = join(dir, "relay-ready-probe");
+    await writeFile(relayScriptPath, buildLinuxFenceRelayScript(), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    echo = await startProbeEchoServer(LINUX_PROBE_GREETING);
+    relay = await startUnixBrokerRelay({
+      socketPath: unixSocketPath,
+      target: { host: "127.0.0.1", port: echo.port },
+      platform,
+    });
+    await execFileAsync(
+      effectivePlan.unsharePath,
+      [
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--fork",
+        "--",
+        effectivePlan.shellPath,
+        "-c",
+        buildLinuxFenceProbeScript({
+          plan: effectivePlan,
+          artifacts: { relayScriptPath, unixSocketPath, readyFilePath },
+          expectation: LINUX_PROBE_GREETING,
+        }),
+      ],
+      { timeout: LINUX_PROBE_TIMEOUT_MS, encoding: "utf8" },
+    );
+    capability = {
+      available: true,
+      platform,
+      mechanism: plan.mechanism,
+      detail: `unshare --user --map-root-user --net 可用（ip=${ipPath}）；netns 内 relay 就绪并经宿主 AF_UNIX 转发成功；外部 IP 无路由，出站仅经宿主 AF_UNIX relay`,
+    };
+  } catch (error) {
+    const failure = classifyFailure(error);
+    capability = unavailable(
+      failure.code,
+      `Linux 围栏语义探测失败（需要内核允许 unprivileged user namespace，且 netns 内 ip/relay/AF_UNIX 转发可用）: ${failure.detail}`,
+    );
+  } finally {
+    let cleanupFailure: string | undefined;
+    if (relay) {
+      try {
+        await relay.close();
+      } catch (error) {
+        cleanupFailure = `AF_UNIX relay 清理失败: ${errorDetail(error)}`;
+      }
+    }
+    if (echo) {
+      const failure = await closeProbeServer(echo.server);
+      if (failure) cleanupFailure = `${cleanupFailure ? `${cleanupFailure}；` : ""}探测 echo 关闭失败: ${failure}`;
+    }
+    if (dir) {
+      const failure = await releaseFenceTempDir(dir);
+      if (failure) cleanupFailure = `${cleanupFailure ? `${cleanupFailure}；` : ""}探测临时目录清理失败: ${failure}`;
+    }
+    if (cleanupFailure) {
+      capability.detail = `${capability.detail}；探测残留清理失败: ${cleanupFailure}`;
+    }
+  }
+  return capability;
 }
 
 async function probeDarwin(plan: DarwinFenceCommandPlan): Promise<FenceCapability> {
@@ -363,7 +498,7 @@ async function probeCapability(
   options: CreateSpecFenceOptions,
 ): Promise<FenceCapability> {
   const entry = fencePlatformMatrixEntry(platform);
-  // status 而非仅 mechanism 决定可用性：已有脚手架但语义不成立的平台（Linux）也必须
+  // status 而非仅 mechanism 决定可用性：矩阵登记为 unimplemented 的平台必须
   // 在矩阵层 fail-closed，避免仅改 mechanism 字段就意外启用。
   if (entry.status !== "implemented" || entry.mechanism === "unsupported") {
     return {
@@ -378,9 +513,10 @@ async function probeCapability(
     platform,
     broker: { host: "localhost", port: PROBE_BROKER_PORT },
     shellPath: options.shellPath ?? DEFAULT_POSIX_SHELL_PATH,
-    ipPath: options.ipPath ?? DEFAULT_IP_PATH,
-    nftPath: options.nftPath ?? DEFAULT_NFT_PATH,
-    runId: PROBE_RUN_ID,
+    // linux 由 probeLinux 解析绝对路径后覆盖；纯函数构建器缺省值不用于生产命令。
+    ...(options.ipPath !== undefined ? { ipPath: options.ipPath } : {}),
+    unsharePath: options.unsharePath ?? DEFAULT_UNSHARE_PATH,
+    nodePath: options.nodePath,
     linuxEntropy: (options.linuxNetworkEntropy ?? defaultLinuxEntropy)(),
     sandboxExecPath: options.sandboxExecPath ?? DEFAULT_SANDBOX_EXEC_PATH,
   });
@@ -393,7 +529,7 @@ async function probeCapability(
       detail: plan.detail,
     };
   }
-  return plan.platform === "linux" ? probeLinux(plan) : probeDarwin(plan);
+  return plan.platform === "linux" ? probeLinux(plan, options) : probeDarwin(plan);
 }
 
 async function prepareFence(
@@ -408,14 +544,22 @@ async function prepareFence(
 
   let plan: FenceCommandPlan;
   try {
+    // 生产命令与探测共用同一绝对 ip 路径；PATH 里的 `ip` 不作为缺省。
+    const ipPath =
+      platform === "linux" ? await resolveLinuxIpPath(options.ipPath, fileExecutable) : undefined;
+    if (platform === "linux" && ipPath === undefined) {
+      throw new Error(
+        `未找到可执行的 ip（候选绝对路径 ${LINUX_IP_CANDIDATE_PATHS.join(", ")}）；请显式配置 ipPath`,
+      );
+    }
     // broker 校验（loopback/端口）由构建器负责，错误在此收敛为 typed 启动失败。
     plan = buildFenceCommandPlan({
       platform,
       broker: request.broker,
       shellPath: options.shellPath ?? DEFAULT_POSIX_SHELL_PATH,
-      ipPath: options.ipPath ?? DEFAULT_IP_PATH,
-      nftPath: options.nftPath ?? DEFAULT_NFT_PATH,
-      runId: request.runId,
+      ...(ipPath !== undefined ? { ipPath } : {}),
+      unsharePath: options.unsharePath ?? DEFAULT_UNSHARE_PATH,
+      nodePath: options.nodePath,
       linuxEntropy: (options.linuxNetworkEntropy ?? defaultLinuxEntropy)(),
       sandboxExecPath: options.sandboxExecPath ?? DEFAULT_SANDBOX_EXEC_PATH,
     });
@@ -439,14 +583,7 @@ async function prepareFence(
     );
   }
   try {
-    const swept = await sweepResidualFences(platform, request.runId, async (owner) => {
-      if (!owner.linuxNetwork) return;
-      const detail = await cleanupLinuxNetwork(
-        owner.linuxNetwork,
-        owner.ipPath ?? DEFAULT_IP_PATH,
-      );
-      if (detail) throw new Error(`残留 netns/veth 清理失败: ${detail}`);
-    });
+    const swept = await sweepResidualFences(platform, request.runId);
     options.onResidualSwept?.({ removed: swept.removed });
   } catch (error) {
     if (error instanceof FenceStartupError) throw error;
@@ -460,12 +597,7 @@ async function prepareFence(
 
   let dir: string;
   try {
-    dir = await createFenceTempDir(
-      request.runId,
-      plan.platform === "linux"
-        ? { linuxNetwork: plan.network, ipPath: plan.ipPath }
-        : undefined,
-    );
+    dir = await createFenceTempDir(request.runId);
   } catch (error) {
     throw new FenceStartupError(
       "fence.startup_failed",
@@ -475,45 +607,33 @@ async function prepareFence(
     );
   }
 
-  let relay: BrokerRelayHandle | undefined;
-  let linuxPlan: LinuxFenceCommandPlan | undefined;
-  let linuxNetworkCreated = false;
+  let relayServer: UnixBrokerRelayHandle | undefined;
   try {
     if (plan.platform === "linux") {
-      linuxPlan = plan;
-      const network = plan.network;
-      await execNetworkCommands(
-        buildLinuxFenceNetworkSetupCommands(network, { ipPath: plan.ipPath }),
-      );
-      linuxNetworkCreated = true;
-      // relay 监听 veth 宿主地址，原始 TCP 转发到宿主 loopback egress 代理。
-      relay = await startBrokerRelay({
-        listenHost: network.hostAddress,
+      const relayScriptPath = join(dir, "relay.mjs");
+      const unixSocketPath = join(dir, "relay.sock");
+      await writeFile(relayScriptPath, buildLinuxFenceRelayScript(), {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      relayServer = await startUnixBrokerRelay({
+        socketPath: unixSocketPath,
         target: request.broker,
         platform,
       });
-      const childBroker: FenceChildBroker = {
-        host: network.hostAddress,
-        port: relay.port,
-      };
-      const rulesetPath = join(dir, "ruleset.nft");
-      await writeFile(
-        rulesetPath,
-        buildLinuxFenceRuleset({ network, broker: childBroker }),
-        "utf8",
+      // 新 netns 只有 loopback：childBroker 是围栏内 relay 端点，不是宿主 broker。
+      const childBroker: FenceChildBroker = { host: "127.0.0.1", port: plan.relayPort };
+      const relayHandle = relayServer;
+      const handle = makeHandle(
+        request,
+        plan,
+        dir,
+        { relayScriptPath, unixSocketPath },
+        childBroker,
+        async () => {
+          await relayHandle.close();
+        },
       );
-      await execNetworkCommand(
-        buildLinuxFenceRulesetCommand(network, rulesetPath, {
-          ipPath: plan.ipPath,
-          nftPath: plan.nftPath,
-        }),
-      );
-      const relayHandle = relay;
-      const handle = makeHandle(request, plan, dir, { rulesetPath }, childBroker, async () => {
-        await relayHandle.close();
-        const cleanupFailure = await cleanupLinuxNetwork(network, plan.ipPath);
-        if (cleanupFailure) throw new Error(`Linux 围栏网络清理失败: ${cleanupFailure}`);
-      });
       activeFences.set(request.runId, {
         runId: request.runId,
         mechanism: plan.mechanism,
@@ -543,23 +663,20 @@ async function prepareFence(
     });
     return handle;
   } catch (error) {
-    // 失败原样上抛前先回收本 prepare 自己创建的资源（relay/netns/veth/目录）；
+    // 失败原样上抛前先回收本 prepare 自己创建的资源（relay/目录）；
     // 清理失败追加到消息里，不掩盖主错误。
     let cleanupDetail: string | undefined;
-    if (relay) {
+    if (relayServer) {
       try {
-        await relay.close();
+        await relayServer.close();
       } catch (closeError) {
-        cleanupDetail = `broker relay 清理失败: ${errorDetail(closeError)}`;
+        cleanupDetail = `AF_UNIX relay 清理失败: ${errorDetail(closeError)}`;
       }
     }
-    if (linuxNetworkCreated && linuxPlan) {
-      const networkCleanup = await cleanupLinuxNetwork(linuxPlan.network, linuxPlan.ipPath);
-      if (networkCleanup) {
-        cleanupDetail = `${cleanupDetail ? `${cleanupDetail}；` : ""}netns/veth 清理失败: ${networkCleanup}`;
-      }
+    const dirCleanup = await releaseFenceTempDir(dir);
+    if (dirCleanup) {
+      cleanupDetail = `${cleanupDetail ? `${cleanupDetail}；` : ""}临时目录清理失败: ${dirCleanup}`;
     }
-    await releaseFenceTempDir(dir);
     throw new FenceStartupError(
       "fence.startup_failed",
       platform,
@@ -573,7 +690,7 @@ function makeHandle(
   request: PrepareFenceRequest,
   plan: LinuxFenceCommandPlan | DarwinFenceCommandPlan,
   dir: string,
-  artifacts: { rulesetPath?: string; profilePath?: string },
+  artifacts: FenceArtifactPaths,
   childBroker: FenceChildBroker,
   teardownExtra?: () => Promise<void>,
 ): SpecFenceHandle {
@@ -583,6 +700,15 @@ function makeHandle(
     broker: request.broker,
     childBroker,
     wrapExecutionRequest(execution: ExecutionRequest): ExecutionRequest {
+      // Linux 的就绪标记必须每次 wrap 唯一：同一 run 内并发命令各有独立 netns/relay，
+      // 共享旧标记会让后发命令在 relay 就绪前提前执行。
+      const perCommandArtifacts: FenceArtifactPaths =
+        plan.platform === "linux"
+          ? {
+              ...artifacts,
+              readyFilePath: join(dir, `relay-ready-${randomBytes(8).toString("hex")}`),
+            }
+          : artifacts;
       return {
         ...execution,
         // 执行适配器据此禁止围栏外的 login-shell snapshot / prelude（P6 §3.2）。
@@ -590,11 +716,11 @@ function makeHandle(
         command: buildFencedExecutionCommand({
           plan,
           command: execution.command,
-          artifacts,
+          artifacts: perCommandArtifacts,
         }),
       };
     },
-    // 幂等：rm force 对已清理目录是 no-op；Linux 的 netns/veth 删除遇已消失视为成功。
+    // 幂等：rm force 对已清理目录是 no-op；AF_UNIX relay close 对已关闭/已删除 socket 是 no-op。
     // 清理失败原样上浮（保留原始错误链）；finally 从活跃表移除，后续 sweep 仍能回收残留。
     async teardown(): Promise<void> {
       try {

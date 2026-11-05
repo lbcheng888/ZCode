@@ -9,7 +9,7 @@
  *   - profile 以显式覆盖传入，不进 runtime 的 agent registry（模型侧 Agent 工具
  *     不能自选 spec profile，避免拿到常规 env 执行）；
  *   - 若 dispatcher 已建立 OS 围栏（P6 §3），执行端口被包装：每条命令改写为
- *     围栏内执行（Linux unshare --net + nftables / macOS sandbox-exec）；
+ *     围栏内执行（Linux rootless userns+netns + AF_UNIX relay / macOS sandbox-exec）；
  *   - run 终态（成功/失败/取消）后关闭本次执行端口，围栏与 egress 代理由
  *     dispatcher finally 清理。
  *

@@ -5,7 +5,7 @@
  *   2. buildSpecRestrictedProfile() → 受限 profile（工具面/权限模式结构固定）；
  *   3. fence.prepare → per-run OS egress 围栏（可选；启用时失败即拒绝启动，
  *      spec §3.4 顺序：代理之后、命令执行之前）；
- *   4. 以 fence.childBroker 改写代理端点（Linux = veth relay）→ buildProcessEnv →
+ *   4. 以 fence.childBroker 改写代理端点（Linux = 围栏 netns 内 relay）→ buildProcessEnv →
  *      无凭据子进程 env（生产 = adapters buildSpecRunEnv；接线缝见 spec §6-4）；
  *   5. launch → **subagent run**（Phase 3 唯一合法形态；workflow 形态在 profile /
  *      processEnv 接线前禁止启动，本端口不提供 workflow 形态）；
@@ -171,9 +171,9 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
           allowHosts: plan.allowHosts,
         });
       }
-      // Linux 围栏内子进程必须改用 veth relay 端点（宿主 loopback broker 跨 netns
-      // 不可达）；darwin 的 childBroker 与宿主 broker 同址。env 与 network 必须
-      // 同源指向最终端点，否则 launch 会拒绝启动。
+      // Linux 围栏内子进程必须改用 netns 内 relay 端点（宿主 loopback broker 跨
+      // netns 不可达）；darwin 的 childBroker 与宿主 broker 同址。env 与 network
+      // 必须同源指向最终端点，否则 launch 会拒绝启动。
       const effectiveProxyUrl = fenceHandle
         ? `http://${fenceHandle.childBroker.host}:${fenceHandle.childBroker.port}`
         : plan.proxyUrl;

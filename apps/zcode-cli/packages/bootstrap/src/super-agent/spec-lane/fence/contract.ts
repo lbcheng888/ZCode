@@ -7,13 +7,16 @@
  * run 拒绝启动，绝不静默回退到 env 代理。
  *
  * 每个平台只允许一个“主围栏实现”（spec §3.3）：
- *   linux  = netns+veth+nftables 脚手架（特权子进程可逃逸，未降权前按 unimplemented fail-closed）
+ *   linux  = rootless user+net namespace + AF_UNIX→TCP broker relay（无需 root/veth/nft）
  *   darwin = sandbox-exec profile（Apple 已标记 deprecated，探测失败即关闭）
  *   win32  = 尚未实现，typed unsupported（不得静默降级）
  */
 import type { ExecutionRequest } from "@zcode/contracts";
 
-export type FenceMechanism = "linux-netns-nftables" | "darwin-sandbox-exec" | "unsupported";
+export type FenceMechanism =
+  | "linux-userns-netns-unix-relay"
+  | "darwin-sandbox-exec"
+  | "unsupported";
 
 export type FenceErrorCode =
   | "fence.unsupported_platform"
@@ -32,9 +35,10 @@ export type FenceEgressScope = "allowlist" | "zero-egress-only";
 /**
  * 围栏内子进程实际可见的 broker 端点。
  * darwin：与宿主 egress 代理同址（localhost:<port>）；
- * linux：宿主 broker 在初始 netns 的 loopback，新 netns 不可达，因此围栏在
- * veth 宿主端启动 relay（hostAddress:<relayPort>），子进程 env 指向该端点。
- * dispatcher 必须按 childBroker 重写 HTTP_PROXY/network，不能沿用宿主 loopback。
+ * linux：新 netns 只有 loopback，围栏内 relay 监听 127.0.0.1:<relayPort>（每次
+ * 命令独立 netns），再经宿主 AF_UNIX socket 转发到 egress broker；子进程 env
+ * 指向该端点。dispatcher 必须按 childBroker 重写 HTTP_PROXY/network，不能沿用
+ * 宿主 loopback。
  */
 export interface FenceChildBroker {
   host: string;
@@ -56,10 +60,11 @@ export interface FencePlatformMatrixEntry {
 export const SPEC_FENCE_PLATFORM_MATRIX: readonly FencePlatformMatrixEntry[] = [
   {
     platform: "linux",
-    mechanism: "unsupported",
-    status: "unimplemented",
+    mechanism: "linux-userns-netns-unix-relay",
+    status: "implemented",
+    egressScope: "allowlist",
     notes:
-      "netns+veth+nftables 命令脚手架已存在，但当前语义不成立：建网需要 init user namespace 的 CAP_SYS_ADMIN/CAP_NET_ADMIN（通常 = root），被围栏子进程与父进程同 UID/同 capabilities，可执行 `nft flush ruleset` 或 `nsenter -t 1 -n` 进入宿主 netns 出网，E1/E3 无法成立。在子进程降权隔离（专用无 CAP 用户或 user namespace + drop capabilities）与逃逸负向验证落地前，按能力缺席 fail-closed：启用围栏时 Linux spec run 拒绝启动，不宣称内核级 egress 围栏。",
+      "rootless：每条命令经 `unshare --user --map-root-user --net --fork` 进入独立 user+net namespace；新 netns 只有 loopback，无外部路由（外部 IP 结构性不可达）。围栏内 Node relay 监听 127.0.0.1:<relayPort>，经宿主 AF_UNIX socket（0700 目录内 0600）转发到宿主 loopback egress broker；env 代理是协作层，硬约束来自 netns。子进程在宿主 userns 无 CAP_SYS_ADMIN，`nsenter -t 1 -n` 无法进入宿主 netns。不依赖 root/veth/nftables；内核禁用 unprivileged user namespaces 或缺少 unshare/ip 时 probe 在真实 netns 内启动 relay 并验证一次转发，失败返回 typed unavailable，run 拒绝启动。AF_UNIX 文件系统 socket 不受 netns 约束：围栏内子进程与宿主同 uid，可访问该用户可访问的宿主 unix socket（docker.sock/ssh-agent 等）；同 uid 本机攻击者不在威胁模型，本围栏只约束 IP 网络，不宣称唯一可达外部 = broker。",
   },
   {
     platform: "darwin",
@@ -132,9 +137,8 @@ export interface PrepareFenceRequest {
   broker: { host: string; port: number };
   /**
    * 本次 run 生效的 egress 白名单（已归一化，空数组 = 零 egress）；转发由宿主
-   * egress 代理负责，围栏只放行 childBroker 端点。当前 Linux netns 实现登记为
-   * unimplemented（见平台矩阵，同 UID 子进程可逃逸），启用围栏时按能力缺席拒绝启动；
-   * darwin 支持非空 allowlist。
+   * egress 代理负责，围栏只保证子进程只能到达 childBroker 端点（Linux netns）
+   * 或 broker 本身（darwin）。两个已实现平台都支持非空 allowlist。
    */
   allowHosts?: readonly string[];
 }
@@ -145,7 +149,7 @@ export interface FenceRunStatus {
   mechanism: FenceMechanism;
   /** 宿主侧 egress 代理端点（请求入参）。 */
   broker: { host: string; port: number };
-  /** 围栏内子进程实际使用的 broker 端点（linux = veth relay；darwin = broker 本身）。 */
+  /** 围栏内子进程实际使用的 broker 端点（linux = netns 内 relay；darwin = broker 本身）。 */
   childBroker: FenceChildBroker;
   pid: number;
   startedAt: Date;

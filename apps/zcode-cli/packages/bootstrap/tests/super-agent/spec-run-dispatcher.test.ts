@@ -264,7 +264,7 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
         events.push(`fence.prepare:${request.runId}`);
         const handle: SpecFenceHandle = {
           runId: request.runId,
-          mechanism: "linux-netns-nftables",
+          mechanism: "linux-userns-netns-unix-relay",
           broker: request.broker,
           // linux childBroker = veth relay 端点，dispatcher 必须据此重写 env/network。
           childBroker: { host: "10.2.3.1", port: 54321 },

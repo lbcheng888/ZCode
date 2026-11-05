@@ -4,18 +4,16 @@
  * 每个围栏/probe 临时目录写 owner.json（runId + pid）。prepare 启动时扫描同前缀
  * 目录：存活 pid 的其他 run 一律保留；同 runId 的存活围栏视为
  * fence.residual_conflict；死 pid / 无 owner 且超过乐观等待窗的目录回收计数。
+ *
+ * 当前 Linux 设计使用 per-command `unshare` 临时命名空间，进程退出即随内核回收，
+ * 不需要 `ip netns del`/veth 清理。owner.json 里可能仍带旧版（已退役的
+ * netns+veth 实现）留下的 `linuxNetwork`/`ipPath` 字段：仍按受信前缀与 /30 地址
+ * 强校验，伪造/篡改一律 typed 拒绝且不执行任何外部命令；合法旧记录只删除目录。
  */
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  DEFAULT_IP_PATH,
-  LINUX_FENCE_NAMESPACE_PREFIX,
-  LINUX_INTERFACE_PREFIX,
-  LINUX_NAMESPACE_INTERFACE_PREFIX,
-  type LinuxFenceNetworkPlan,
-} from "./command-plan.js";
 import { FenceStartupError } from "./contract.js";
 
 const FENCE_DIR_PREFIX = "zcode-spec-fence-";
@@ -26,16 +24,35 @@ const FENCE_OWNER_FILE = "owner.json";
  */
 const RESIDUAL_OWNERLESS_GRACE_MS = 60_000;
 
-/** 由 owner 派生、供死进程残留回收使用的网络面（Linux 才有）。 */
-export interface FenceOwnerMetadata {
-  linuxNetwork?: LinuxFenceNetworkPlan;
-  ipPath?: string;
+/** 旧版 owner.json 里登记过的受信默认 ip 路径。 */
+const LEGACY_DEFAULT_IP_PATH = "ip";
+const LEGACY_LINUX_FENCE_NAMESPACE_PREFIX = "zcode-spec-";
+const LEGACY_LINUX_INTERFACE_PREFIX = "zch-";
+const LEGACY_LINUX_NAMESPACE_INTERFACE_PREFIX = "zcn-";
+const LINUX_FENCE_ADDRESS_MIN_OCTET = 1;
+const LINUX_FENCE_ADDRESS_MAX_OCTET = 254;
+/** 地址段按 /30 对齐：host = base+1（≡1 mod 4），namespace = host+1。 */
+const LINUX_FENCE_HOST_LAST_OCTET_MOD = 4;
+/** 名称后缀由随机熵生成的十六进制（namespace 10 位，接口 8 位）；收紧到字符集。 */
+const LINUX_NAMESPACE_NAME_SUFFIX_PATTERN = /^[0-9a-f]{10}$/;
+const LINUX_INTERFACE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
+
+/** 旧版 owner.json 的 Linux 网络计划形状（仅用于校验，不再据此执行 ip 命令）。 */
+interface LegacyLinuxFenceNetworkPlan {
+  namespaceName: string;
+  hostInterface: string;
+  namespaceInterface: string;
+  hostAddress: string;
+  namespaceAddress: string;
+  prefixLength: number;
 }
 
-interface FenceOwnerRecord extends FenceOwnerMetadata {
+interface FenceOwnerRecord {
   runId: string;
   pid: number;
   startedAt: number;
+  linuxNetwork?: LegacyLinuxFenceNetworkPlan;
+  ipPath?: string;
 }
 
 /** 本进程内活跃的临时目录（含并发 probe 目录）；sweep 不误删。 */
@@ -59,15 +76,6 @@ function isProcessAlive(pid: number): boolean {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
-
-const LINUX_FENCE_ADDRESS_MIN_OCTET = 1;
-const LINUX_FENCE_ADDRESS_MAX_OCTET = 254;
-/** 地址段按 /30 对齐：host = base+1（≡1 mod 4），namespace = host+1。 */
-const LINUX_FENCE_HOST_LAST_OCTET_MOD = 4;
-/** 名称后缀由随机熵生成的十六进制（namespace 10 位，接口 8 位）；收紧到字符集，
- * 避免带路径分隔符/空白的伪造名称进入 `ip netns del` / `ip link del`。 */
-const LINUX_NAMESPACE_NAME_SUFFIX_PATTERN = /^[0-9a-f]{10}$/;
-const LINUX_INTERFACE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
 
 function matchesPrefixedName(
   value: string,
@@ -93,12 +101,12 @@ function parseStrictIpv4(value: string): [number, number, number, number] | unde
 
 /**
  * owner.json 来自共享 tmpdir，可能由任意本地用户写入（或以 root 运行时被篡改）。
- * 清理会执行 `ip netns del` / `ip link del`，因此必须先强校验名称前缀与 /30 地址段；
- * 任何不符合的字段都拒绝，绝不把原始字符串交给 ip 命令。
+ * 旧版字段虽不再驱动外部命令，仍必须强校验名称前缀与 /30 地址段：任何不符合的
+ * 字段都拒绝启动（fail-loud），不把不可信内容当配置。
  */
-function isLinuxNetworkPlan(value: unknown): value is LinuxFenceNetworkPlan {
+function isLegacyLinuxNetworkPlan(value: unknown): value is LegacyLinuxFenceNetworkPlan {
   if (typeof value !== "object" || value === null) return false;
-  const plan = value as Partial<LinuxFenceNetworkPlan>;
+  const plan = value as Partial<LegacyLinuxFenceNetworkPlan>;
   if (
     typeof plan.namespaceName !== "string" ||
     typeof plan.hostInterface !== "string" ||
@@ -111,19 +119,25 @@ function isLinuxNetworkPlan(value: unknown): value is LinuxFenceNetworkPlan {
   if (
     !matchesPrefixedName(
       plan.namespaceName,
-      LINUX_FENCE_NAMESPACE_PREFIX,
+      LEGACY_LINUX_FENCE_NAMESPACE_PREFIX,
       LINUX_NAMESPACE_NAME_SUFFIX_PATTERN,
     )
   ) {
     return false;
   }
-  if (!matchesPrefixedName(plan.hostInterface, LINUX_INTERFACE_PREFIX, LINUX_INTERFACE_SUFFIX_PATTERN)) {
+  if (
+    !matchesPrefixedName(
+      plan.hostInterface,
+      LEGACY_LINUX_INTERFACE_PREFIX,
+      LINUX_INTERFACE_SUFFIX_PATTERN,
+    )
+  ) {
     return false;
   }
   if (
     !matchesPrefixedName(
       plan.namespaceInterface,
-      LINUX_NAMESPACE_INTERFACE_PREFIX,
+      LEGACY_LINUX_NAMESPACE_INTERFACE_PREFIX,
       LINUX_INTERFACE_SUFFIX_PATTERN,
     )
   ) {
@@ -166,18 +180,18 @@ async function readFenceOwner(
   ) {
     return undefined;
   }
-  if (parsed.linuxNetwork !== undefined && !isLinuxNetworkPlan(parsed.linuxNetwork)) {
+  if (parsed.linuxNetwork !== undefined && !isLegacyLinuxNetworkPlan(parsed.linuxNetwork)) {
     throw new FenceStartupError(
       "fence.startup_failed",
       platform,
-      `围栏 owner.json 的 Linux 网络计划未通过前缀/地址校验（${dir}）；拒绝执行 ip 命令`,
+      `围栏 owner.json 的 Linux 网络计划未通过前缀/地址校验（${dir}）；拒绝处理不可信残留`,
     );
   }
-  if (parsed.ipPath !== undefined && parsed.ipPath !== DEFAULT_IP_PATH) {
+  if (parsed.ipPath !== undefined && parsed.ipPath !== LEGACY_DEFAULT_IP_PATH) {
     throw new FenceStartupError(
       "fence.startup_failed",
       platform,
-      `围栏 owner.json 的 ipPath 不是受信默认值（${dir}）；拒绝执行未知可执行文件`,
+      `围栏 owner.json 的 ipPath 不是受信默认值（${dir}）；拒绝处理不可信残留`,
     );
   }
   return {
@@ -199,9 +213,8 @@ async function directoryAgeMs(dir: string): Promise<number | undefined> {
 }
 
 /**
- * 共享 tmpdir 中的同前缀目录可能由其他本地用户创建。root 运行时若清理这些目录，
- * 会把攻击者伪造 owner.json 里的 ip 命令当特权操作执行；因此只处理当前 euid
- * 拥有的目录（win32 无 getuid 时不做该检查，但仍受 owner.json 字段校验约束）。
+ * 共享 tmpdir 中的同前缀目录可能由其他本地用户创建。只处理当前 euid 拥有的目录，
+ * 避免跨用户删除/读取（win32 无 getuid 时不做该检查，但仍受 owner.json 字段校验约束）。
  */
 async function directoryOwnedByCurrentUser(dir: string): Promise<boolean> {
   if (typeof process.getuid !== "function") return true;
@@ -217,10 +230,7 @@ async function directoryOwnedByCurrentUser(dir: string): Promise<boolean> {
  * 创建受管临时目录并写入 owner.json。任何一步失败都向调用方上抛原始错误，
  * 由 prepare/probe 边界收敛成 typed FenceStartupError / unavailable。
  */
-export async function createFenceTempDir(
-  runId: string,
-  metadata?: FenceOwnerMetadata,
-): Promise<string> {
+export async function createFenceTempDir(runId: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), FENCE_DIR_PREFIX));
   activeFenceDirs.add(dir);
   try {
@@ -228,7 +238,6 @@ export async function createFenceTempDir(
       runId,
       pid: process.pid,
       startedAt: Date.now(),
-      ...metadata,
     };
     await writeFile(join(dir, FENCE_OWNER_FILE), JSON.stringify(owner), "utf8");
     return dir;
@@ -262,7 +271,6 @@ export function forgetFenceTempDir(dir: string): void {
 export async function sweepResidualFences(
   platform: NodeJS.Platform,
   currentRunId: string,
-  onReclaimDeadOwner?: (owner: FenceOwnerRecord) => Promise<void>,
 ): Promise<{ removed: number }> {
   let entries;
   try {
@@ -281,7 +289,7 @@ export async function sweepResidualFences(
     if (!entry.isDirectory() || !entry.name.startsWith(FENCE_DIR_PREFIX)) continue;
     const dir = join(tmpdir(), entry.name);
     if (activeFenceDirs.has(dir)) continue;
-    // 非本 euid 拥有的同前缀目录：不读、不删、绝不执行 ip 命令（共享 tmpdir 伪造面）。
+    // 非本 euid 拥有的同前缀目录：不读、不删（共享 tmpdir 伪造面）。
     if (!(await directoryOwnedByCurrentUser(dir))) continue;
 
     const owner = await readFenceOwner(dir, platform);
@@ -311,9 +319,7 @@ export async function sweepResidualFences(
       }
     }
     try {
-      // 死 owner 的网络残留（Linux netns/veth）必须先回收，否则仅删目录会留下
-      // 命名空间与接口。回收失败按启动失败处理（fail-loud，不静默遗留）。
-      if (owner && onReclaimDeadOwner) await onReclaimDeadOwner(owner);
+      // 新设计没有持久 netns/veth，死进程只留文件残留；直接删目录。
       await rm(dir, { force: true, recursive: true });
       removed += 1;
     } catch (error) {

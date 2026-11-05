@@ -2,12 +2,19 @@
  * P6 OS 围栏命令构建器（纯函数，无 I/O）。
  *
  * 构建/执行分离：本文件只把「平台 + broker 端点 + 子命令」翻译成 argv / profile /
- * ruleset / netns 网络计划，便于三平台分支单测；executor 负责探测、落临时文件、
- * 创建 namespace/veth、启动 broker relay 并包装执行端口。
+ * relay 脚本，便于三平台分支单测；executor 负责探测、落临时文件、启动宿主
+ * AF_UNIX relay 并包装执行端口。
  *
- * 平台选型按 spec §3.3：linux = 持久 netns + veth + nftables（broker relay 监听
- * veth 宿主端，围栏内只放行该端点）；darwin = sandbox-exec（deprecated，probe
- * 门禁）；win32 = typed unsupported。
+ * 平台选型按 spec §3.3：
+ *   linux  = per-command `unshare --user --map-root-user --net --fork`；
+ *            新 netns 只有 loopback（无外部路由），围栏内 127.0.0.1 TCP relay
+ *            经宿主 AF_UNIX socket 转发到 egress broker；
+ *   darwin = sandbox-exec（deprecated，probe 门禁）；
+ *   win32  = typed unsupported。
+ *
+ * Linux 机制不需要 root/veth/nftables：用户命名空间内建 netns 自带 CAP_NET_ADMIN，
+ * 只能启用新 netns 的 lo；外部 IP 因无路由结构性不可达。子进程在宿主 user
+ * namespace 无 CAP_SYS_ADMIN，`nsenter -t 1 -n` 无法进入宿主 netns。
  */
 import { randomBytes } from "node:crypto";
 
@@ -15,88 +22,53 @@ import type { ExecutionCommand } from "@zcode/contracts";
 import type { FenceErrorCode, FenceMechanism } from "./contract.js";
 
 export const DEFAULT_POSIX_SHELL_PATH = "/bin/bash";
+/**
+ * 纯函数构建器的缺省值；生产执行器必须先按绝对候选路径解析（见
+ * LINUX_IP_CANDIDATE_PATHS），不得依赖 PATH 里的 `ip`。
+ */
 export const DEFAULT_IP_PATH = "ip";
-export const DEFAULT_NFT_PATH = "nft";
+/** Linux `ip` 可执行文件候选绝对路径：桌面/服务进程 PATH 常不含 /usr/sbin。 */
+export const LINUX_IP_CANDIDATE_PATHS = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"] as const;
+export const DEFAULT_UNSHARE_PATH = "/usr/bin/unshare";
+/**
+ * relay 由宿主 Node 可执行文件运行（与 CLI 同二进制，不猜 PATH 里的 node）。
+ * desktop 宿主是 Electron 二进制：启动时显式注入 ELECTRON_RUN_AS_NODE=1，
+ * 否则无 node 模式；纯 Node 忽略该变量。
+ */
+export const DEFAULT_NODE_PATH = process.execPath;
 export const DEFAULT_SANDBOX_EXEC_PATH = "/usr/bin/sandbox-exec";
 
-/** Linux 围栏命名空间名前缀（审计/运维识别；进程崩溃残留需人工 `ip netns del`）。 */
-export const LINUX_FENCE_NAMESPACE_PREFIX = "zcode-spec-";
-/** veth 接口名上限 15 字符（IFNAMSIZ）；前缀 4 + 8 hex = 12。 */
-export const LINUX_INTERFACE_PREFIX = "zch-";
-export const LINUX_NAMESPACE_INTERFACE_PREFIX = "zcn-";
-/** 随机熵长度下限：10 hex 名称 + 4 字节地址段。 */
-const LINUX_NETWORK_ENTROPY_BYTES = 8;
-
 /**
- * Linux netns 网络计划（纯数据）。
- *
- * 宿主端 veth 地址 = broker relay 监听地址；namespace 端地址 /30 与宿主端同子网，
- * 因此 namespace 内到宿主端的 TCP 走 veth，无需额外路由。broker relay 再把原始
- * TCP 转发到宿主 127.0.0.1 上的 egress 代理（loopback 在新建 netns 中不可达）。
+ * 围栏内 TCP relay 监听端口范围。每次命令都新建独立 netns（只有 loopback），
+ * 端口空间互相隔离，因此端口只用于生成 childBroker 与 proxy env；范围避开常见
+ * 服务端口，同时保证有足够熵避免同一 run 内可观察冲突。
  */
-export interface LinuxFenceNetworkPlan {
-  /** `ip netns add` 的命名空间名（含前缀，供审计识别）。 */
-  namespaceName: string;
-  /** 宿主 netns 内的 veth 端（broker relay 绑定地址所在接口）。 */
-  hostInterface: string;
-  /** 移入围栏 namespace 的 veth 端。 */
-  namespaceInterface: string;
-  /** 宿主端 IPv4（relay 监听地址），形如 10.x.y.(4n+1)。 */
-  hostAddress: string;
-  /** namespace 端 IPv4，形如 10.x.y.(4n+2)。 */
-  namespaceAddress: string;
-  prefixLength: 30;
-}
+export const LINUX_FENCE_RELAY_PORT_BASE = 20_000;
+export const LINUX_FENCE_RELAY_PORT_SPAN = 40_000;
+/** relay 端口熵下限：2 字节（16 bit 摊入 40000 端口）。 */
+const LINUX_FENCE_RELAY_ENTROPY_BYTES = 2;
 
-export interface BuildLinuxFenceNetworkPlanInput {
-  /** 本次 run 的稳定 id（审计归属；名称另带随机后缀避免 stale 冲突）。 */
-  runId: string;
-  /**
-   * 随机熵（≥8 字节）。名称与地址由它派生；测试注入固定值以保证可重现，
-   * 生产由 executor 使用 crypto.randomBytes(8)。
-   */
-  entropy: Uint8Array;
-}
-
-/**
- * 由熵派生唯一的 namespace / veth 接口 / 地址。
- * 地址段取 10.<1-254>.<1-254>.<0-252，末字节按 /30 对齐（host=base+1, ns=base+2）。
- * 不依赖 runId 哈希，避免同一 runId 在崩溃重启后撞上残留 namespace。
- */
-export function buildLinuxFenceNetworkPlan(
-  input: BuildLinuxFenceNetworkPlanInput,
-): LinuxFenceNetworkPlan {
-  if (input.runId.trim().length === 0) {
-    throw new Error("Linux 围栏网络计划缺少 runId");
-  }
-  const entropy = input.entropy;
-  if (entropy.length < LINUX_NETWORK_ENTROPY_BYTES) {
+/** 由熵派生围栏内 relay 端口；测试注入固定熵保证可重现。 */
+export function buildLinuxFenceRelayPort(entropy: Uint8Array): number {
+  if (entropy.length < LINUX_FENCE_RELAY_ENTROPY_BYTES) {
     throw new Error(
-      `Linux 围栏网络熵不足（需要 ≥${LINUX_NETWORK_ENTROPY_BYTES} 字节，收到 ${entropy.length}）`,
+      `Linux 围栏 relay 端口熵不足（需要 ≥${LINUX_FENCE_RELAY_ENTROPY_BYTES} 字节，收到 ${entropy.length}）`,
     );
   }
-  const suffix = Buffer.from(entropy.subarray(0, 5)).toString("hex");
-  const secondOctet = (entropy[5]! % 254) + 1;
-  const thirdOctet = (entropy[6]! % 254) + 1;
-  const baseLastOctet = (entropy[7]! & 0x3f) << 2;
-  return {
-    namespaceName: `${LINUX_FENCE_NAMESPACE_PREFIX}${suffix}`,
-    hostInterface: `${LINUX_INTERFACE_PREFIX}${suffix.slice(0, 8)}`,
-    namespaceInterface: `${LINUX_NAMESPACE_INTERFACE_PREFIX}${suffix.slice(0, 8)}`,
-    hostAddress: `10.${secondOctet}.${thirdOctet}.${baseLastOctet + 1}`,
-    namespaceAddress: `10.${secondOctet}.${thirdOctet}.${baseLastOctet + 2}`,
-    prefixLength: 30,
-  };
+  const value = entropy[0]! * 256 + entropy[1]!;
+  return LINUX_FENCE_RELAY_PORT_BASE + (value % LINUX_FENCE_RELAY_PORT_SPAN);
 }
 
-/** Linux 围栏：持久 netns + veth 的宿主 broker relay。 */
+/** Linux 围栏：rootless user+net namespace，命令执行时由 `unshare` 临时创建。 */
 export interface LinuxFenceCommandPlan {
   platform: "linux";
-  mechanism: "linux-netns-nftables";
+  mechanism: "linux-userns-netns-unix-relay";
+  unsharePath: string;
   ipPath: string;
-  nftPath: string;
+  nodePath: string;
   shellPath: string;
-  network: LinuxFenceNetworkPlan;
+  /** 围栏内 TCP relay 监听端口（新 netns 的 127.0.0.1）。 */
+  relayPort: number;
 }
 
 /** macOS 围栏：sandbox-exec profile（deprecated），deny network-outbound 仅放行 broker。 */
@@ -128,26 +100,44 @@ export interface FenceBrokerEndpoint {
 
 export interface BuildFenceCommandPlanInput {
   platform: NodeJS.Platform;
-  /** 宿主 egress 代理端点（linux 上仅作 relay 转发目标，必须 loopback）。 */
+  /** 宿主 egress 代理端点（linux 上仅作宿主 AF_UNIX relay 的 TCP 转发目标）。 */
   broker: FenceBrokerEndpoint;
-  /** linux：显式网络计划（测试/executor 复用）；缺省按 runId+entropy 派生。 */
-  linuxNetwork?: LinuxFenceNetworkPlan;
-  /** linux：runId（派生网络计划时必填）。 */
-  runId?: string;
-  /** linux：网络计划熵；缺省随机 8 字节（生产路径）。 */
+  /** linux：relay 端口熵；缺省随机 2 字节（生产路径）。 */
   linuxEntropy?: Uint8Array;
   /** 围栏内执行 shell（POSIX）；缺省 /bin/bash。 */
   shellPath?: string;
   ipPath?: string;
-  nftPath?: string;
+  unsharePath?: string;
+  nodePath?: string;
   sandboxExecPath?: string;
 }
 
 export interface FenceArtifactPaths {
-  /** Linux：ruleset 临时文件绝对路径。 */
-  rulesetPath?: string;
+  /** linux：围栏内 relay 脚本绝对路径（同一 mount namespace 可见）。 */
+  relayScriptPath?: string;
+  /** linux：宿主 AF_UNIX relay socket 绝对路径（同一 mount namespace 可见）。 */
+  unixSocketPath?: string;
+  /** linux：本次命令的 relay 就绪标记（每次 wrap 唯一，避免并发命令互相等待）。 */
+  readyFilePath?: string;
   /** darwin：profile 临时文件绝对路径。 */
   profilePath?: string;
+}
+
+/**
+ * 按绝对候选路径解析 Linux `ip`（探测与 bootstrap 共用同一解析结果）。
+ * 显式配置优先；注入可执行性检查以保持本函数无 I/O（便于跨平台单测）。
+ */
+export async function resolveLinuxIpPath(
+  configured: string | undefined,
+  isExecutable: (path: string) => Promise<boolean>,
+): Promise<string | undefined> {
+  if (configured !== undefined) {
+    return (await isExecutable(configured)) ? configured : undefined;
+  }
+  for (const candidate of LINUX_IP_CANDIDATE_PATHS) {
+    if (await isExecutable(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 /** loopback 判定：宿主 egress 代理只允许 loopback，relay 由围栏自己建。 */
@@ -178,123 +168,200 @@ export function quotePosixShellArg(value: string): string {
 }
 
 /**
- * Linux 规则集：默认拒绝，只允许 namespace 端到宿主 veth 地址上的 broker relay。
- * input 放行 lo（命名空间内本机通信）与 namespace veth（relay 回包）；
- * output 只放行经 namespace veth 到 broker 宿主机地址/端口的 TCP。
- * 其它出站（含 DNS、直连 IP/任意端口）一律 drop。
+ * 围栏内 relay 脚本（Node ESM，写入 fence 临时目录，同一 mount namespace）。
+ *
+ * 参数：argv[2] = 宿主 AF_UNIX socket 路径，argv[3] = 就绪标记路径，
+ * argv[4] = 监听端口（生产 = plan.relayPort；测试可用 0 由内核分配）。
+ * 在围栏 netns 的 127.0.0.1:<port> 监听，把每条 TCP 连接逐字节转发到宿主
+ * AF_UNIX socket（宿主 relay 再转发到 egress broker）。只搬字节，不解释协议；
+ * allowlist 仍由 broker 裁决。listen 成功后写就绪标记（含实际端口），父 shell
+ * 据此才开始执行用户命令。
  */
-export function buildLinuxFenceRuleset(input: {
-  network: LinuxFenceNetworkPlan;
-  broker: FenceBrokerEndpoint;
-}): string {
-  const { network, broker } = input;
-  if (broker.host !== network.hostAddress) {
-    throw new Error(
-      `Linux 围栏 relay 必须监听 veth 宿主地址 ${network.hostAddress}（收到 ${broker.host}）`,
-    );
-  }
-  if (!Number.isInteger(broker.port) || broker.port < 1 || broker.port > 65535) {
-    throw new Error(`Linux 围栏 relay 端口非法: ${broker.port}`);
-  }
+export function buildLinuxFenceRelayScript(): string {
   return [
-    "table inet zcode_spec_fence {",
-    "  chain input {",
-    "    type filter hook input priority 0; policy drop;",
-    '    iif "lo" accept;',
-    `    iif "${network.namespaceInterface}" accept;`,
-    "  }",
-    "  chain output {",
-    "    type filter hook output priority 0; policy drop;",
-    `    oif "${network.namespaceInterface}" ip daddr ${network.hostAddress} tcp dport ${broker.port} accept;`,
-    "  }",
+    'import { connect as connectUnix, createServer } from "node:net";',
+    'import { writeFileSync } from "node:fs";',
+    "",
+    "const [socketPath, readyPath, portValue] = process.argv.slice(2);",
+    "const port = Number(portValue);",
+    "if (!socketPath || !readyPath || !Number.isInteger(port) || port < 0 || port > 65535) {",
+    '  console.error("spec fence relay: 缺少/非法 AF_UNIX、ready 或端口参数");',
+    "  process.exit(2);",
     "}",
+    "const sockets = new Set();",
+    "const server = createServer((client) => {",
+    "  const upstream = connectUnix(socketPath);",
+    "  const track = (socket) => {",
+    "    sockets.add(socket);",
+    '    socket.on("close", () => sockets.delete(socket));',
+    "  };",
+    "  track(client);",
+    "  track(upstream);",
+    "  const destroyBoth = () => {",
+    "    client.destroy();",
+    "    upstream.destroy();",
+    "  };",
+    '  client.on("error", destroyBoth);',
+    '  upstream.on("error", destroyBoth);',
+    '  client.on("end", () => upstream.end());',
+    '  upstream.on("end", () => client.end());',
+    "  client.pipe(upstream);",
+    "  upstream.pipe(client);",
+    "});",
+    'server.on("error", (error) => {',
+    "  console.error(`spec fence relay: ${error.message}`);",
+    "  process.exit(1);",
+    "});",
+    'server.listen(port, "127.0.0.1", () => {',
+    "  const address = server.address();",
+    "  const actualPort =",
+    '    typeof address === "object" && address !== null ? address.port : port;',
+    "  writeFileSync(readyPath, `${JSON.stringify({ port: actualPort })}\\n`, {",
+    '    encoding: "utf8",',
+    "    mode: 0o600,",
+    "  });",
+    "});",
+    "const stop = () => {",
+    "  for (const socket of sockets) socket.destroy();",
+    "  server.close(() => process.exit(0));",
+    "};",
+    'process.on("SIGTERM", stop);',
+    'process.on("SIGINT", stop);',
+    "// 父 shell 被 kill（trap 未执行）后避免孤儿 relay 占住 netns。",
+    "const parentPid = process.ppid;",
+    "setInterval(() => {",
+    "  if (process.ppid !== parentPid) stop();",
+    "}, 500).unref();",
+    "",
+  ].join("\n");
+}
+
+function resolveInnerShellPath(
+  plan: LinuxFenceCommandPlan | DarwinFenceCommandPlan,
+  command: ExecutionCommand,
+): string {
+  if (command.mode === "shell") {
+    return command.shellOverride?.path ?? plan.shellPath;
+  }
+  return plan.shellPath;
+}
+
+function buildShellCommand(
+  original: Extract<ExecutionCommand, { mode: "shell" }>,
+  commandText: string,
+): ExecutionCommand {
+  return {
+    mode: "shell",
+    command: commandText,
+    ...(original.shell !== undefined ? { shell: original.shell } : {}),
+    ...(original.shellProfile !== undefined ? { shellProfile: original.shellProfile } : {}),
+    ...(original.shellOverride !== undefined ? { shellOverride: original.shellOverride } : {}),
+  };
+}
+
+/** relay 就绪等待：整数秒粒度（不依赖 fractional sleep，BusyBox 同样可用）。 */
+const LINUX_RELAY_READY_MAX_TRIES = 10;
+const LINUX_RELAY_READY_SLEEP_SECONDS = 1;
+/** Electron 二进制需此变量才按 Node 运行；纯 Node 忽略。 */
+const LINUX_RELAY_NODE_ENV = "ELECTRON_RUN_AS_NODE=1";
+
+type LinuxRelayArtifacts = Required<
+  Pick<FenceArtifactPaths, "relayScriptPath" | "unixSocketPath" | "readyFilePath">
+>;
+
+/**
+ * 围栏内 relay 启动 + 就绪等待（bootstrap 与语义探测共用，保证探测验证的就是
+ * 生产启动路径）。就绪标记叠加 shell PID，并发/重试命令互不串台；relay 在就绪
+ * 前退出立即 125，不等满预算。
+ */
+function buildLinuxRelayStartupLines(input: {
+  plan: LinuxFenceCommandPlan;
+  artifacts: LinuxRelayArtifacts;
+}): string[] {
+  const { plan, artifacts } = input;
+  return [
+    `ready=${quotePosixShellArg(artifacts.readyFilePath)}.$$`,
+    `rm -f "$ready"`,
+    `${LINUX_RELAY_NODE_ENV} ${quotePosixShellArg(plan.nodePath)} ${quotePosixShellArg(artifacts.relayScriptPath)} ${quotePosixShellArg(artifacts.unixSocketPath)} "$ready" ${plan.relayPort} &`,
+    "relay_pid=$!",
+    `trap 'kill "$relay_pid" 2>/dev/null' EXIT`,
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+    "tries=0",
+    `while [ ! -s "$ready" ]; do`,
+    "  tries=$((tries + 1))",
+    `  if [ "$tries" -ge ${LINUX_RELAY_READY_MAX_TRIES} ]; then`,
+    `    echo "spec fence: relay 未能在 127.0.0.1:${plan.relayPort} 就绪" >&2`,
+    "    exit 125",
+    "  fi",
+    `  if ! kill -0 "$relay_pid" 2>/dev/null; then`,
+    `    echo "spec fence: relay 进程在就绪前退出" >&2`,
+    "    exit 125",
+    "  fi",
+    `  sleep ${LINUX_RELAY_READY_SLEEP_SECONDS}`,
+    "done",
+  ];
+}
+
+/**
+ * Linux 围栏语义探测脚本（bash；/dev/tcp 是 bash 特性，缺省 shell 即 /bin/bash）。
+ * 在真实 netns 内启动生产 relay，等就绪后经 relay 读回宿主 echo 的招呼串，
+ * 证明「netns 内 TCP → AF_UNIX → 宿主」整条转发链路可用，而不是只查 X_OK。
+ */
+export function buildLinuxFenceProbeScript(input: {
+  plan: LinuxFenceCommandPlan;
+  artifacts: LinuxRelayArtifacts;
+  expectation: string;
+}): string {
+  const { plan, artifacts, expectation } = input;
+  return [
+    `${quotePosixShellArg(plan.ipPath)} link set lo up || exit 125`,
+    ...buildLinuxRelayStartupLines({ plan, artifacts }),
+    `exec 3<>/dev/tcp/127.0.0.1/${plan.relayPort} || exit 125`,
+    "IFS= read -r -t 5 greeting <&3 || exit 125",
+    "exec 3<&-",
+    `[ "$greeting" = ${quotePosixShellArg(expectation)} ] || { echo "spec fence: relay 转发结果与期望不符" >&2; exit 125; }`,
+    "exit 0",
     "",
   ].join("\n");
 }
 
 /**
- * 建 namespace 与 veth 的 argv 序列。executor 按顺序执行；nft 载入依赖 relay
- * 端口，因此在 relay 启动后由 buildLinuxFenceRulesetCommand 单独执行。
+ * Linux 围栏 bootstrap 脚本：在 unshare 创建的 user+net namespace 内执行。
+ *
+ * 顺序严格为：启用 lo → 启动 netns 内 relay → 等就绪 → 用 childBroker 代理 env
+ * 执行用户命令 → 结束（EXIT trap 杀 relay）→ 透传命令退出码。relay 启动失败或
+ * 就绪超时 = 125（run 失败），绝不静默直连。
  */
-export function buildLinuxFenceNetworkSetupCommands(
-  network: LinuxFenceNetworkPlan,
-  options: { ipPath?: string } = {},
-): readonly (readonly string[])[] {
-  const ip = options.ipPath ?? DEFAULT_IP_PATH;
+export function buildLinuxFenceBootstrapScript(input: {
+  plan: LinuxFenceCommandPlan;
+  command: ExecutionCommand;
+  artifacts: LinuxRelayArtifacts;
+}): string {
+  const { plan, command, artifacts } = input;
+  const proxyUrl = `http://127.0.0.1:${plan.relayPort}`;
+  const innerCommand =
+    command.mode === "argv"
+      ? [quotePosixShellArg(command.file), ...(command.args ?? []).map(quotePosixShellArg)].join(
+          " ",
+        )
+      : [
+          quotePosixShellArg(resolveInnerShellPath(plan, command)),
+          "-c",
+          quotePosixShellArg(command.command),
+        ].join(" ");
   return [
-    [ip, "netns", "add", network.namespaceName],
-    [
-      ip,
-      "link",
-      "add",
-      network.hostInterface,
-      "type",
-      "veth",
-      "peer",
-      "name",
-      network.namespaceInterface,
-    ],
-    [ip, "link", "set", network.namespaceInterface, "netns", network.namespaceName],
-    [ip, "link", "set", network.hostInterface, "up"],
-    [
-      ip,
-      "addr",
-      "add",
-      `${network.hostAddress}/${network.prefixLength}`,
-      "dev",
-      network.hostInterface,
-    ],
-    [ip, "netns", "exec", network.namespaceName, ip, "link", "set", "lo", "up"],
-    [
-      ip,
-      "netns",
-      "exec",
-      network.namespaceName,
-      ip,
-      "link",
-      "set",
-      network.namespaceInterface,
-      "up",
-    ],
-    [
-      ip,
-      "netns",
-      "exec",
-      network.namespaceName,
-      ip,
-      "addr",
-      "add",
-      `${network.namespaceAddress}/${network.prefixLength}`,
-      "dev",
-      network.namespaceInterface,
-    ],
-  ];
-}
-
-/** 在 namespace 内载入 nft 规则集（relay 端口已知后才执行）。 */
-export function buildLinuxFenceRulesetCommand(
-  network: LinuxFenceNetworkPlan,
-  rulesetPath: string,
-  options: { ipPath?: string; nftPath?: string } = {},
-): readonly string[] {
-  const ip = options.ipPath ?? DEFAULT_IP_PATH;
-  const nft = options.nftPath ?? DEFAULT_NFT_PATH;
-  return [ip, "netns", "exec", network.namespaceName, nft, "-f", rulesetPath];
-}
-
-/**
- * teardown 的 argv 序列（幂等由 executor 层处理：已消失视为成功）。
- * 先删 namespace（随其回收 namespace 端 veth），再删宿主端（部分内核会残留）。
- */
-export function buildLinuxFenceTeardownCommands(
-  network: LinuxFenceNetworkPlan,
-  options: { ipPath?: string } = {},
-): readonly (readonly string[])[] {
-  const ip = options.ipPath ?? DEFAULT_IP_PATH;
-  return [
-    [ip, "netns", "del", network.namespaceName],
-    [ip, "link", "del", network.hostInterface],
-  ];
+    `${quotePosixShellArg(plan.ipPath)} link set lo up || exit 125`,
+    ...buildLinuxRelayStartupLines({ plan, artifacts }),
+    `HTTP_PROXY=${quotePosixShellArg(proxyUrl)} HTTPS_PROXY=${quotePosixShellArg(proxyUrl)} ALL_PROXY=${quotePosixShellArg(proxyUrl)}`,
+    `http_proxy=${quotePosixShellArg(proxyUrl)} https_proxy=${quotePosixShellArg(proxyUrl)} all_proxy=${quotePosixShellArg(proxyUrl)}`,
+    "NO_PROXY='' no_proxy=''",
+    "export HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy",
+    innerCommand,
+    "status=$?",
+    'exit "$status"',
+    "",
+  ].join("\n");
 }
 
 /**
@@ -317,22 +384,18 @@ export function buildFenceCommandPlan(input: BuildFenceCommandPlanInput): FenceC
   const shellPath = input.shellPath ?? DEFAULT_POSIX_SHELL_PATH;
 
   switch (input.platform) {
-    case "linux": {
-      const network =
-        input.linuxNetwork ??
-        buildLinuxFenceNetworkPlan({
-          runId: input.runId ?? "linux-fence",
-          entropy: input.linuxEntropy ?? randomBytes(LINUX_NETWORK_ENTROPY_BYTES),
-        });
+    case "linux":
       return {
         platform: "linux",
-        mechanism: "linux-netns-nftables",
+        mechanism: "linux-userns-netns-unix-relay",
+        unsharePath: input.unsharePath ?? DEFAULT_UNSHARE_PATH,
         ipPath: input.ipPath ?? DEFAULT_IP_PATH,
-        nftPath: input.nftPath ?? DEFAULT_NFT_PATH,
+        nodePath: input.nodePath ?? DEFAULT_NODE_PATH,
         shellPath,
-        network,
+        relayPort: buildLinuxFenceRelayPort(
+          input.linuxEntropy ?? randomBytes(LINUX_FENCE_RELAY_ENTROPY_BYTES),
+        ),
       };
-    }
     case "darwin":
       return {
         platform: "darwin",
@@ -359,31 +422,22 @@ export function buildFenceCommandPlan(input: BuildFenceCommandPlanInput): FenceC
   }
 }
 
-function resolveInnerShellPath(plan: LinuxFenceCommandPlan | DarwinFenceCommandPlan, command: ExecutionCommand): string {
-  if (command.mode === "shell") {
-    return command.shellOverride?.path ?? plan.shellPath;
+function requireLinuxArtifacts(
+  artifacts: FenceArtifactPaths,
+): Required<Pick<FenceArtifactPaths, "relayScriptPath" | "unixSocketPath" | "readyFilePath">> {
+  const { relayScriptPath, unixSocketPath, readyFilePath } = artifacts;
+  if (!relayScriptPath || !unixSocketPath || !readyFilePath) {
+    throw new Error("Linux 围栏缺少 relay 脚本 / AF_UNIX socket / 就绪标记路径");
   }
-  return plan.shellPath;
-}
-
-function buildShellCommand(
-  original: Extract<ExecutionCommand, { mode: "shell" }>,
-  commandText: string,
-): ExecutionCommand {
-  return {
-    mode: "shell",
-    command: commandText,
-    ...(original.shell !== undefined ? { shell: original.shell } : {}),
-    ...(original.shellProfile !== undefined ? { shellProfile: original.shellProfile } : {}),
-    ...(original.shellOverride !== undefined ? { shellOverride: original.shellOverride } : {}),
-  };
+  return { relayScriptPath, unixSocketPath, readyFilePath };
 }
 
 /**
  * 把一条执行命令改写成围栏内执行。
- * - argv：linux = `ip netns exec <ns> <file> <args>`；darwin = sandbox-exec 前缀；
- * - shell：保留外层 shell 选择（shell/shellProfile/shellOverride），命令字符串
- *   前缀围栏调用，原始命令作为内层 `-c` 载荷，外层 cwd/捕获语义不变。
+ * - linux：argv = `unshare --user --map-root-user --net --fork -- <shell> -c <bootstrap>`；
+ *   shell 风格的原始命令也走 argv（用户命令由 bootstrap 内层 shell 执行），
+ *   避免外层 shell/rc 在围栏外参与；
+ * - darwin：argv = sandbox-exec 前缀；shell 保留外层 shell 选择。
  */
 export function buildFencedExecutionCommand(input: {
   plan: FenceCommandPlan;
@@ -418,32 +472,26 @@ export function buildFencedExecutionCommand(input: {
     return buildShellCommand(command, wrapped);
   }
 
-  const network = plan.network;
-  if (command.mode === "argv") {
-    return {
-      mode: "argv",
-      file: plan.ipPath,
-      args: [
-        "netns",
-        "exec",
-        network.namespaceName,
-        command.file,
-        ...(command.args ?? []),
-      ],
-    };
-  }
-  const innerShell = resolveInnerShellPath(plan, command);
-  // 不用 `exec`：保留外层 shell，使退出码/后置处理仍由外层执行。
-  const wrapped = [
-    quotePosixShellArg(plan.ipPath),
-    "netns",
-    "exec",
-    quotePosixShellArg(network.namespaceName),
-    quotePosixShellArg(innerShell),
-    "-c",
-    quotePosixShellArg(command.command),
-  ].join(" ");
-  return buildShellCommand(command, wrapped);
+  const relayArtifacts = requireLinuxArtifacts(artifacts);
+  const script = buildLinuxFenceBootstrapScript({
+    plan,
+    command,
+    artifacts: relayArtifacts,
+  });
+  return {
+    mode: "argv",
+    file: plan.unsharePath,
+    args: [
+      "--user",
+      "--map-root-user",
+      "--net",
+      "--fork",
+      "--",
+      plan.shellPath,
+      "-c",
+      script,
+    ],
+  };
 }
 
 /** 供测试/诊断：一次围栏计划选用的机制。 */

@@ -157,7 +157,7 @@ export interface ExecutionRequest {
    * 否则用户 rc 文件会在围栏外被 source（等于绕过围栏）。不可由外部调用方注入。
    */
   internalFence?: {
-    mechanism: "linux-netns-nftables" | "darwin-sandbox-exec";
+    mechanism: "linux-userns-netns-unix-relay" | "darwin-sandbox-exec";
   };
   trace?: TraceContext;
 }

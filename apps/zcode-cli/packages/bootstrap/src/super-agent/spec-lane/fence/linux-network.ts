@@ -1,23 +1,34 @@
 /**
- * Linux 围栏网络连接面：veth 宿主端 broker relay + ip/nft 命令执行/清理。
+ * Linux 围栏宿主侧连接面：AF_UNIX → TCP broker relay。
  *
- * 与 executor 分离的原因：executor 负责任命周期/探测编排，本文件只承担
- * 「宿主 broker 在新 netns 不可达」的网络桥接与命令收敛，便于单独审查。
+ * 新的 rootless 设计里围栏 netns 与宿主 netns 网络隔离，宿主 loopback broker 在
+ * 围栏内不可达；围栏内 Node relay 只能经同一 mount namespace 可见的 AF_UNIX
+ * socket 回到宿主。本文件只承担这条字节中继与生命周期，便于单独审查；命令计划/
+ * 命名空间编排在 command-plan/executor。
+ *
+ * socket 文件放在 fence 临时目录（mkdtemp 0700）内并强制 chmod 0600；目录与
+ * socket 权限共同限制其他本地用户。relay 只搬字节，allowlist 仍由 egress broker
+ * 裁决。
  */
-import { execFile } from "node:child_process";
+import { chmod, unlink } from "node:fs/promises";
 import { connect as netConnect, createServer as createNetServer, type Socket } from "node:net";
-import { promisify } from "node:util";
 
-import { FenceStartupError, type FenceChildBroker } from "./contract.js";
-import {
-  buildLinuxFenceTeardownCommands,
-  type LinuxFenceNetworkPlan,
-} from "./command-plan.js";
+import { FenceStartupError } from "./contract.js";
 
-const execFileAsync = promisify(execFile);
-const NETWORK_COMMAND_TIMEOUT_MS = 30_000;
+export interface BrokerRelayTarget {
+  host: string;
+  port: number;
+}
 
-export function networkErrorDetail(error: unknown): string {
+export interface UnixBrokerRelayHandle {
+  socketPath: string;
+  close(): Promise<void>;
+}
+
+/** socket 文件权限：仅属主可读写（目录本身已是 0700）。 */
+const RELAY_SOCKET_MODE = 0o600;
+
+function relayErrorDetail(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const stderr = (error as Error & { stderr?: string }).stderr;
   const stdout = (error as Error & { stdout?: string }).stdout;
@@ -25,26 +36,22 @@ export function networkErrorDetail(error: unknown): string {
   return text.length > 240 ? `${text.slice(0, 240)}…` : text;
 }
 
-export interface BrokerRelayHandle {
-  port: number;
-  close(): Promise<void>;
-}
-
 /**
- * veth 宿主端 broker relay：原始 TCP 转发到宿主 loopback egress 代理。
- * 只转发 TCP 字节，不解释协议；allowlist 仍由 egress 代理裁决。监听地址必须是
- * veth 宿主地址（由 Linux 围栏 prepare 创建），不是 0.0.0.0。
+ * 宿主 AF_UNIX relay：监听 socketPath，每条连接建立到 egress broker 的 TCP
+ * 连接并双向 pipe。监听/权限失败抛 typed FenceStartupError（run 拒绝启动）。
  */
-export async function startBrokerRelay(input: {
-  listenHost: string;
-  target: FenceChildBroker;
+export async function startUnixBrokerRelay(input: {
+  socketPath: string;
+  target: BrokerRelayTarget;
   platform: NodeJS.Platform;
-}): Promise<BrokerRelayHandle> {
+}): Promise<UnixBrokerRelayHandle> {
   const sockets = new Set<Socket>();
   const server = createNetServer((client) => {
     sockets.add(client);
     client.on("close", () => sockets.delete(client));
     const upstream = netConnect(input.target.port, input.target.host);
+    sockets.add(upstream);
+    upstream.on("close", () => sockets.delete(upstream));
     client.on("error", () => upstream.destroy());
     upstream.on("error", () => client.destroy());
     client.pipe(upstream);
@@ -62,29 +69,31 @@ export async function startBrokerRelay(input: {
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen(0, input.listenHost);
+      server.listen(input.socketPath);
     });
   } catch (error) {
     throw new FenceStartupError(
       "fence.startup_failed",
       input.platform,
-      `broker relay 监听 ${input.listenHost} 失败: ${networkErrorDetail(error)}`,
+      `宿主 AF_UNIX relay 监听 ${input.socketPath} 失败: ${relayErrorDetail(error)}`,
       { cause: error },
     );
   }
-  const address = server.address();
-  if (typeof address !== "object" || address === null) {
+  try {
+    await chmod(input.socketPath, RELAY_SOCKET_MODE);
+  } catch (error) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw new FenceStartupError(
       "fence.startup_failed",
       input.platform,
-      "broker relay 端口解析失败",
+      `宿主 AF_UNIX relay socket 权限收紧失败: ${relayErrorDetail(error)}`,
+      { cause: error },
     );
   }
   let closePromise: Promise<void> | undefined;
   return {
-    port: address.port,
-    // 幂等：teardown 在网络清理失败后重试时必须能再次调用且不因 server 已关闭而拒绝。
+    socketPath: input.socketPath,
+    // 幂等：teardown 重试与异常路径并发调用都安全；已关闭/已删除视为成功。
     close: () => {
       closePromise ??= (async () => {
         for (const socket of sockets) socket.destroy();
@@ -95,49 +104,13 @@ export async function startBrokerRelay(input: {
             else resolve();
           });
         });
+        try {
+          await unlink(input.socketPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
       })();
       return closePromise;
     },
   };
-}
-
-export async function execNetworkCommand(command: readonly string[]): Promise<void> {
-  const file = command[0];
-  if (!file) throw new Error("围栏命令为空");
-  await execFileAsync(file, command.slice(1), {
-    timeout: NETWORK_COMMAND_TIMEOUT_MS,
-    encoding: "utf8",
-  });
-}
-
-export async function execNetworkCommands(
-  commands: readonly (readonly string[])[],
-): Promise<void> {
-  for (const command of commands) await execNetworkCommand(command);
-}
-
-/** 已消失的 namespace/接口是幂等成功；其它删除失败原样上报。 */
-function isMissingNetworkResource(error: unknown): boolean {
-  const detail = networkErrorDetail(error);
-  return (
-    /No such file or directory/i.test(detail) ||
-    /No such device/i.test(detail) ||
-    /Cannot find device/i.test(detail) ||
-    /Cannot remove namespace file/i.test(detail)
-  );
-}
-
-export async function cleanupLinuxNetwork(
-  network: LinuxFenceNetworkPlan,
-  ipPath: string,
-): Promise<string | undefined> {
-  for (const command of buildLinuxFenceTeardownCommands(network, { ipPath })) {
-    try {
-      await execNetworkCommand(command);
-    } catch (error) {
-      if (isMissingNetworkResource(error)) continue;
-      return networkErrorDetail(error);
-    }
-  }
-  return undefined;
 }

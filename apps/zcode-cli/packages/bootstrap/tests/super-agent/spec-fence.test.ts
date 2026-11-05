@@ -2,51 +2,76 @@
 //
 // 覆盖：
 // 1) 三平台命令/配置构建器单测（纯函数，任何平台可跑）；
-// 2) 平台矩阵/能力探测的 fail-closed 语义（win32 typed unimplemented）；
-// 3) macOS sandbox-exec 真围栏（darwin 真跑：代理放行；curl --noproxy 直连
+// 2) 宿主 AF_UNIX→TCP relay 与围栏内 relay 脚本真 socket 测试（任何平台可跑）；
+// 3) 平台矩阵/能力探测的 fail-closed 语义（win32 typed unimplemented；非 Linux
+//    平台上的 Linux 探测必须 typed unavailable）；
+// 4) macOS sandbox-exec 真围栏（darwin 真跑：代理放行；curl --noproxy 直连
 //    非白名单必须失败；node fetch(undici) 直连必须失败）；
-// 4) Linux netns 真围栏（平台守卫；当前开发机 darwin 明确 skip 并注明）。
-import { spawn } from "node:child_process";
+// 5) Linux user+net namespace 真围栏（Linux 真跑；darwin 明确 skip）：
+//    命令经 relay 达 broker；直连宿主端口/外部 IP/nsenter 全部被拒。
+import { spawn, spawnSync } from "node:child_process";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer as createNetServer, connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
 import type {
+  ExecutionCommand,
   ExecutionPort,
   ExecutionRequest,
   ExecutionResult,
 } from "@zcode/contracts";
 
 import { buildSpecRunEnv } from "../../../adapters/src/network/subprocess-env.js";
+import { startUnixBrokerRelay } from "../../src/super-agent/spec-lane/fence/linux-network.js";
 import { sweepResidualFences } from "../../src/super-agent/spec-lane/fence/residual.js";
 import {
+  DEFAULT_UNSHARE_PATH,
   FenceStartupError,
+  LINUX_IP_CANDIDATE_PATHS,
   SPEC_FENCE_PLATFORM_MATRIX,
   buildDarwinFenceProfile,
   buildFenceCommandPlan,
   buildFencedExecutionCommand,
-  buildLinuxFenceNetworkPlan,
-  buildLinuxFenceNetworkSetupCommands,
-  buildLinuxFenceRuleset,
-  buildLinuxFenceRulesetCommand,
-  buildLinuxFenceTeardownCommands,
+  buildLinuxFenceBootstrapScript,
+  buildLinuxFenceProbeScript,
+  buildLinuxFenceRelayPort,
+  buildLinuxFenceRelayScript,
   createFencedExecutionPort,
   createSpecFence,
   createSuperAgentSpecLane,
   fencePlatformMatrixEntry,
   quotePosixShellArg,
+  resolveLinuxIpPath,
   type LinuxFenceCommandPlan,
-  type LinuxFenceNetworkPlan,
 } from "../../src/super-agent/spec-lane/index.js";
 
-const LINUX_TEST_ENTROPY = Uint8Array.from([0x11, 0x22, 0x33, 0x44, 0x55, 1, 2, 0x80]);
-const LINUX_TEST_NETWORK: LinuxFenceNetworkPlan = buildLinuxFenceNetworkPlan({
-  runId: "r-linux",
-  entropy: LINUX_TEST_ENTROPY,
-});
+const LINUX_TEST_ENTROPY = Uint8Array.from([0x11, 0x22]);
+const LINUX_TEST_PORT = buildLinuxFenceRelayPort(LINUX_TEST_ENTROPY);
+
+/** 旧版（已退役 netns+veth 实现）owner.json 中的合法网络计划；仅用于残留校验测试。 */
+const LEGACY_LINUX_NETWORK = {
+  namespaceName: "zcode-spec-1122334455",
+  hostInterface: "zch-11223344",
+  namespaceInterface: "zcn-11223344",
+  hostAddress: "10.2.3.1",
+  namespaceAddress: "10.2.3.2",
+  prefixLength: 30,
+} as const;
+
+function linuxPlan(overrides: Partial<LinuxFenceCommandPlan> = {}): LinuxFenceCommandPlan {
+  const plan = buildFenceCommandPlan({
+    platform: "linux",
+    broker: { host: "127.0.0.1", port: 3128 },
+    ipPath: "/usr/sbin/ip",
+    linuxEntropy: LINUX_TEST_ENTROPY,
+  });
+  if (plan.platform !== "linux") throw new Error("expected linux plan");
+  return { ...plan, ...overrides };
+}
 
 async function listen(server: Server, host = "127.0.0.1"): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, host, resolve));
@@ -74,128 +99,169 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+/** 往返 TCP echo 服务（模拟 broker 侧字节流）。 */
+async function startEcho(): Promise<{ close: () => Promise<void>; port: number }> {
+  const server = createNetServer((socket) => {
+    socket.on("data", (chunk) => socket.write(chunk));
+    socket.on("error", () => socket.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (typeof address !== "object" || address === null) throw new Error("无法解析 echo 端口");
+  return {
+    port: address.port,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 function brokerFromProxyUrl(proxyUrl: string): { host: string; port: number } {
   const parsed = new URL(proxyUrl);
   return { host: parsed.hostname, port: Number(parsed.port) };
 }
 
+async function waitFor(check: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return false;
+}
+
 describe("P6 围栏命令构建器（三平台分支，纯函数）", () => {
-  it("linux: 持久 netns + veth，nftables 默认拒绝且只放行 veth 宿主端 broker relay", () => {
-    expect(LINUX_TEST_NETWORK).toMatchObject({
-      namespaceName: "zcode-spec-1122334455",
-      hostInterface: "zch-11223344",
-      namespaceInterface: "zcn-11223344",
-      hostAddress: "10.2.3.1",
-      namespaceAddress: "10.2.3.2",
-      prefixLength: 30,
-    });
-    const plan = buildFenceCommandPlan({
-      platform: "linux",
-      broker: { host: "127.0.0.1", port: 3128 },
-      linuxNetwork: LINUX_TEST_NETWORK,
-    });
-    expect(plan.mechanism).toBe("linux-netns-nftables");
-    if (plan.platform !== "linux") throw new Error("expected linux plan");
-    const linuxPlan: LinuxFenceCommandPlan = plan;
-    expect(linuxPlan.ipPath).toBe("ip");
-    expect(linuxPlan.nftPath).toBe("nft");
-    expect(linuxPlan.network).toEqual(LINUX_TEST_NETWORK);
-
-    const ruleset = buildLinuxFenceRuleset({
-      network: linuxPlan.network,
-      broker: { host: linuxPlan.network.hostAddress, port: 3128 },
-    });
-    expect(ruleset).toContain("policy drop");
-    expect(ruleset).toContain(
-      `oif "${linuxPlan.network.namespaceInterface}" ip daddr ${linuxPlan.network.hostAddress} tcp dport 3128 accept`,
-    );
-    expect(ruleset).not.toContain("dport 3138");
-    // 不放行 loopback 出站：宿主 broker 在初始 netns，新 netns 的 127.0.0.1 没有代理。
-    expect(ruleset).not.toContain('oif "lo"');
-    expect(() =>
-      buildLinuxFenceRuleset({
-        network: linuxPlan.network,
-        broker: { host: "127.0.0.1", port: 3128 },
-      }),
-    ).toThrow(/veth 宿主地址/);
-
-    const setup = buildLinuxFenceNetworkSetupCommands(linuxPlan.network);
-    expect(setup[0]).toEqual(["ip", "netns", "add", "zcode-spec-1122334455"]);
-    expect(setup[1]).toEqual([
-      "ip",
-      "link",
-      "add",
-      "zch-11223344",
-      "type",
-      "veth",
-      "peer",
-      "name",
-      "zcn-11223344",
-    ]);
-    expect(setup[2]).toEqual([
-      "ip",
-      "link",
-      "set",
-      "zcn-11223344",
-      "netns",
-      "zcode-spec-1122334455",
-    ]);
-    expect(setup[4]).toEqual(["ip", "addr", "add", "10.2.3.1/30", "dev", "zch-11223344"]);
-    expect(setup[7]).toEqual([
-      "ip",
-      "netns",
-      "exec",
-      "zcode-spec-1122334455",
-      "ip",
-      "addr",
-      "add",
-      "10.2.3.2/30",
-      "dev",
-      "zcn-11223344",
-    ]);
-    expect(
-      buildLinuxFenceRulesetCommand(linuxPlan.network, "/tmp/fence/ruleset.nft"),
-    ).toEqual([
-      "ip",
-      "netns",
-      "exec",
-      "zcode-spec-1122334455",
-      "nft",
-      "-f",
-      "/tmp/fence/ruleset.nft",
-    ]);
-    expect(buildLinuxFenceTeardownCommands(linuxPlan.network)).toEqual([
-      ["ip", "netns", "del", "zcode-spec-1122334455"],
-      ["ip", "link", "del", "zch-11223344"],
-    ]);
+  it("linux: unshare user+net namespace，新 netns 内 relay + childBroker proxy env（无 veth/nft）", () => {
+    const plan = linuxPlan();
+    expect(plan.mechanism).toBe("linux-userns-netns-unix-relay");
+    expect(plan.unsharePath).toBe(DEFAULT_UNSHARE_PATH);
+    expect(plan.ipPath).toBe("/usr/sbin/ip");
+    expect(plan.shellPath).toBe("/bin/bash");
+    expect(plan.relayPort).toBe(LINUX_TEST_PORT);
 
     const argv = buildFencedExecutionCommand({
       plan,
       command: { mode: "argv", file: "/usr/bin/npm", args: ["ci", "--ignore-scripts=false"] },
-      artifacts: { rulesetPath: "/tmp/fence/ruleset.nft" },
+      artifacts: {
+        relayScriptPath: "/tmp/fence/relay.mjs",
+        unixSocketPath: "/tmp/fence/relay.sock",
+        readyFilePath: "/tmp/fence/relay-ready-a",
+      },
     });
     expect(argv.mode).toBe("argv");
     if (argv.mode !== "argv") throw new Error("expected argv");
-    expect(argv.file).toBe("ip");
-    expect(argv.args).toEqual([
-      "netns",
-      "exec",
-      "zcode-spec-1122334455",
-      "/usr/bin/npm",
-      "ci",
-      "--ignore-scripts=false",
+    expect(argv.file).toBe(DEFAULT_UNSHARE_PATH);
+    expect(argv.args?.slice(0, 7)).toEqual([
+      "--user",
+      "--map-root-user",
+      "--net",
+      "--fork",
+      "--",
+      "/bin/bash",
+      "-c",
     ]);
+    const script = argv.args?.[7];
+    if (!script) throw new Error("expected bootstrap script");
+    expect(script).toContain("/usr/sbin/ip link set lo up");
+    expect(script).toContain("/tmp/fence/relay.mjs /tmp/fence/relay.sock");
+    expect(script).toContain("ready=/tmp/fence/relay-ready-a.$$");
+    expect(script).toContain(`"$ready" ${plan.relayPort} &`);
+    expect(script).toContain('while [ ! -s "$ready" ]; do');
+    // desktop 宿主 process.execPath 是 Electron：必须以 Node 模式启动 relay。
+    expect(script).toContain("ELECTRON_RUN_AS_NODE=1");
+    // 整数秒预算，不依赖 fractional sleep（BusyBox 等无法 sleep 0.01）。
+    expect(script).toContain("sleep 1");
+    expect(script).not.toContain("sleep 0.01");
+    expect(script).toContain('kill -0 "$relay_pid"');
+    expect(script).toContain(`HTTP_PROXY=http://127.0.0.1:${plan.relayPort}`);
+    expect(script).toContain("NO_PROXY='' no_proxy=''");
+    expect(script).toContain("/usr/bin/npm ci --ignore-scripts=false");
+    expect(script).toContain('exit "$status"');
+    // 新机制不依赖 veth/nftables。
+    expect(script).not.toContain("veth");
+    expect(script).not.toContain("nft");
+    expect(script).not.toContain("ip netns");
+  });
 
-    const shell = buildFencedExecutionCommand({
+  it("linux: shell 风格命令也走 argv，用户命令由内层 shell 执行", () => {
+    const plan = linuxPlan();
+    const wrapped = buildFencedExecutionCommand({
       plan,
       command: { mode: "shell", command: "echo 'quoted'", shellProfile: "posix-bash" },
-      artifacts: { rulesetPath: "/tmp/fence/ruleset.nft" },
+      artifacts: {
+        relayScriptPath: "/tmp/fence/relay.mjs",
+        unixSocketPath: "/tmp/fence/relay.sock",
+        readyFilePath: "/tmp/fence/relay-ready-b",
+      },
     });
-    expect(shell.mode).toBe("shell");
-    if (shell.mode !== "shell") throw new Error("expected shell");
-    expect(shell.command).toContain("ip netns exec zcode-spec-1122334455 /bin/bash -c");
-    expect(shell.command).toContain("echo '\\''quoted'\\''");
-    expect(shell.shellProfile).toBe("posix-bash");
+    expect(wrapped.mode).toBe("argv");
+    if (wrapped.mode !== "argv") throw new Error("expected argv");
+    expect(wrapped.file).toBe(DEFAULT_UNSHARE_PATH);
+    const script = wrapped.args?.[7];
+    if (!script) throw new Error("expected bootstrap script");
+    expect(script).toContain("/bin/bash -c");
+    expect(script).toContain("echo '\\''quoted'\\''");
+  });
+
+  it("linux: 缺少 relay artifacts 直接拒绝（不生成半截围栏命令）", () => {
+    const plan = linuxPlan();
+    expect(() =>
+      buildFencedExecutionCommand({
+        plan,
+        command: { mode: "argv", file: "/bin/true" },
+        artifacts: { relayScriptPath: "/tmp/fence/relay.mjs" },
+      }),
+    ).toThrow(/relay 脚本/);
+  });
+
+  it("linux: relay 端口由熵派生且在保留范围内；熵不足拒绝", () => {
+    const first = buildLinuxFenceRelayPort(Uint8Array.from([0x11, 0x22]));
+    const second = buildLinuxFenceRelayPort(Uint8Array.from([0x33, 0x44]));
+    expect(first).toBe(LINUX_TEST_PORT);
+    expect(first).not.toBe(second);
+    expect(first).toBeGreaterThanOrEqual(20_000);
+    expect(first).toBeLessThan(60_000);
+    expect(() => buildLinuxFenceRelayPort(new Uint8Array(1))).toThrow(/熵不足/);
+  });
+
+  it("linux: relay 脚本只在 127.0.0.1 监听并转发到 AF_UNIX，不解释协议", () => {
+    const script = buildLinuxFenceRelayScript();
+    expect(script).toContain('server.listen(port, "127.0.0.1"');
+    expect(script).toContain("connectUnix(socketPath)");
+    expect(script).toContain('writeFileSync(readyPath');
+    expect(script).not.toContain("nft");
+    expect(script).not.toContain("veth");
+  });
+
+  it("linux: ip 按绝对候选路径解析，不依赖 PATH；显式配置优先", async () => {
+    const tried: string[] = [];
+    const resolved = await resolveLinuxIpPath(undefined, async (path) => {
+      tried.push(path);
+      return path === "/usr/bin/ip";
+    });
+    expect(resolved).toBe("/usr/bin/ip");
+    expect(tried).toEqual([...LINUX_IP_CANDIDATE_PATHS]);
+    expect(await resolveLinuxIpPath(undefined, async () => false)).toBeUndefined();
+    expect(
+      await resolveLinuxIpPath("/opt/bin/ip", async (path) => path === "/opt/bin/ip"),
+    ).toBe("/opt/bin/ip");
+  });
+
+  it("linux: 语义探测在真实 netns 内启动生产 relay 并读回转发结果", () => {
+    const plan = linuxPlan();
+    const script = buildLinuxFenceProbeScript({
+      plan,
+      artifacts: {
+        relayScriptPath: "/tmp/fence/relay.mjs",
+        unixSocketPath: "/tmp/fence/relay.sock",
+        readyFilePath: "/tmp/fence/relay-ready-probe",
+      },
+      expectation: "spec-fence-probe-ok",
+    });
+    expect(script).toContain("/usr/sbin/ip link set lo up");
+    expect(script).toContain("ELECTRON_RUN_AS_NODE=1");
+    expect(script).toContain(`exec 3<>/dev/tcp/127.0.0.1/${plan.relayPort}`);
+    expect(script).toContain("[ \"$greeting\" = spec-fence-probe-ok ]");
+    const syntax = spawnSync("/bin/bash", ["-n", "-c", script], { encoding: "utf8" });
+    expect(syntax.status, syntax.stderr).toBe(0);
   });
 
   it("darwin: sandbox-exec profile deny network-outbound，仅放行 localhost broker", () => {
@@ -262,14 +328,12 @@ describe("P6 围栏命令构建器（三平台分支，纯函数）", () => {
     ).toThrow(/端口非法/);
   });
 
-  it("平台矩阵登记三平台状态；darwin 标记 deprecated；linux/win32 unimplemented", () => {
+  it("平台矩阵登记三平台状态；darwin deprecated；linux = 已实现的 rootless 机制", () => {
     const linux = fencePlatformMatrixEntry("linux");
-    // 特权子进程与父进程同 caps，可 nft flush / nsenter 逃逸；降权隔离落地前
-    // 不得宣称内核级 egress 围栏（矩阵 fail-closed）。
-    expect(linux.status).toBe("unimplemented");
-    expect(linux.mechanism).toBe("unsupported");
-    expect(linux.egressScope).toBeUndefined();
-    expect(linux.notes).toContain("降权");
+    expect(linux.status).toBe("implemented");
+    expect(linux.mechanism).toBe("linux-userns-netns-unix-relay");
+    expect(linux.egressScope).toBe("allowlist");
+    expect(linux.notes).toContain("unshare");
     const darwin = fencePlatformMatrixEntry("darwin");
     expect(darwin.status).toBe("implemented");
     expect(darwin.egressScope).toBe("allowlist");
@@ -306,47 +370,13 @@ describe("P6 围栏命令构建器（三平台分支，纯函数）", () => {
     ).rejects.toBeInstanceOf(FenceStartupError);
   });
 
-  it("linux 能力探测 = typed unavailable（降权隔离未实现，任何平台可跑）", async () => {
-    // 即使探测进程恰好有 CAP_NET_ADMIN 能建 netns，被围栏子进程同样持有该特权，
-    // 可 nft flush / 进入宿主 netns；因此在降权隔离+逃逸负向验证落地前必须拒绝。
-    const fence = createSpecFence({ platform: "linux" });
-    const capability = await fence.probeCapability();
-    expect(capability.available).toBe(false);
-    if (capability.available) throw new Error("Linux 围栏不应报告可用");
-    expect(capability.code).toBe("fence.unsupported_platform");
-    expect(capability.detail).toContain("capabilities");
-    await expect(
-      fence.prepare({
-        runId: "r-linux-disabled",
-        workspaceRoot: "/tmp/ws",
-        broker: { host: "127.0.0.1", port: 1 },
-      }),
-    ).rejects.toBeInstanceOf(FenceStartupError);
-  });
-
-  it("linux 网络计划由熵派生，非法熵/runId 拒绝构建", () => {
-    const first = buildLinuxFenceNetworkPlan({
-      runId: "r-a",
-      entropy: LINUX_TEST_ENTROPY,
-    });
-    const second = buildLinuxFenceNetworkPlan({
-      runId: "r-b",
-      entropy: Uint8Array.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 3, 4, 0x04]),
-    });
-    expect(first.namespaceName).not.toBe(second.namespaceName);
-    expect(first.hostAddress).not.toBe(second.hostAddress);
-    expect(() =>
-      buildLinuxFenceNetworkPlan({ runId: "", entropy: LINUX_TEST_ENTROPY }),
-    ).toThrow(/runId/);
-    expect(() =>
-      buildLinuxFenceNetworkPlan({ runId: "r", entropy: new Uint8Array(7) }),
-    ).toThrow(/熵不足/);
-  });
-
   it("fenced execution port：run/start 都改写命令，生命周期方法原样委托", async () => {
     const runs: ExecutionRequest[] = [];
     const starts: ExecutionRequest[] = [];
-    const result = { status: "completed", stdout: { text: "", bytes: 0, truncated: false } } as ExecutionResult;
+    const result = {
+      status: "completed",
+      stdout: { text: "", bytes: 0, truncated: false },
+    } as ExecutionResult;
     let closed = false;
     const inner: ExecutionPort = {
       run: async (request) => {
@@ -358,7 +388,11 @@ describe("P6 围栏命令构建器（三平台分支，纯函数）", () => {
         return { taskId: "t", status: "running", startedAt: new Date() };
       },
       getBackgroundTask: async (taskId) => ({ taskId, status: "running", startedAt: new Date() }),
-      cancelBackgroundTask: async (taskId) => ({ taskId, status: "cancelled", startedAt: new Date() }),
+      cancelBackgroundTask: async (taskId) => ({
+        taskId,
+        status: "cancelled",
+        startedAt: new Date(),
+      }),
       readBackgroundBashOutput: async (taskId) => ({
         taskId,
         stdout: "",
@@ -391,15 +425,146 @@ describe("P6 围栏命令构建器（三平台分支，纯函数）", () => {
     expect(closed).toBe(true);
   });
 
-  it("ruleset 与 profile 端口唯一：不同 broker 端口产出不同配置", () => {
-    const linuxRuleset = (port: number) =>
-      buildLinuxFenceRuleset({
-        network: LINUX_TEST_NETWORK,
-        broker: { host: LINUX_TEST_NETWORK.hostAddress, port },
-      });
-    expect(linuxRuleset(1001)).not.toBe(linuxRuleset(1002));
+  it("bootstrap 脚本把代理 env 固定为 childBroker，命令退出码透传", () => {
+    const plan = linuxPlan();
+    const script = buildLinuxFenceBootstrapScript({
+      plan,
+      command: { mode: "argv", file: "/bin/echo", args: ["hi"] } as ExecutionCommand,
+      artifacts: {
+        relayScriptPath: "/tmp/fence/relay.mjs",
+        unixSocketPath: "/tmp/fence/relay.sock",
+        readyFilePath: "/tmp/fence/relay-ready-c",
+      },
+    });
+    expect(script).toContain(`http://127.0.0.1:${plan.relayPort}`);
+    expect(script).toContain("/bin/echo hi");
+    expect(script).toContain('exit "$status"');
+    // bootstrap 必须是合法 POSIX shell（Linux 上由 /bin/bash -c 执行）。
+    const syntax = spawnSync("/bin/bash", ["-n", "-c", script], { encoding: "utf8" });
+    expect(syntax.status, syntax.stderr).toBe(0);
+  });
+
+  it("darwin profile 端口唯一：不同 broker 端口产出不同配置", () => {
     expect(buildDarwinFenceProfile(1001)).not.toBe(buildDarwinFenceProfile(1002));
     expect(buildDarwinFenceProfile(1001)).toContain("localhost:1001");
+  });
+});
+
+// 宿主 AF_UNIX→TCP relay 与围栏内 relay 脚本都不依赖 Linux netns：darwin 上用真实
+// socket 跑完整字节中继链路，证明 relay 自身正确（netns 隔离由 Linux 集成测试承担）。
+describe("P6 Linux relay 真 socket（任何平台可跑）", () => {
+  it("宿主 AF_UNIX relay 0600，字节经 unix→TCP echo 往返", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-fence-relay-"));
+    const echo = await startEcho();
+    const relay = await startUnixBrokerRelay({
+      socketPath: join(dir, "relay.sock"),
+      target: { host: "127.0.0.1", port: echo.port },
+      platform: "linux",
+    });
+    try {
+      const stats = await stat(relay.socketPath);
+      expect(stats.mode & 0o777).toBe(0o600);
+      const received = await new Promise<string>((resolve, reject) => {
+        const client = netConnect(relay.socketPath);
+        client.on("error", reject);
+        client.on("data", (chunk) => {
+          resolve(chunk.toString("utf8"));
+          client.end();
+        });
+        client.write("relay-host-ok");
+      });
+      expect(received).toBe("relay-host-ok");
+    } finally {
+      await relay.close();
+      await relay.close(); // 幂等
+      await echo.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  it("围栏内 relay 脚本：127.0.0.1 监听，经 AF_UNIX 转发到 broker TCP", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-fence-relay-script-"));
+    const echo = await startEcho();
+    const relay = await startUnixBrokerRelay({
+      socketPath: join(dir, "relay.sock"),
+      target: { host: "127.0.0.1", port: echo.port },
+      platform: "linux",
+    });
+    const scriptPath = join(dir, "relay.mjs");
+    const readyPath = join(dir, "ready.json");
+    await writeFile(scriptPath, buildLinuxFenceRelayScript(), "utf8");
+    const child = spawn(process.execPath, [scriptPath, relay.socketPath, readyPath, "0"], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    try {
+      const ready = await waitFor(async () => {
+        try {
+          return (await readFile(readyPath, "utf8")).trim().length > 0;
+        } catch {
+          return false;
+        }
+      }, 5_000);
+      if (!ready) throw new Error("围栏内 relay 未在 5s 内就绪");
+      const port = JSON.parse(await readFile(readyPath, "utf8")).port as number;
+      const received = await new Promise<string>((resolve, reject) => {
+        const client = netConnect(port, "127.0.0.1");
+        client.on("error", reject);
+        client.on("data", (chunk) => {
+          resolve(chunk.toString("utf8"));
+          client.end();
+        });
+        client.write("relay-in-netns-ok");
+      });
+      expect(received).toBe("relay-in-netns-ok");
+    } finally {
+      child.kill();
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      await relay.close();
+      await echo.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe.skipIf(process.platform === "linux")(
+  "P6 非 Linux 平台上的 Linux 围栏探测（fail-closed）",
+  () => {
+    it("缺少 unshare → typed unavailable，prepare 拒绝启动", async () => {
+      const fence = createSpecFence({ platform: "linux" });
+      const capability = await fence.probeCapability();
+      expect(capability.available).toBe(false);
+      if (capability.available) throw new Error("非 Linux 不应报告 Linux 围栏可用");
+      expect(capability.code).toBe("fence.startup_failed");
+      expect(capability.detail).toContain("unshare");
+      await expect(
+        fence.prepare({
+          runId: "r-linux-unavailable",
+          workspaceRoot: "/tmp/ws",
+          broker: { host: "127.0.0.1", port: 1 },
+        }),
+      ).rejects.toBeInstanceOf(FenceStartupError);
+    });
+  },
+);
+
+describe("P6 Linux 围栏探测 fail-closed（任何平台可跑）", () => {
+  it("unshare 不可执行 → typed unavailable，prepare 拒绝启动", async () => {
+    const fence = createSpecFence({
+      platform: "linux",
+      unsharePath: "/nonexistent/unshare",
+    });
+    const capability = await fence.probeCapability();
+    expect(capability.available).toBe(false);
+    if (capability.available) throw new Error("unshare 不可执行不应报告可用");
+    expect(capability.code).toBe("fence.startup_failed");
+    expect(capability.detail).toContain("unshare");
+    await expect(
+      fence.prepare({
+        runId: "r-linux-no-unshare",
+        workspaceRoot: "/tmp/ws",
+        broker: { host: "127.0.0.1", port: 1 },
+      }),
+    ).rejects.toBeInstanceOf(FenceStartupError);
   });
 });
 
@@ -654,8 +819,108 @@ describe.skipIf(process.platform !== "darwin")(
   },
 );
 
-// 共享 tmpdir 的残留对账会执行特权 ip 命令；owner.json 可能由其他本地用户伪造。
-// 这些用例不依赖 CAP_NET_ADMIN：校验必须在任何 ip 命令之前拒绝。
+// Linux 真围栏：只有 Linux + probe 可用（内核允许 unprivileged user namespace）
+// 才执行。darwin 上明确 skip；Linux 上 probe 不可用时也 skip，并打印 typed 原因
+// （不把环境限制伪装成围栏验证）。
+const linuxProbe =
+  process.platform === "linux"
+    ? await createSpecFence({ platform: "linux" }).probeCapability()
+    : undefined;
+if (linuxProbe && !linuxProbe.available) {
+  console.warn(
+    `[spec-fence] Linux userns/netns 集成测试跳过（环境限制）: ${linuxProbe.code} ${linuxProbe.detail}`,
+  );
+}
+
+describe.skipIf(process.platform !== "linux" || linuxProbe?.available !== true)(
+  "P6 Linux user+net namespace 真围栏（Linux 真跑；darwin 明确 skip）",
+  () => {
+    it("命令经 relay 达 broker；直连宿主端口/外部 IP/nsenter 全部被拒", async () => {
+      const lane = createSuperAgentSpecLane();
+      const mirror = await startMirror();
+      const outputRoot = await mkdtemp(join(tmpdir(), "zcode-fence-linux-exec-"));
+      // 固定 relay 端口（24386，低于 Linux 默认 ephemeral 范围），避免与 mirror 端口碰撞。
+      const fence = createSpecFence({
+        platform: "linux",
+        linuxNetworkEntropy: () => Uint8Array.from([0x11, 0x22]),
+      });
+      try {
+        const plan = await lane.prepareSpecRunEgress({
+          workspaceRoot: "/repos/fence-linux",
+          allowHosts: [`127.0.0.1:${mirror.port}`],
+        });
+        const capability = await fence.probeCapability();
+        expect(capability.available).toBe(true);
+        if (!capability.available) throw new Error(capability.detail);
+
+        const handle = await fence.prepare({
+          runId: "fence-linux",
+          workspaceRoot: "/repos/fence-linux",
+          broker: brokerFromProxyUrl(plan.proxyUrl),
+          allowHosts: plan.allowHosts,
+        });
+        // 围栏内 proxy env 必须指向 childBroker（netns 内 relay），不是宿主 broker。
+        const childProxy = `http://${handle.childBroker.host}:${handle.childBroker.port}`;
+        const specEnv = buildSpecRunEnv({
+          proxyUrl: childProxy,
+          sourceEnv: { ...process.env },
+        });
+        const port = createNodeExecutionAdapter({
+          outputRootDir: join(outputRoot, "exec"),
+          bashOutputTempDir: tmpdir(),
+          network: { httpProxy: childProxy, noProxy: "" },
+          processEnv: specEnv,
+        });
+        const fenced = createFencedExecutionPort(port, handle);
+        const run = (command: string) =>
+          fenced.run({
+            command: { mode: "shell", command },
+            cwd: outputRoot,
+            timeoutMs: 30_000,
+          });
+
+        // 0) 围栏内 env：HTTP_PROXY = childBroker，NO_PROXY 为空。
+        const envCheck = await run(`echo "$HTTP_PROXY|$NO_PROXY"`);
+        expect(envCheck.status).toBe("completed");
+        expect(envCheck.stdout.text.trim()).toBe(`${childProxy}|`);
+
+        // 1) E5：白名单 mirror 经 relay→宿主 AF_UNIX→broker 成功。
+        const allowed = await run(`curl -fsS --max-time 20 http://127.0.0.1:${mirror.port}/`);
+        expect(allowed.status).toBe("completed");
+        expect(allowed.stdout.text).toBe("mirror-ok");
+
+        // 2) E1/E3：绕过 proxy env 直连宿主端口（netns 的 127.0.0.1 没有该服务）。
+        const direct = await run(
+          `curl -fsS --noproxy '*' --max-time 10 http://127.0.0.1:${mirror.port}/`,
+        );
+        expect(direct.status).toBe("failed");
+        expect(direct.exitCode).not.toBe(0);
+
+        // 3) E3：外部 IP 在新 netns 无路由，结构性不可达。
+        const external = await run(
+          `curl -fsS --noproxy '*' --max-time 10 http://1.1.1.1/`,
+        );
+        expect(external.status).toBe("failed");
+        expect(external.exitCode).not.toBe(0);
+
+        // 4) 逃逸负向验证：宿主 userns 无 CAP_SYS_ADMIN，不能进入宿主 netns。
+        const escape = await run("nsenter -t 1 -n true");
+        expect(escape.status).toBe("failed");
+        expect(escape.exitCode).not.toBe(0);
+
+        await handle.teardown();
+        await port.close?.();
+      } finally {
+        await lane.stopSpecRunEgress("/repos/fence-linux");
+        await closeServer(mirror.server);
+        await rm(outputRoot, { force: true, recursive: true });
+      }
+    });
+  },
+);
+
+// 共享 tmpdir 的残留对账不会执行任何 ip 命令；owner.json 可能由其他本地用户伪造。
+// 校验必须在删除/信任任何内容之前拒绝（任何平台可跑）。
 describe("P6 围栏残留 owner.json 安全校验（任何平台可跑）", () => {
   async function writeStaleOwner(owner: Record<string, unknown>): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "zcode-spec-fence-evil-"));
@@ -667,60 +932,50 @@ describe("P6 围栏残留 owner.json 安全校验（任何平台可跑）", () =
     return dir;
   }
 
-  it("伪造 namespace/接口前缀或非法 /30 地址：typed 拒绝且不调用回收命令", async () => {
+  it("伪造 namespace/接口前缀或非法 /30 地址：typed 拒绝且不删除目录", async () => {
     const maliciousPlans: Record<string, unknown>[] = [
-      { ...LINUX_TEST_NETWORK, namespaceName: "evil-netns" },
-      { ...LINUX_TEST_NETWORK, hostInterface: "eth0" },
-      { ...LINUX_TEST_NETWORK, namespaceInterface: "eth1" },
-      { ...LINUX_TEST_NETWORK, hostAddress: "10.2.3.2", namespaceAddress: "10.2.3.3" },
-      { ...LINUX_TEST_NETWORK, namespaceAddress: "10.2.4.2" },
-      { ...LINUX_TEST_NETWORK, prefixLength: 16 },
+      { ...LEGACY_LINUX_NETWORK, namespaceName: "evil-netns" },
+      { ...LEGACY_LINUX_NETWORK, hostInterface: "eth0" },
+      { ...LEGACY_LINUX_NETWORK, namespaceInterface: "eth1" },
+      { ...LEGACY_LINUX_NETWORK, hostAddress: "10.2.3.2", namespaceAddress: "10.2.3.3" },
+      { ...LEGACY_LINUX_NETWORK, namespaceAddress: "10.2.4.2" },
+      { ...LEGACY_LINUX_NETWORK, prefixLength: 16 },
     ];
     for (const linuxNetwork of maliciousPlans) {
       const dir = await writeStaleOwner({ linuxNetwork });
-      let reclaimed = 0;
       try {
         await expect(
-          sweepResidualFences("linux", "current-run", async () => {
-            reclaimed += 1;
-          }),
+          sweepResidualFences("linux", "current-run"),
         ).rejects.toMatchObject({ code: "fence.startup_failed" });
-        expect(reclaimed).toBe(0);
+        await expect(access(dir)).resolves.toBeUndefined();
       } finally {
         await rm(dir, { force: true, recursive: true });
       }
     }
   });
 
-  it("owner.json 篡改 ipPath：拒绝执行未知可执行文件", async () => {
+  it("owner.json 篡改 ipPath：拒绝处理不可信残留", async () => {
     const dir = await writeStaleOwner({ ipPath: "/tmp/evil-ip" });
     try {
       await expect(
-        sweepResidualFences("linux", "current-run", async () => undefined),
+        sweepResidualFences("linux", "current-run"),
       ).rejects.toMatchObject({ code: "fence.startup_failed" });
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
   });
 
-  it("合法网络计划 + 死 pid：仍按预期交给回收回调并删除目录", async () => {
+  it("合法旧版网络计划 + 死 pid：仅删除目录（新设计不执行 ip 命令）", async () => {
     const dir = await writeStaleOwner({
-      linuxNetwork: LINUX_TEST_NETWORK,
+      linuxNetwork: LEGACY_LINUX_NETWORK,
       ipPath: "ip",
     });
-    const reclaimed: string[] = [];
     try {
-      await sweepResidualFences("linux", "current-run", async (owner) => {
-        reclaimed.push(owner.runId);
-      });
-      expect(reclaimed).toContain("evil-run");
+      const swept = await sweepResidualFences("linux", "current-run");
+      expect(swept.removed).toBeGreaterThanOrEqual(1);
       await expect(access(dir)).rejects.toThrow();
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
   });
 });
-
-// Linux 真围栏执行测试已移除：平台矩阵把 Linux 登记为 unimplemented（子进程降权
-// 隔离与逃逸负向验证未实现），probe 在任何 Linux 环境下都返回 typed unavailable。
-// fail-closed 证据由上面的「linux 能力探测」单测承担，不再用 127.0.0.1 空连接伪装负向断言。
