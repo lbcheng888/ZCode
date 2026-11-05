@@ -52,6 +52,13 @@
 - 真子进程+真 socket+真 sqlite 集成测试：ready→ensure→ingest 幂等→lease→shutdown 对称、不可信 peer 拒绝、协议版本 fatal
 - 验证：根+CLI typecheck 过、architecture 0、lint 0 errors、bootstrap super-agent 171 + daemon 集成 21 + server-cli 33 测试绿；累计 23 提交
 
+## 里程碑 B Core↔child 数据面闭环（2026-11-05）✅
+- services RPC-backed TriggerSink/schedule auditor（窄端口，shared wire 契约，无 bootstrap 依赖）✅
+- runServerCore 门禁投影 + 构造控制面端口 + §3.6 代际门 + workspace.ensure（leader 缓存）✅
+- 生产 client + 真 socket + §3.8 握手套件；services 25 / server-cli 27 测试绿 ✅
+- desktop 租约门不可达注入层按评审删除（如实延后 daemon scheduler 迁移批）✅
+- 验证：双 scope typecheck、architecture 0、lint 0 errors；累计 26 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
