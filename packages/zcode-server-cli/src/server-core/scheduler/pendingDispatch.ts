@@ -37,11 +37,45 @@ export interface PendingDispatchInsertResult {
   created: boolean;
 }
 
+/** 桥行只读快照（Core host.command 回执/投递守卫 + 终态对账用；§4.5 允许 Core 读）。 */
+export interface PendingDispatchRequestSnapshot {
+  runId: string;
+  sessionId: string | null;
+  status: "pending_dispatch" | "pushed" | "dispatched" | "skipped";
+  /** `automation_runs.dispatch_status`；行缺失为 null。 */
+  runDispatchStatus: string | null;
+}
+
+/** 已终态但 run 台账仍 claimed 的桥行。 */
+export interface PendingDispatchTerminal {
+  runId: string;
+  status: "dispatched" | "skipped";
+  sessionId: string | null;
+  skipReason: string | null;
+}
+
 export interface PendingDispatchWriter {
   /** 启动期校验 tasks-index 已迁移（缺表响亮失败，不在首次写入才暴露）。 */
   verify(): void;
   insert(input: PendingDispatchInput): PendingDispatchInsertResult;
+  /** 按 commandId 查桥行与 run 台账状态；未命中（非派发命令）返回 undefined。 */
+  findByCommandId(commandId: string): PendingDispatchRequestSnapshot | undefined;
+  /** 对账：桥行已终态、run 台账仍 claimed 的行。 */
+  listTerminalClaimedRuns(): PendingDispatchTerminal[];
   close(): void;
+}
+
+function parseDispatchStatus(value: unknown): PendingDispatchRequestSnapshot["status"] {
+  const status = String(value);
+  if (
+    status !== "pending_dispatch" &&
+    status !== "pushed" &&
+    status !== "dispatched" &&
+    status !== "skipped"
+  ) {
+    throw new Error(`dispatch_requests.status 非法值: ${status}`);
+  }
+  return status;
 }
 
 /**
@@ -140,6 +174,60 @@ export function createPendingDispatchWriter(options: {
         commandId: String(existing.command_id),
         created: false,
       };
+    },
+    findByCommandId(commandId) {
+      const row = getDb()
+        .prepare(
+          `select d.run_id as run_id, d.session_id as session_id, d.status as status,
+                  r.dispatch_status as run_dispatch_status
+             from dispatch_requests d
+             left join automation_runs r on r.run_id = d.run_id
+            where d.command_id = ?`,
+        )
+        .get(commandId) as Record<string, unknown> | undefined;
+      if (!row) return undefined;
+      return {
+        runId: String(row.run_id),
+        sessionId:
+          row.session_id === null || row.session_id === undefined
+            ? null
+            : String(row.session_id),
+        status: parseDispatchStatus(row.status),
+        runDispatchStatus:
+          row.run_dispatch_status === null || row.run_dispatch_status === undefined
+            ? null
+            : String(row.run_dispatch_status),
+      };
+    },
+    listTerminalClaimedRuns() {
+      const rows = getDb()
+        .prepare(
+          `select d.run_id as run_id, d.session_id as session_id, d.status as status,
+                  d.skip_reason as skip_reason
+             from dispatch_requests d
+             join automation_runs r on r.run_id = d.run_id
+            where d.status in ('dispatched','skipped') and r.dispatch_status = 'claimed'
+            order by d.updated_at`,
+        )
+        .all() as Record<string, unknown>[];
+      return rows.map((row) => {
+        const status = String(row.status);
+        if (status !== "dispatched" && status !== "skipped") {
+          throw new Error(`dispatch_requests.status 非法值（终态对账）: ${status}`);
+        }
+        return {
+          runId: String(row.run_id),
+          status,
+          sessionId:
+            row.session_id === null || row.session_id === undefined
+              ? null
+              : String(row.session_id),
+          skipReason:
+            row.skip_reason === null || row.skip_reason === undefined
+              ? null
+              : String(row.skip_reason),
+        };
+      });
     },
     close() {
       if (closed) return;

@@ -17,12 +17,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AutomationRepo,
+  OffPeakTaskRepo,
   createSuperAgentControlPlaneScheduleAuditor,
 } from "@zcode/services/node";
 import type { ZCodeAutomation } from "@zcode/shared";
 import {
   CONTROL_PLANE_PROTOCOL_VERSION,
   controlPlaneOwnerId,
+  hostCommandParamsSchema,
 } from "@zcode/shared/super-agent-control-plane-protocol";
 
 import { ensureControlPlaneAuthToken } from "../../src/supervisor/controlPlaneAuth.js";
@@ -136,7 +138,10 @@ interface Harness {
   stop(): Promise<void>;
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(options: {
+  /** 覆盖 Core 侧 child→Core 回调处理（真实 child 的反向 RPC 仍走真 socket）。 */
+  onInboundRequest?: (method: string, params: unknown) => Promise<unknown>;
+} = {}): Promise<Harness> {
   // 短目录名：unix socket 路径上限约 104 字节。
   const root = await mkdtemp(join(tmpdir(), "zcsched-it-"));
   roots.push(root);
@@ -161,7 +166,7 @@ async function startHarness(): Promise<Harness> {
   });
   const client = createControlPlaneClient({
     serverRoot,
-    onInboundRequest: handleSuperAgentControlPlaneInboundRequest,
+    onInboundRequest: options.onInboundRequest ?? handleSuperAgentControlPlaneInboundRequest,
   });
   const port = createSuperAgentControlPlaneCorePort({
     client,
@@ -191,6 +196,7 @@ async function createDueAutomation(
   repo: AutomationRepo,
   now: number,
   workspaceIdentity = WORKSPACE,
+  targetTaskId?: string,
 ): Promise<ZCodeAutomation> {
   return await repo.create(
     {
@@ -200,6 +206,7 @@ async function createDueAutomation(
       workspacePath: `/tmp/zcode-${workspaceIdentity}-workspace`,
       workspaceIdentity,
       recurring: true,
+      ...(targetTaskId ? { targetTaskId } : {}),
     },
     { nextRunAt: now - 30_000 },
   );
@@ -241,6 +248,38 @@ function readPendingRows(dbPath: string): Array<{ run_id: string; status: string
   }
 }
 
+function readRun(dbPath: string, runId: string): { dispatch_status: string; session_id: string | null } {
+  const db = new DatabaseSync(dbPath);
+  try {
+    const row = db
+      .prepare("select dispatch_status, session_id from automation_runs where run_id = ?")
+      .get(runId) as { dispatch_status?: string; session_id?: string | null } | undefined;
+    if (!row) throw new Error(`run not found: ${runId}`);
+    return {
+      dispatch_status: String(row.dispatch_status),
+      session_id: row.session_id ?? null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+  label: string,
+  details?: () => string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(
+    `timed out waiting for ${label}${details ? `; ${details()}` : ""}`,
+  );
+}
+
 function expireLeases(superAgentDbPath: string, now: number): void {
   const db = new DatabaseSync(superAgentDbPath);
   try {
@@ -269,7 +308,7 @@ describe("daemon scheduler ↔ real child", () => {
       });
       try {
         const now = Date.now();
-        const automation = await createDueAutomation(harness.repo, now);
+        const automation = await createDueAutomation(harness.repo, now, WORKSPACE, "session-integration-target");
 
         await scheduler.tick(now);
 
@@ -289,7 +328,7 @@ describe("daemon scheduler ↔ real child", () => {
         // 用一条新 automation 验证门控（上一条仍持有 running=1 的 claim，不再参与本轮
         // claimDue）。tick 取一个明显晚于 child 心跳续租窗口的时间，避免心跳把
         // expires_at 又推回未来造成测试竞态（真实语义仍是「未过期才 claim」）。
-        const second = await createDueAutomation(harness.repo, now);
+        const second = await createDueAutomation(harness.repo, now, WORKSPACE, "session-integration-target");
         const expiredAt = Date.now() + 60_000;
         expireLeases(harness.superAgentDbPath, expiredAt);
         await scheduler.tick(expiredAt);
@@ -297,6 +336,80 @@ describe("daemon scheduler ↔ real child", () => {
         expect(readPendingRows(harness.dbPath)).toHaveLength(1);
       } finally {
         await scheduler.stop();
+        await harness.stop();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "claims off-peak, writes only the schedule.audit row via real child, and defers (顺延) without a bridge row",
+    async () => {
+      const harness = await startHarness();
+      const offPeakRepo = new OffPeakTaskRepo(harness.dbPath);
+      await offPeakRepo.ensureReady();
+      const writer = createPendingDispatchWriter({ databasePath: harness.dbPath });
+      const scheduler = createDaemonScheduler({
+        repo: harness.repo,
+        offPeakRepo,
+        leases: { list: () => harness.port.listLeases() },
+        auditor: createSuperAgentControlPlaneScheduleAuditor(harness.port.port),
+        dispatch: writer,
+        ensureWorkspace: (workspaceIdentity, workspacePath) =>
+          harness.port.ensureWorkspace(workspaceIdentity, workspacePath),
+        ownerId: (workspaceIdentity) =>
+          controlPlaneOwnerId(harness.serverRoot, workspaceIdentity),
+        now: () => Date.now(),
+      });
+      try {
+        const now = Date.now();
+        const task = await offPeakRepo.create(
+          {
+            title: "off-peak integration",
+            prompt: "integration prompt",
+            permissionMode: "default",
+            modelSelection: { providerId: "zai", modelId: "glm-5" },
+            workspacePath: `/tmp/zcode-${WORKSPACE}-workspace`,
+            workspaceIdentity: WORKSPACE,
+          },
+          { now, schedulable: true },
+        );
+
+        await scheduler.tick(now);
+
+        // child 写入审计行：provider_message_id = 任务稳定键（非 runId）。
+        expect(readAuditRows(harness.superAgentDbPath)).toEqual([
+          { provider_message_id: task.offPeakTaskId },
+        ]);
+        // off-peak 不进桥。
+        expect(readPendingRows(harness.dbPath)).toHaveLength(0);
+        // 顺延：仍 queued，认领 release，未标记 running/terminal。
+        const db = new DatabaseSync(harness.dbPath);
+        try {
+          const row = db
+            .prepare(
+              "select status, claim_running, attempt_count, started_at, ended_at from off_peak_tasks where off_peak_task_id = ?",
+            )
+            .get(task.offPeakTaskId) as {
+            status: string;
+            claim_running: number;
+            attempt_count: number;
+            started_at: number | null;
+            ended_at: number | null;
+          };
+          expect(row).toMatchObject({
+            status: "queued",
+            claim_running: 0,
+            attempt_count: 0,
+            started_at: null,
+            ended_at: null,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        await scheduler.stop();
+        offPeakRepo.close();
         await harness.stop();
       }
     },
@@ -325,7 +438,7 @@ describe("daemon scheduler ↔ real child", () => {
       });
       try {
         const now = Date.now();
-        const automation = await createDueAutomation(harness.repo, now);
+        const automation = await createDueAutomation(harness.repo, now, WORKSPACE, "session-integration-target");
 
         await scheduler.tick(now);
 
@@ -358,7 +471,7 @@ describe("daemon scheduler ↔ real child", () => {
       });
       try {
         const now = Date.now();
-        const automation = await createDueAutomation(harness.repo, now);
+        const automation = await createDueAutomation(harness.repo, now, WORKSPACE, "session-integration-target");
 
         // 先观察成功 claim，再停 child，证明不可达时不会 claim。
         await scheduler.tick(now);
@@ -375,6 +488,90 @@ describe("daemon scheduler ↔ real child", () => {
         expect(readRunning(harness.dbPath, second.automationId)).toBe(0);
       } finally {
         await scheduler.stop();
+        await harness.stop();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "pushes a real pending row through the child bridge and settles the run on a real host.command ACK",
+    async () => {
+      let scheduler: ReturnType<typeof createDaemonScheduler> | undefined;
+      const harness = await startHarness({
+        onInboundRequest: async (method, params) => {
+          if (method !== "host.command") {
+            return handleSuperAgentControlPlaneInboundRequest(method, params);
+          }
+          const parsed = hostCommandParamsSchema.parse(params);
+          if (!scheduler) throw new Error("scheduler not initialized");
+          // Core 生产装配（core.ts）在 host.command 回执处回灌 scheduler：
+          // Core host.command 处理 → settleHostCommand → 返回 ACK 给 child。
+          await scheduler.settleHostCommand({
+            commandId: parsed.commandId,
+            status: "accepted",
+            sessionId: parsed.sessionId ?? "",
+          });
+          return {
+            commandId: parsed.commandId,
+            status: "accepted",
+            revisionAtDecision: 0,
+            result: {
+              type: "inputAccepted",
+              inputId: "input-integration-1",
+              delivery: "queue",
+            },
+          };
+        },
+      });
+      const writer = createPendingDispatchWriter({ databasePath: harness.dbPath });
+      const daemon = createDaemonScheduler({
+        repo: harness.repo,
+        leases: { list: () => harness.port.listLeases() },
+        auditor: createSuperAgentControlPlaneScheduleAuditor(harness.port.port),
+        dispatch: writer,
+        ensureWorkspace: (workspaceIdentity, workspacePath) =>
+          harness.port.ensureWorkspace(workspaceIdentity, workspacePath),
+        ownerId: (workspaceIdentity) =>
+          controlPlaneOwnerId(harness.serverRoot, workspaceIdentity),
+        now: () => Date.now(),
+      });
+      scheduler = daemon;
+      try {
+        const now = Date.now();
+        const automation = await createDueAutomation(
+          harness.repo,
+          now,
+          WORKSPACE,
+          "session-integration-target",
+        );
+        await daemon.tick(now);
+        const runId = `${automation.automationId}:${automation.nextRunAt}`;
+        expect(readPendingRows(harness.dbPath)).toMatchObject([
+          { run_id: runId, status: "pending_dispatch" },
+        ]);
+
+        // 真 child 的派发桥每 20s 一轮：等 pushed→ACK→dispatched 收敛。
+        // 之后再断言 run 台账（Core 侧）已被 ACK 结算、single-flight 释放。
+        await waitFor(
+          () => {
+            const rows = readPendingRows(harness.dbPath);
+            return rows.length === 1 && rows[0]?.status === "dispatched";
+          },
+          40_000,
+          "child bridge dispatch ACK",
+          () =>
+            `rows=${JSON.stringify(readPendingRows(harness.dbPath))}; run=${JSON.stringify(
+              readRun(harness.dbPath, runId),
+            )}; childStderr=${childStderr.get(harness.child) ?? ""}`,
+        );
+        expect(readRun(harness.dbPath, runId)).toMatchObject({
+          dispatch_status: "dispatched",
+          session_id: "session-integration-target",
+        });
+        expect(readRunning(harness.dbPath, automation.automationId)).toBe(0);
+      } finally {
+        await daemon.stop();
         await harness.stop();
       }
     },

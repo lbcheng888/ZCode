@@ -11,6 +11,7 @@ const createIngressToken = vi.fn();
 const resolveCoreServerId = vi.fn();
 const installParentDisconnectHandler = vi.fn();
 const createTaskActivityTracker = vi.fn();
+const createCoreDaemonScheduler = vi.fn();
 const environmentConfigRoot = "/tmp/zcode-server-core-test/.zcode/v2";
 
 vi.mock("@zcode/services/node", () => ({
@@ -32,6 +33,7 @@ vi.mock("../src/server-core/ingressToken.js", () => ({ createIngressToken }));
 vi.mock("../src/server-core/serverIdentity.js", () => ({ resolveCoreServerId }));
 vi.mock("../src/server-core/parentDisconnect.js", () => ({ installParentDisconnectHandler }));
 vi.mock("../src/server-core/taskActivityTracker.js", () => ({ createTaskActivityTracker }));
+vi.mock("../src/server-core/scheduler/index.js", () => ({ createCoreDaemonScheduler }));
 
 const { runServerCore } = await import("../src/server-core/core.js");
 
@@ -88,6 +90,16 @@ describe("runServerCore startup wiring", () => {
       onDidChangeRunningTaskCount: () => ({ dispose: () => undefined }),
       dispose: () => undefined,
     });
+    createCoreDaemonScheduler.mockReturnValue({
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      tick: vi.fn(async () => undefined),
+      settleDispatchResult: vi.fn(async () => undefined),
+      settleDispatchSkipped: vi.fn(async () => undefined),
+      settleRunTerminal: vi.fn(async () => undefined),
+      isHostCommandDeliverable: vi.fn(() => true),
+      settleHostCommand: vi.fn(async () => null),
+    });
   });
 
   afterEach(() => {
@@ -132,7 +144,7 @@ describe("runServerCore startup wiring", () => {
     expect(createIngressToken).toHaveBeenCalledWith(layout);
   });
 
-  it("deployment gate on: injects the production RPC port but defers the daemon scheduler", async () => {
+  it("deployment gate on: injects the production RPC port and starts the daemon scheduler", async () => {
     process.env[CONTROL_PLANE_CORE_ENABLED_ENV] = "1";
 
     await runServerCore(1);
@@ -145,8 +157,22 @@ describe("runServerCore startup wiring", () => {
         }),
       }),
     );
-    // B-SPEC §4.4.3：push/sweep 与 Core host.command 未接线前不启动 scheduler，
-    // 保持 Desktop Main fork 全权直派（见 core.ts 门禁注释）。
+    // B-SPEC §4.4.3 原子切换：门禁打开即构造并启动 scheduler（pending + push/sweep +
+    // host.command ACK 回灌同批）；启动失败原样上浮，不留「门禁开但 scheduler 不在跑」。
+    expect(createCoreDaemonScheduler).toHaveBeenCalledTimes(1);
+    expect(createCoreDaemonScheduler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controlPlane: expect.objectContaining({
+          port: expect.objectContaining({
+            triggerIngest: expect.any(Function),
+            scheduleAudit: expect.any(Function),
+          }),
+        }),
+        serverRoot: layout.serverRoot,
+        tasksIndexDatabasePath: expect.any(String),
+      }),
+    );
+    expect(createCoreDaemonScheduler.mock.results[0]?.value.start).toHaveBeenCalledTimes(1);
   });
 
   it("deployment gate off: does not inject the production RPC port", async () => {
@@ -155,6 +181,8 @@ describe("runServerCore startup wiring", () => {
     expect(createServerHostServices).toHaveBeenCalledWith(
       expect.not.objectContaining({ superAgentControlPlaneRpcPort: expect.anything() }),
     );
+    // 门禁关：不构造/不启动 scheduler，Desktop Main fork 保持全权（逐字节 legacy）。
+    expect(createCoreDaemonScheduler).not.toHaveBeenCalled();
   });
 
   it("waits for owner host initialization before opening RPC", async () => {

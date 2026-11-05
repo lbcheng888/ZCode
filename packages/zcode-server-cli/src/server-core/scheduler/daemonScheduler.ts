@@ -9,7 +9,27 @@
  * 3. `AutomationRepo.claimDue`（BEGIN IMMEDIATE 单飞）认领到期行；
  * 4. 认领成功经 `schedule.audit` RPC 落审计行（失败 → release claim，下一 tick 重试）；
  * 5. misfire 跳过（沿用 desktop scheduler 的 5 分钟宽限与一次性终态语义）；
- * 6. 写 `dispatch_requests.pending_dispatch`（session_id = targetTaskId；未绑定会话为 null）。
+ * 6. 写 `dispatch_requests.pending_dispatch`（session_id = targetTaskId）；未绑定会话的
+ *    automation 不写桥行，按永久失败结算（host.worker.createTask 幂等面未接线）。
+ * 7. manual run（`claimManualRuns`，崩溃恢复路径）：与定时 run 同走桥（manual 是
+ *    automation_runs 的一种 trigger，spec 只把 off-peak 排除在桥外），写 pending 行、
+ *    按同一 ACK 结算；
+ * 8. off-peak（`OffPeakTaskRepo.claimDue`）：claim → `schedule.audit` → 顺延
+ *    （releaseClaim 不记失败）。ticket 顺延语义 = 错过执行窗口不丢弃（D9），且
+ *    off-peak 不进 dispatch_requests 桥（trigger-subsystem-spec §7-5）。
+ *    本进程没有 off-peak host 派发面（见交付说明）：claim 只为审计与保持 queued 顺延，
+ *    真正的 off-peak 执行仍归 host。
+ *
+ * 结算入口（替代 Desktop Main fork 的结算职责）：
+ * - `settleDispatchResult`：派发 ACK（admission admitted|duplicate = dispatched）后回写
+ *   run 台账（schedule → dispatched、next_run_at 推进；manual → dispatched 但 claim
+ *   保留到 turn 终态；失败 → failed_to_dispatch + 退避/释放 manual claim）。与桥状态机
+ *   对齐：ACK 即 settled，终态 `dispatch_requests` 的 CAS 仍只由 child 桥写（§4.5）。
+ * - `settleRunTerminal`：worker 终态回写 → `automation_runs.outcome` + manual claim 释放。
+ *   生产来源 = Core `IZCodeTaskService.onDynamicTaskTerminalOutcome`，按 ACK 的
+ *   `inputAccepted.inputId` 精确匹配本次派发轮次（与 Desktop `trackCronRunOutcome` 同源）。
+ * - 桥行终态对账：Core 每 tick 只读 `dispatch_requests`，把已 `dispatched`/`skipped`
+ *   但 run 台账仍 `claimed` 的行收敛（覆盖回执丢失/崩溃重投，且不依赖 child 回调）。
  *
  * 与 Desktop Main fork 的关键差异（刻意如此，不是回退）：
  * - Desktop：有租约 → 释放跳过（归控制面）；无租约 = 回退期 → 照常 claim。
@@ -26,6 +46,9 @@
  * 启用前还必须同批补齐 `claimManualRuns` / off-peak 认领（off-peak 只落审计、不进桥，
  * §4.4.5）：Desktop Main fork 对已租约 workspace 会把 manual run 与 off-peak 都释放让位，
  * 只认领 automation 会让这些任务在该 workspace 永久无人执行。
+ *
+ * 生产启停：`core.ts` 在部署门禁打开时构造并 start；启动失败（tasks-index 未迁移）
+ * 原样上浮，不做「门禁开但调度器不在跑」的半状态。
  */
 import {
   computeAutomationNextRunAt,
@@ -35,7 +58,10 @@ import {
 import {
   resolveWorkspaceKey,
   type ZCodeAutomation,
+  type ZCodeAutomationRun,
+  type ZCodeAutomationRunOutcome,
   type ZCodeAutomationTrigger,
+  type ZCodeOffPeakTask,
 } from "@zcode/shared";
 import {
   controlPlaneOwnerId,
@@ -52,11 +78,70 @@ const DEFAULT_POLL_INTERVAL_MS = 20_000;
 /** misfire 宽限：与 desktop scheduler 同值（5 分钟）。 */
 const DEFAULT_MISFIRE_GRACE_MS = 5 * 60_000;
 
+/** manual run 认领行（AutomationRepo.claimManualRuns 的结构子集）。 */
+export interface DaemonSchedulerManualRun {
+  automation: ZCodeAutomation;
+  run: ZCodeAutomationRun;
+}
+
+/** 派发 ACK：`ok` 等价桥的 `dispatched`（admission admitted|duplicate）。 */
+export interface DaemonSchedulerDispatchResult {
+  runId: string;
+  ok: boolean;
+  sessionId?: string | null;
+  error?: string;
+  failureKind?: "transient" | "permanent";
+}
+
+/** worker 终态回写（不含 running；running 由 outcome 台账自行维护）。 */
+export interface DaemonSchedulerRunTerminal {
+  runId: string;
+  outcome: Exclude<ZCodeAutomationRunOutcome, "running">;
+  error?: string;
+}
+
+/**
+ * Core `host.command` 转发的 agent v4 回执（§3.3 CommandAck 的收敛形态）：
+ * accepted/duplicate = ACK（桥与 run 台账都结算 dispatched）；其余状态 = 非 ACK，
+ * 桥行保持 pushed 由派发桥续推，但 Core run 台账必须可见失败并进入退避（否则
+ * failed_to_dispatch/retry_at 永远没有生产生产者）。
+ */
+export interface DaemonSchedulerHostCommandAck {
+  commandId: string;
+  status: "accepted" | "duplicate" | "rejected" | "stale" | "noop" | "failed";
+  sessionId: string;
+  reasonCode?: string;
+}
+
+/** 桥行快照（Core 只读 tasks-index；§4.5 允许 Core 读 dispatch_requests）。 */
+export interface DaemonSchedulerDispatchRequestSnapshot {
+  runId: string;
+  sessionId: string | null;
+  status: "pending_dispatch" | "pushed" | "dispatched" | "skipped";
+  /** `automation_runs.dispatch_status`；行缺失为 null（不投递）。 */
+  runDispatchStatus: string | null;
+}
+
+/** 已终态但仍未回写 run 台账的桥行（Core 对账用，替换 child→Core 的 skipped 回调）。 */
+export interface DaemonSchedulerTerminalDispatch {
+  runId: string;
+  status: "dispatched" | "skipped";
+  sessionId: string | null;
+  skipReason: string | null;
+}
+
 export interface DaemonSchedulerAutomationRepo {
   ensureReady(): Promise<void>;
   list(): Promise<ZCodeAutomation[]>;
   claimDue(now: number): Promise<ZCodeAutomation[]>;
+  /** 崩溃恢复：认领因进程退出而遗留的 manual run（runNow 直派路径不经过本方法）。 */
+  claimManualRuns(now: number): Promise<DaemonSchedulerManualRun[]>;
+  get(automationId: string): Promise<ZCodeAutomation | null>;
+  getRun(runId: string): Promise<ZCodeAutomationRun | null>;
   releaseClaim(automationId: string): Promise<void>;
+  releaseManualClaim(automationId: string, workspaceKey: string): Promise<void>;
+  /** manual claim 心跳（host 仍持有 queued/running run 时续租 claimed_at）。 */
+  touchManualClaim(automationId: string, workspaceKey: string): Promise<void>;
   skipAndReschedule(params: {
     automationId: string;
     runId: string;
@@ -74,6 +159,47 @@ export interface DaemonSchedulerAutomationRepo {
     trigger: ZCodeAutomationTrigger;
     modelSelection?: ZCodeAutomation["modelSelection"];
   }): Promise<void>;
+  markRunDispatch(params: {
+    runId: string;
+    dispatchStatus: ZCodeAutomationRun["dispatchStatus"];
+    sessionId?: string | null;
+    error?: string | null;
+  }): Promise<void>;
+  markDispatched(
+    automationId: string,
+    options: { dispatchedAt: number; nextRunAt: number | null },
+  ): Promise<void>;
+  markDispatchFailed(
+    automationId: string,
+    options: {
+      failedAt: number;
+      error: string;
+      kind: "transient" | "permanent";
+      nextRunAt?: number | null;
+    },
+  ): Promise<void>;
+  markManualRunDispatched(params: {
+    runId: string;
+    sessionId?: string | null;
+    dispatchedAt: number;
+  }): Promise<boolean>;
+  markRunOutcome(
+    runId: string,
+    outcome: ZCodeAutomationRunOutcome,
+    error?: string,
+  ): Promise<void>;
+  close?(): void;
+}
+
+/**
+ * off-peak 仓储窄面（§4.4.5）：daemon 只 claim/审计/顺延（release 不记失败），
+ * 不写 dispatch_requests、不标记 running/terminal（执行归 host）。
+ */
+export interface DaemonSchedulerOffPeakRepo {
+  ensureReady(): Promise<void>;
+  listNonTerminal(): Promise<ZCodeOffPeakTask[]>;
+  claimDue(now: number): Promise<ZCodeOffPeakTask[]>;
+  releaseClaim(offPeakTaskId: string, options?: { error?: string; now?: number }): Promise<void>;
   close?(): void;
 }
 
@@ -104,6 +230,18 @@ export interface DaemonSchedulerDispatchPort {
     payload: string | null;
     now: number;
   }): { requestId: string; commandId: string; created: boolean };
+  /**
+   * 只读：按 commandId 找回桥行与 run 台账状态。`host.command` 回执/投递前守卫用它
+   * 判定该命令是否属于派发桥（trigger 直通的 commandId 不命中 = 非桥命令）。
+   * 真实写入器必须实现；测试替身可缺席（此时结算入口视为非桥命令）。
+   */
+  findByCommandId?(commandId: string): DaemonSchedulerDispatchRequestSnapshot | undefined;
+  /**
+   * 只读对账：`dispatch_requests` 已终态但 `automation_runs` 仍 claimed 的行。
+   * child 桥的 sweepSkipped 不回调 Core；Core 每 tick 用此查询收敛台账，禁止
+   * 派发行被跳过后台账永久卡在 claimed。
+   */
+  listTerminalClaimedRuns?(): DaemonSchedulerTerminalDispatch[];
   close(): void;
 }
 
@@ -112,6 +250,11 @@ export interface DaemonSchedulerOptions {
   leases: DaemonSchedulerLeasePort;
   auditor: DaemonSchedulerAuditPort;
   dispatch: DaemonSchedulerDispatchPort;
+  /**
+   * off-peak 仓储。缺省 = 本进程不认领 off-peak（fail-closed，交回 Desktop 回退语义）；
+   * 生产装配总是注入真实 `OffPeakTaskRepo`。
+   */
+  offPeakRepo?: DaemonSchedulerOffPeakRepo;
   /** 让 child 为候选 workspace 建 plane/抢租约（§4.4.4 eager ensure）。 */
   ensureWorkspace(workspaceIdentity: string, workspacePath?: string): Promise<unknown>;
   /**
@@ -123,6 +266,11 @@ export interface DaemonSchedulerOptions {
   now?: () => number;
   pollIntervalMs?: number;
   misfireGraceMs?: number;
+  /**
+   * manual claim 心跳间隔；缺省 60s（与 desktop `startManualClaimHeartbeat` 同值）。
+   * 必须显著小于 `CLAIM_STALE_MS`（10 分钟），否则长回合会被当僵尸 claim 回收。
+   */
+  manualClaimHeartbeatMs?: number;
 }
 
 export interface DaemonScheduler {
@@ -131,6 +279,31 @@ export interface DaemonScheduler {
   stop(): Promise<void>;
   /** 单 tick（测试/诊断用）；受 ticking 单飞保护。 */
   tick(now?: number): Promise<void>;
+  /**
+   * 派发 ACK 结算（桥 `host ACK = dispatched` 语义）。迟到/重复回执按 run 台账
+   * `claimed` 状态幂等短路；仓储错误原样抛给上游回执通道（可重投），不吞。
+   */
+  settleDispatchResult(result: DaemonSchedulerDispatchResult): Promise<void>;
+  /**
+   * 桥宽限跳过（`skipped`）→ run 台账收敛：scheduled 走 misfire skip（推进 next_run_at），
+   * manual 记 failed 并释放 claim。幂等；对账与显式上报共用。
+   */
+  settleDispatchSkipped(input: { runId: string; reason: string }): Promise<void>;
+  /** worker 终态回写：outcome 台账 + manual claim 释放（幂等）。 */
+  settleRunTerminal(terminal: DaemonSchedulerRunTerminal): Promise<void>;
+  /**
+   * `host.command` 投递前守卫：commandId 未命中桥行（trigger 直通）= 恒可投递；
+   * 命中时只允许 run 台账 `claimed`（在途重试）或 `dispatched`（幂等重放）。
+   * failed_to_dispatch/permanent 后仍留在 pushed 的迟到行不得再执行。
+   */
+  isHostCommandDeliverable(commandId: string): boolean;
+  /**
+   * `host.command` 回执 → run 台账结算（ACK=dispatched；非 ACK=failed_to_dispatch 退避）。
+   * 非桥命令（commandId 不在 dispatch_requests）返回 null，不做任何写入。
+   */
+  settleHostCommand(
+    ack: DaemonSchedulerHostCommandAck,
+  ): Promise<{ runId: string } | null>;
 }
 
 function resolveScheduledAt(automation: ZCodeAutomation, now: number): number {
@@ -180,10 +353,32 @@ function auditInputFor(
   };
 }
 
+/**
+ * off-peak 审计沿用 §1.2 域键规范的扩展（spec §5.2 实施偏差）：threadKey 域键为
+ * `schedule:<offPeakTaskId>`、幂等键为任务稳定 id（重试/再认领收敛单行）。
+ */
+function offPeakAuditInputFor(
+  task: ZCodeOffPeakTask,
+  now: number,
+): ScheduleAuditParams {
+  return {
+    workspaceIdentity: task.workspaceKey,
+    domainKey: task.offPeakTaskId,
+    providerMessageId: task.offPeakTaskId,
+    payloadSummary: { offPeakTaskId: task.offPeakTaskId, claimedAt: now },
+    now,
+  };
+}
+
+/** manual claim 心跳间隔缺省（与 desktop `startManualClaimHeartbeat` 同值）。 */
+const DEFAULT_MANUAL_CLAIM_HEARTBEAT_MS = 60_000;
+
 export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonScheduler {
   const now = options.now ?? Date.now;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const misfireGraceMs = options.misfireGraceMs ?? DEFAULT_MISFIRE_GRACE_MS;
+  const manualClaimHeartbeatMs =
+    options.manualClaimHeartbeatMs ?? DEFAULT_MANUAL_CLAIM_HEARTBEAT_MS;
   let timer: ReturnType<typeof setInterval> | undefined;
   let started = false;
   let stopped = false;
@@ -192,9 +387,47 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
   let lastGateError: string | null = null;
   /** per-workspace ensure 失败日志去重（§2.6 per-plane 故障隔离）。 */
   const workspaceErrorMessages = new Map<string, string>();
+  /**
+   * manual run 的 claim 心跳：manual ACK 只表示 accepted/queued，claim 要保留到 turn
+   * 终态；不续租 claimed_at 会在 CLAIM_STALE_MS（10 分钟）后被僵尸回收，长回合期间
+   * 同一 automation 的下一次 cron 可被认领 → single-flight 破坏。键 = automationId +
+   * workspaceKey（与 AutomationRepo 的 CAS 维度一致）。
+   */
+  const manualClaimHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
+
+  function manualClaimKey(automationId: string, workspaceKey: string): string {
+    return `${automationId}\u0000${workspaceKey}`;
+  }
+
+  function startManualClaimHeartbeat(automationId: string, workspaceKey: string, runId: string): void {
+    const key = manualClaimKey(automationId, workspaceKey);
+    if (manualClaimHeartbeats.has(key)) return;
+    const heartbeat = setInterval(() => {
+      void options.repo.touchManualClaim(automationId, workspaceKey).catch((error: unknown) => {
+        log.warn("manual claim heartbeat failed", {
+          automationId,
+          workspaceKey,
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, manualClaimHeartbeatMs);
+    heartbeat.unref?.();
+    manualClaimHeartbeats.set(key, heartbeat);
+  }
+
+  function stopManualClaimHeartbeat(automationId: string, workspaceKey: string): void {
+    const key = manualClaimKey(automationId, workspaceKey);
+    const heartbeat = manualClaimHeartbeats.get(key);
+    if (!heartbeat) return;
+    clearInterval(heartbeat);
+    manualClaimHeartbeats.delete(key);
+  }
 
   /** 返回 child 自报 leader 的 workspace 集合（§4.4.4：只对这些 workspace claim）。 */
   async function ensureCandidateWorkspaces(): Promise<Set<string>> {
+    // §4.4.4 workspace 集合两个来源：tasks-index 的 automation + off-peak。bot 绑定
+    // 涉及但域库无行的 workspace 由 child 启动期自枚举，不在此处重复。
     const automations = await options.repo.list();
     const workspaces = new Map<string, string | undefined>();
     for (const automation of automations) {
@@ -204,6 +437,17 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
         workspaceIdentity: automation.workspaceIdentity,
       });
       if (!workspaces.has(workspaceKey)) workspaces.set(workspaceKey, automation.workspacePath);
+    }
+    if (options.offPeakRepo) {
+      // 只有 queued 任务可能被 claim；paused/running 不需要为认领做 ensure。
+      const offPeakTasks = (await options.offPeakRepo.listNonTerminal()).filter(
+        (task) => task.status === "queued",
+      );
+      for (const task of offPeakTasks) {
+        if (!workspaces.has(task.workspaceKey)) {
+          workspaces.set(task.workspaceKey, task.workspacePath);
+        }
+      }
     }
     if (workspaces.size === 0) return new Set();
     const leaders = new Set<string>();
@@ -286,13 +530,32 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
       ...(automation.modelSelection ? { modelSelection: automation.modelSelection } : {}),
     });
 
+    // taskId 即 v4 sessionId（task index 与 v4 snapshot 的唯一映射）。未绑定会话的
+    // createTask 幂等面尚未接线：这类 run 不能写 pending 行（桥会以
+    // dispatch.sessionRequired 拒绝，行停在 pushed 被永续重推），按永久失败结算并暴露。
+    const sessionId = automation.targetTaskId ?? null;
+    if (sessionId === null) {
+      const error =
+        "dispatch.sessionRequired: automation 未绑定目标会话（host.worker.createTask 幂等面未接线）";
+      await options.repo.markRunDispatch({ runId, dispatchStatus: "failed_to_dispatch", error });
+      await options.repo.markDispatchFailed(automation.automationId, {
+        failedAt: nowMs,
+        error,
+        kind: "permanent",
+      });
+      log.error("automation has no target session; dispatch failed permanently", {
+        automationId: automation.automationId,
+        workspaceIdentity: workspaceKey,
+        runId,
+      });
+      return;
+    }
+
     try {
       options.dispatch.insert({
         runId,
         workspaceIdentity: workspaceKey,
-        // taskId 即 v4 sessionId（task index 与 v4 snapshot 的唯一映射）；未绑定会话的
-        // createTask 面尚未接线，null 行由 bridge 响亮拒绝，不做猜测。
-        sessionId: automation.targetTaskId ?? null,
+        sessionId,
         payload: automation.prompt || null,
         now: nowMs,
       });
@@ -307,10 +570,328 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
     }
   }
 
+  /**
+   * manual run（`claimManualRuns` 的崩溃恢复路径）：与定时 run 同走桥。
+   * manual 是 automation_runs 的一种 trigger；spec 只把 off-peak 排除在桥外（§7-5），
+   * 因此 manual 写 `dispatch_requests.pending_dispatch`，由同一 ACK 结算。
+   * 不落 `schedule.audit`：manual 不是 schedule 来源（Desktop manual 路径同样不审计）。
+   */
+  async function handleClaimedManual(
+    claimed: DaemonSchedulerManualRun,
+    nowMs: number,
+    leaderWorkspaces: Set<string>,
+  ): Promise<void> {
+    const automation = claimed.automation;
+    const runId = claimed.run.runId;
+    const workspaceKey = claimed.run.workspaceKey;
+    if (!leaderWorkspaces.has(workspaceKey)) {
+      // §4.4.4：非 leader 的 workspace 释放 single-flight，交回 Desktop 回退语义
+      // （租约过期后 Desktop 按 CLAIM_STALE_MS 再认领，不丢单）。
+      await options.repo.releaseManualClaim(automation.automationId, workspaceKey);
+      return;
+    }
+    const sessionId = automation.targetTaskId ?? null;
+    if (sessionId === null) {
+      const error =
+        "dispatch.sessionRequired: manual run 未绑定目标会话（host.worker.createTask 幂等面未接线）";
+      await options.repo.markRunDispatch({ runId, dispatchStatus: "failed_to_dispatch", error });
+      await options.repo.releaseManualClaim(automation.automationId, workspaceKey);
+      log.error("manual run has no target session; dispatch failed", {
+        automationId: automation.automationId,
+        workspaceKey,
+        runId,
+      });
+      return;
+    }
+    try {
+      options.dispatch.insert({
+        runId,
+        workspaceIdentity: workspaceKey,
+        sessionId,
+        payload: automation.prompt || null,
+        now: nowMs,
+      });
+    } catch (error) {
+      await options.repo.releaseManualClaim(automation.automationId, workspaceKey);
+      log.error("manual pending dispatch insert failed, claim released", {
+        automationId: automation.automationId,
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * off-peak（§4.4.5）：claim → `schedule.audit` → 顺延（releaseClaim，不记失败）。
+   * - 不进 `dispatch_requests` 桥（trigger-subsystem-spec §7-5 已裁决）。
+   * - ticket 顺延语义 = 错过窗口不丢弃（off-peak decisions D9）：释放认领后任务仍
+   *   `queued`，attempt_count 不增，下一 tick / Desktop 回退可再认领。
+   * - 本进程不标记 running/terminal：off-peak 执行（ticket 鉴权 + 会话派发）在本 daemon
+   *   没有 host 派发面，claim 只承担审计与顺延；执行仍归 host（见交付说明）。
+   */
+  async function handleOffPeakClaimed(
+    task: ZCodeOffPeakTask,
+    nowMs: number,
+    leaderWorkspaces: Set<string>,
+  ): Promise<void> {
+    const offPeakRepo = options.offPeakRepo;
+    if (!offPeakRepo) return;
+    if (!leaderWorkspaces.has(task.workspaceKey)) {
+      await offPeakRepo.releaseClaim(task.offPeakTaskId, { now: nowMs });
+      return;
+    }
+    try {
+      // 审计失败也必须释放认领：§4.4「不得无审计直派」，下一 tick 重试。
+      await options.auditor.audit(offPeakAuditInputFor(task, nowMs));
+    } catch (error) {
+      await offPeakRepo.releaseClaim(task.offPeakTaskId, { now: nowMs });
+      log.error("off-peak schedule audit failed, claim released", {
+        offPeakTaskId: task.offPeakTaskId,
+        workspaceIdentity: task.workspaceKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    // 顺延：ticket/queued 序保持，不写 skip、不计失败、不进桥。
+    await offPeakRepo.releaseClaim(task.offPeakTaskId, { now: nowMs });
+  }
+
+  /** 结算正在处理的 runId → 共享 promise：同 run 的并发/重复回执只走一次台账写入。 */
+  const settlingRuns = new Map<string, Promise<void>>();
+
+  /**
+   * 派发 ACK 结算（桥状态机 `host ACK → dispatched` 的 Core 台账对应面）。
+   *
+   * 幂等边界 = run 台账 `dispatch_status === "claimed"`：`dispatched`（重复 ACK）与
+   * `failed_to_dispatch`（重复失败）都短路；重试认领会把同一 runId 重置回 `claimed`，
+   * 因此不会误吞下一轮的回执。run 已删除（清理/迟到）不复活，只记日志。
+   *
+   * 仓储错误原样抛给上游回执通道（可重投），不吞、不猜。
+   */
+  async function settleDispatchResult(result: DaemonSchedulerDispatchResult): Promise<void> {
+    const runId = result.runId;
+    if (!runId) throw new Error("dispatch result requires runId");
+    // 重复回执与首次结算并发时共享同一 promise：两个调用方看到同一结果，
+    // 不会出现「先到的失败、后到的返回成功」导致台账丢失。
+    const inFlight = settlingRuns.get(runId);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+    const settlement = settleDispatchResultOnce(result);
+    settlingRuns.set(runId, settlement);
+    try {
+      await settlement;
+    } finally {
+      settlingRuns.delete(runId);
+    }
+  }
+
+  async function settleDispatchResultOnce(result: DaemonSchedulerDispatchResult): Promise<void> {
+    const runId = result.runId;
+    const run = await options.repo.getRun(runId);
+    if (!run) {
+      log.warn("dispatch result ignored: run not found (deleted or cleaned up)", { runId });
+      return;
+    }
+    if (run.dispatchStatus !== "claimed") {
+      log.info("dispatch result ignored: run already settled (late/duplicate ACK)", {
+        runId,
+        dispatchStatus: run.dispatchStatus,
+      });
+      return;
+    }
+    // trigger 以 run 台账为准（runId 唯一映射一行；不接受回执侧覆盖）。
+    const trigger = run.trigger;
+    const automationId = run.automationId;
+    const workspaceKey = run.workspaceKey;
+    const settledAt = now();
+    if (result.ok) {
+      if (trigger === "manual") {
+        const marked = await options.repo.markManualRunDispatched({
+          runId,
+          sessionId: result.sessionId ?? null,
+          dispatchedAt: settledAt,
+        });
+        // manual claim 保留到 turn 终态（host ACK 只表示 accepted/queued）。
+        // 长回合期间必须续租 claimed_at，否则 CLAIM_STALE_MS 回收后同一 automation
+        // 的下一次 cron 会与在跑回合并发。
+        if (marked) startManualClaimHeartbeat(automationId, workspaceKey, runId);
+        return;
+      }
+      await options.repo.markRunDispatch({
+        runId,
+        dispatchStatus: "dispatched",
+        sessionId: result.sessionId ?? null,
+      });
+      const automation = await options.repo.get(automationId);
+      const nextRunAt = automation ? computeAutomationNextRunAt(automation, settledAt) : null;
+      await options.repo.markDispatched(automationId, {
+        dispatchedAt: settledAt,
+        nextRunAt,
+      });
+      return;
+    }
+
+    const error = result.error ?? "dispatch failed";
+    await options.repo.markRunDispatch({
+      runId,
+      dispatchStatus: "failed_to_dispatch",
+      error,
+    });
+    if (trigger === "manual") {
+      stopManualClaimHeartbeat(automationId, workspaceKey);
+      await options.repo.releaseManualClaim(automationId, workspaceKey);
+      return;
+    }
+    const automation = await options.repo.get(automationId);
+    const nextRunAt = automation ? computeAutomationNextRunAt(automation, settledAt) : null;
+    await options.repo.markDispatchFailed(automationId, {
+      failedAt: settledAt,
+      error,
+      kind: result.failureKind ?? "transient",
+      nextRunAt,
+    });
+  }
+
+  /**
+   * 桥宽限跳过（`dispatch_requests.status = 'skipped'`）→ run 台账收敛。
+   * 桥的 sweep 只 CAS 桥行，不回调 Core（§1.6 skipped 由宽限定时器触发）；若不收敛：
+   * run 永久 claimed，下一 tick 仍以同 runId 重认领，audit 幂等空转、insert 命中
+   * skipped 行 no-op —— 与 host 是否在线无关的永久停摆。
+   */
+  async function settleDispatchSkipped(input: {
+    runId: string;
+    reason: string;
+  }): Promise<void> {
+    const run = await options.repo.getRun(input.runId);
+    if (!run) {
+      log.warn("skipped dispatch ignored: run not found (deleted or cleaned up)", {
+        runId: input.runId,
+      });
+      return;
+    }
+    if (run.dispatchStatus !== "claimed") {
+      // dispatched / failed / skipped 的重放幂等短路。
+      return;
+    }
+    const settledAt = now();
+    if (run.trigger === "manual") {
+      const error = `dispatch skipped: ${input.reason}`;
+      await options.repo.markRunDispatch({
+        runId: run.runId,
+        dispatchStatus: "failed_to_dispatch",
+        error,
+      });
+      stopManualClaimHeartbeat(run.automationId, run.workspaceKey);
+      await options.repo.releaseManualClaim(run.automationId, run.workspaceKey);
+      return;
+    }
+    const automation = await options.repo.get(run.automationId);
+    const nextRunAt = automation ? computeAutomationNextRunAt(automation, settledAt) : null;
+    await options.repo.skipAndReschedule({
+      automationId: run.automationId,
+      runId: run.runId,
+      workspaceKey: run.workspaceKey,
+      scheduledAt: run.scheduledAt ?? null,
+      reason: `dispatch_skipped:${input.reason}`,
+      nextRunAt,
+      finalize: automation ? isOneShotAutomation(automation) : false,
+    });
+  }
+
+  /**
+   * `host.command` 投递前守卫。桥行存在时，run 只有处于 claimed（在途交付/重试）或
+   * dispatched（重复 ACK 幂等重放）才允许投递；permanent 失败后桥仍会以同 commandId
+   * 续推 pushed 行，若不拒绝，迟到的 host 接受会让已放弃的 automation 执行。
+   * 非桥命令（trigger 直通）没有行，恒可投递。
+   */
+  function isHostCommandDeliverable(commandId: string): boolean {
+    const row = options.dispatch.findByCommandId?.(commandId);
+    if (!row) return true;
+    return row.runDispatchStatus === "claimed" || row.runDispatchStatus === "dispatched";
+  }
+
+  /**
+   * `host.command` 回执 → run 台账。ACK（accepted/duplicate）结算 dispatched；
+   * 其余状态（rejected/stale/noop/failed）不是桥 ACK（桥行保持 pushed 续推），但
+   * run 台账必须记 failed_to_dispatch 并进入退避——否则失败路径没有生产生产者。
+   * 非桥命令（trigger 直通）不命中 dispatch_requests，返回 null 零写入。
+   */
+  async function settleHostCommand(
+    ack: DaemonSchedulerHostCommandAck,
+  ): Promise<{ runId: string } | null> {
+    const row = options.dispatch.findByCommandId?.(ack.commandId);
+    if (!row) return null;
+    if (ack.status === "accepted" || ack.status === "duplicate") {
+      await settleDispatchResult({ runId: row.runId, ok: true, sessionId: ack.sessionId });
+      return { runId: row.runId };
+    }
+    await settleDispatchResult({
+      runId: row.runId,
+      ok: false,
+      error: `host.command ${ack.status}${ack.reasonCode ? `: ${ack.reasonCode}` : ""}`,
+    });
+    return { runId: row.runId };
+  }
+
+  /**
+   * worker 终态回写：`automation_runs.outcome` + manual claim 释放。
+   * 重复/迟到终态幂等（markRunOutcome 覆写同值、releaseManualClaim CAS running=1）。
+   */
+  async function settleRunTerminal(terminal: DaemonSchedulerRunTerminal): Promise<void> {
+    const run = await options.repo.getRun(terminal.runId);
+    if (!run) {
+      log.warn("run terminal ignored: run not found (deleted or cleaned up)", {
+        runId: terminal.runId,
+      });
+      return;
+    }
+    await options.repo.markRunOutcome(terminal.runId, terminal.outcome, terminal.error);
+    if (run.trigger === "manual") {
+      stopManualClaimHeartbeat(run.automationId, run.workspaceKey);
+      await options.repo.releaseManualClaim(run.automationId, run.workspaceKey);
+    }
+  }
+
+  /**
+   * 对账：桥行已终态但 run 台账仍 claimed。`dispatched` 行由 host ACK 直接结算（本路径
+   * 覆盖 Core 崩溃/回执丢失后的收敛）；`skipped` 行由此收敛（见 settleDispatchSkipped）。
+   * 逐行错误隔离：单行失败不阻塞同 tick 其他行，下一 tick 重试。
+   */
+  async function reconcileDispatchTerminals(): Promise<void> {
+    const rows = options.dispatch.listTerminalClaimedRuns?.() ?? [];
+    for (const row of rows) {
+      try {
+        if (row.status === "dispatched") {
+          await settleDispatchResult({
+            runId: row.runId,
+            ok: true,
+            sessionId: row.sessionId,
+          });
+        } else {
+          await settleDispatchSkipped({
+            runId: row.runId,
+            reason: row.skipReason ?? "no_dispatcher",
+          });
+        }
+      } catch (error) {
+        log.error("dispatch terminal reconciliation failed", {
+          runId: row.runId,
+          status: row.status,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   async function runTick(nowMs: number): Promise<void> {
     if (stopped || ticking) return;
     ticking = true;
     try {
+      // 桥行终态对账不依赖租约/RPC：Core 崩溃后重启也要收敛（dispatched/skipped），
+      // 因此放在 gate 读取之前，避免 RPC 不可达时 run 台账永久卡在 claimed。
+      await reconcileDispatchTerminals();
       let ensuredLeaders: Set<string>;
       try {
         ensuredLeaders = await ensureCandidateWorkspaces();
@@ -349,6 +930,41 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
           });
         }
       }
+
+      // manual run 的唤醒可能与当前 tick 重叠；单飞 claim 已由 DB running 锁吸收。
+      const manualRuns = await options.repo.claimManualRuns(nowMs);
+      for (const manualRun of manualRuns) {
+        try {
+          await handleClaimedManual(manualRun, nowMs, leaderWorkspaces);
+        } catch (error) {
+          await options.repo
+            .releaseManualClaim(manualRun.automation.automationId, manualRun.run.workspaceKey)
+            .catch(() => undefined);
+          log.error("daemon scheduler manual claim handling failed, claim released", {
+            automationId: manualRun.automation.automationId,
+            runId: manualRun.run.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // off-peak：只 claim + 审计 + 顺延，不进桥（§4.4.5）。
+      if (options.offPeakRepo) {
+        const offPeakClaimed = await options.offPeakRepo.claimDue(nowMs);
+        for (const task of offPeakClaimed) {
+          try {
+            await handleOffPeakClaimed(task, nowMs, leaderWorkspaces);
+          } catch (error) {
+            await options.offPeakRepo
+              .releaseClaim(task.offPeakTaskId, { now: nowMs })
+              .catch(() => undefined);
+            log.error("daemon scheduler off-peak claim handling failed, claim released", {
+              offPeakTaskId: task.offPeakTaskId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
     } finally {
       ticking = false;
     }
@@ -375,6 +991,7 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
     async start() {
       if (started) return;
       await options.repo.ensureReady();
+      await options.offPeakRepo?.ensureReady();
       // 写面可用性在启动期校验：tasks-index 未迁移 = 响亮失败，不带病进入轮询。
       options.dispatch.verify?.();
       started = true;
@@ -400,18 +1017,32 @@ export function createDaemonScheduler(options: DaemonSchedulerOptions): DaemonSc
       started = false;
       if (timer) clearInterval(timer);
       timer = undefined;
-      // 等在途 tick 收尾后关闭句柄，避免关库后仍有 INSERT。
-      while (ticking) await new Promise((resolve) => setTimeout(resolve, 10));
+      for (const heartbeat of manualClaimHeartbeats.values()) clearInterval(heartbeat);
+      manualClaimHeartbeats.clear();
+      // 等在途 tick / ACK 结算收尾后关闭句柄，避免关库后仍有 INSERT/UPDATE。
+      while (ticking || settlingRuns.size > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       try {
         options.repo.close?.();
       } catch {
         // 收口路径尽力而为；未关闭由进程退出兜底。
+      }
+      try {
+        options.offPeakRepo?.close?.();
+      } catch {
+        // 同上，尽力而为。
       }
       options.dispatch.close();
     },
     async tick(nowMs?: number) {
       await runTick(nowMs ?? now());
     },
+    settleDispatchResult,
+    settleDispatchSkipped,
+    settleRunTerminal,
+    isHostCommandDeliverable,
+    settleHostCommand,
   };
 }
 
@@ -419,11 +1050,14 @@ export interface ProductionDaemonSchedulerOptions {
   repo: DaemonSchedulerAutomationRepo;
   leases: DaemonSchedulerLeasePort;
   auditor: DaemonSchedulerAuditPort;
+  /** off-peak 仓储（真实 OffPeakTaskRepo）；缺省 = 不认领 off-peak。 */
+  offPeakRepo?: DaemonSchedulerOffPeakRepo;
   tasksIndexDatabasePath: string;
   /** child 的 serverRoot：稳定 ownerId 的输入（§2.5 `controlPlaneOwnerId`）。 */
   serverRoot: string;
   ensureWorkspace(workspaceIdentity: string, workspacePath?: string): Promise<unknown>;
   now?: () => number;
+  manualClaimHeartbeatMs?: number;
 }
 
 /** 真实文件端口的装配（core.ts 只在部署门禁打开时调用）。 */
@@ -438,13 +1072,19 @@ export function createProductionDaemonScheduler(
     repo: options.repo,
     leases: options.leases,
     auditor: options.auditor,
+    ...(options.offPeakRepo ? { offPeakRepo: options.offPeakRepo } : {}),
     ensureWorkspace: options.ensureWorkspace,
     ownerId: (workspaceIdentity) => controlPlaneOwnerId(options.serverRoot, workspaceIdentity),
     dispatch: {
       verify: () => writer.verify(),
       insert: (input) => writer.insert(input),
+      findByCommandId: (commandId) => writer.findByCommandId(commandId),
+      listTerminalClaimedRuns: () => writer.listTerminalClaimedRuns(),
       close: () => writer.close(),
     },
     ...(options.now ? { now: options.now } : {}),
+    ...(options.manualClaimHeartbeatMs !== undefined
+      ? { manualClaimHeartbeatMs: options.manualClaimHeartbeatMs }
+      : {}),
   });
 }
