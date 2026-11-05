@@ -111,6 +111,7 @@ import type {
 } from "../model-provider/providerFacadeServices.js";
 import { createServiceLogger } from "#src/logger/serviceLogger.js";
 import type {
+  BotAutoReplyGuardInput,
   BotBindCodeResult,
   BotAutomationRunWatchParams,
   BotCreateBindCodeParams,
@@ -119,9 +120,14 @@ import type {
   BotOutboxDeadLetterRetrySummary,
   BotSaveBotParams,
   BotTestResult,
+  BotTriggerCreateTaskInput,
   BotUserConfigOptionsParams,
   IBotsService,
 } from "./bots.js";
+import {
+  FileBotTriggerTaskBindingStore,
+  type BotTriggerTaskBindingStore,
+} from "./botTriggerTaskBindings.js";
 import {
   beginFeishuAppRegistration,
   pollFeishuAppRegistration,
@@ -348,6 +354,11 @@ interface BotsServiceDeps {
    * 注入后：handled=true 跳过 legacy 直路（避免双跑），handled=false 继续 legacy。
    */
   triggerSink?: TriggerSink;
+  /**
+   * B-SPEC §3.3 createTask 幂等存储（triggerId → sessionId）。生产缺省落
+   * bot-trigger-task-bindings.v1.json；测试注入内存实现，语义与文件版一致。
+   */
+  triggerTaskBindingStore?: BotTriggerTaskBindingStore;
 }
 
 type BotRemoteWorkspaceReconnectResult = Awaited<
@@ -773,6 +784,12 @@ export function createBotsService(
   const runStartupBackgroundTasks = deps.runStartupBackgroundTasks !== false;
   const repo = deps.repo ?? new BotsRepo();
   const outboxDeadLetterRepo = deps.outboxDeadLetterRepo ?? new BotsOutboxDeadLetterRepo();
+  // B-SPEC §3.3：triggerId → sessionId 的 Core 侧幂等权威；child 域库订阅约束不可跨进程读。
+  const triggerTaskBindingStore =
+    deps.triggerTaskBindingStore ?? new FileBotTriggerTaskBindingStore();
+  // 同一 thread 的并发 createTask 在 Core 内串行化（键见 serializeTriggerCreateTask）：
+  // 先到的建会话，后到的读到 activeTaskId 或 triggerId 绑定后收敛，绝不建平行会话。
+  const triggerCreateTaskQueues = new Map<string, Promise<unknown>>();
   // Phase 2 出口接线（spec §5.4）：undefined = 未接线（生产缺省，零额外 I/O）；
   // kill-switch 关闭时组合根注入 noopTriggerSink，行为与 legacy 逐字节一致。
   const triggerSink = deps.triggerSink;
@@ -7422,32 +7439,41 @@ export function createBotsService(
     await publishTopicPreparation();
   }
 
-  async function admitAutoReplyTurn(message: BotInboundMessage): Promise<boolean> {
-    if (
-      message.actor.chatType !== "group" ||
-      message.groupCardAction ||
-      message.elicitationResponse
-    )
-      return true;
-    const id = message.actor.providerMessageId;
-    if (!id) return message.senderType !== "app";
+  /** 互答守卫的判定事实（legacy message 与 wire guard 共用同一占额逻辑）。 */
+  interface AutoReplyTurnFacts {
+    botId: string;
+    conversationKey: string;
+    chatType: "private" | "group";
+    senderType?: "user" | "app";
+    providerMessageId?: string;
+    threadId?: string;
+    mentionedBot?: boolean;
+    commandText?: string;
+    groupCardAction?: boolean;
+    elicitation?: boolean;
+  }
+
+  async function admitAutoReplyTurnFacts(facts: AutoReplyTurnFacts): Promise<boolean> {
+    if (facts.chatType !== "group" || facts.groupCardAction || facts.elicitation) return true;
+    const id = facts.providerMessageId;
+    if (!id) return facts.senderType !== "app";
     let admitted = false;
     // 新消息 ID 去重不足以阻断两台机器人互答。必须在停止/准备前原子占用次数，
     // 与去重一起持久化；准备失败仍占一次，避免重投、并发和重启绕过上限。
     await serializeStateWrite(async () => {
       const state = await repo.readState();
-      const context = state.bots[getBotConversationKey(message.actor)];
+      const context = state.bots[facts.conversationKey];
       const group = context?.group;
       if (!group?.enabled) {
-        admitted = message.senderType !== "app";
+        admitted = facts.senderType !== "app";
         return;
       }
-      const bot = findBot(await repo.readConfig(), message.botId);
+      const bot = findBot(await repo.readConfig(), facts.botId);
       if (!bot?.enabled || bot.providerUserId !== group.ownerId) return;
       if (
         !group.autoReplyGuard &&
-        message.senderType !== "app" &&
-        parseBotCommand(message.commandText ?? message.text).type !== "message"
+        facts.senderType !== "app" &&
+        parseBotCommand(facts.commandText ?? "").type !== "message"
       ) {
         admitted = true;
         return;
@@ -7462,23 +7488,38 @@ export function createBotsService(
         )
       ) {
         // 真人重试仍走原有准备/命令幂等流程，但不能重复恢复机器人额度。
-        admitted = message.senderType !== "app";
+        admitted = facts.senderType !== "app";
         return;
       }
       if (
-        message.senderType === "app" &&
+        facts.senderType === "app" &&
         (guard.consecutive >= 5 ||
-          (message.actor.threadId ? group.topicActive !== true : message.mentionedBot !== true))
+          (facts.threadId ? group.topicActive !== true : facts.mentionedBot !== true))
       )
         return;
       group.autoReplyGuard = {
-        consecutive: message.senderType === "app" ? guard.consecutive + 1 : 0,
+        consecutive: facts.senderType === "app" ? guard.consecutive + 1 : 0,
         messageIds: [...guard.messageIds, id],
       };
       await repo.writeState(state);
       admitted = true;
     });
     return admitted;
+  }
+
+  async function admitAutoReplyTurn(message: BotInboundMessage): Promise<boolean> {
+    return admitAutoReplyTurnFacts({
+      botId: message.botId,
+      conversationKey: getBotConversationKey(message.actor),
+      chatType: message.actor.chatType,
+      senderType: message.senderType,
+      providerMessageId: message.actor.providerMessageId,
+      threadId: message.actor.threadId,
+      mentionedBot: message.mentionedBot,
+      commandText: message.commandText ?? message.text,
+      groupCardAction: message.groupCardAction,
+      elicitation: message.elicitationResponse !== undefined,
+    });
   }
 
   async function receiveTopicMessage(message: BotInboundMessage): Promise<BotOutboundMessage[]> {
@@ -8490,6 +8531,343 @@ export function createBotsService(
     await watchAutomationRunWithOutcome(params);
   }
 
+  /**
+   * wire threadKey 可能来自 `trigger_events.thread_key`（intake `mintThreadKey` =
+   * `<workspaceIdentity>|<域键>`），也可能已是裸域键（autoReplyGuard 的 threadKeyHint）。
+   * 只有后缀是已知域前缀时才剥离，避免把普通字符串里的 `|` 当分界。
+   */
+  function stripTriggerThreadKeyWorkspacePrefix(threadKey: string): string {
+    const separator = threadKey.lastIndexOf("|");
+    if (separator <= 0) return threadKey;
+    const suffix = threadKey.slice(separator + 1);
+    return suffix.startsWith("bot:") || suffix.startsWith("schedule:") || suffix.startsWith("webhook:")
+      ? suffix
+      : threadKey;
+  }
+
+  /** threadKey 形状（`buildBotTriggerThreadKeyHint`）：`bot:<botId>+<peer>[/<threadId>]`。 */
+  function parseTriggerThreadKey(
+    threadKey: string,
+  ): { botId: string; peer: string; threadId?: string } | null {
+    const normalized = stripTriggerThreadKeyWorkspacePrefix(threadKey);
+    if (!normalized.startsWith("bot:")) return null;
+    const rest = normalized.slice(4);
+    const plus = rest.indexOf("+");
+    if (plus <= 0) return null;
+    const botId = rest.slice(0, plus);
+    const tail = rest.slice(plus + 1);
+    const slash = tail.indexOf("/");
+    const peer = slash < 0 ? tail : tail.slice(0, slash);
+    const threadId = slash < 0 ? undefined : tail.slice(slash + 1);
+    if (!botId || !peer) return null;
+    return { botId, peer, ...(threadId ? { threadId } : {}) };
+  }
+
+  function botTriggerGroupKey(parsed: { botId: string; peer: string; threadId?: string }): string {
+    return JSON.stringify(
+      parsed.threadId ? [parsed.botId, parsed.peer, parsed.threadId] : [parsed.botId, parsed.peer],
+    );
+  }
+
+  /**
+   * 串行键 = `${workspaceIdentity}|${threadKey}`，不是 triggerId：两个不同 trigger 对同一
+   * thread 并发时必须在同一临界区，后到者才能读到前到者写入的 activeTaskId 并收敛，
+   * 否则会为同一 threadKey 建出平行会话（human-explicit-dispatch §1.3 语义）。
+   */
+  async function serializeTriggerCreateTask<T>(queueKey: string, run: () => Promise<T>): Promise<T> {
+    const previous = triggerCreateTaskQueues.get(queueKey) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(run);
+    triggerCreateTaskQueues.set(queueKey, next);
+    try {
+      return await next;
+    } finally {
+      if (triggerCreateTaskQueues.get(queueKey) === next) {
+        triggerCreateTaskQueues.delete(queueKey);
+      }
+    }
+  }
+
+  /**
+   * B-SPEC §3.3 `host.worker.createTask`：按 triggerId 幂等建会话并投递唤醒文本。
+   *
+   * 复用既有 createTask/sendPrompt 路径（不是另起 admission）：v4 draft + 配置下发 +
+   * 写 context + 任务流订阅 + 后台首发。幂等顺序：
+   * 1. 命中 triggerId 绑定 → 直接返回已有 sessionId（不建第二个任务）；
+   * 2. bot state 已有 activeTaskId（上一次已建、绑定丢失）→ 收敛到该会话，用
+   *    commandId=`triggerId:sessionId` 重投唤醒文本（CommandInbox 幂等吸收）；
+   * 3. 都没有 → `zcodeTaskService.createTask`；成功后才落绑定。
+   *
+   * 已知窗口（结构性缺口，未闭环）：createTask 已建会话、但 context 尚未写 activeTaskId
+   * 时进程崩溃，重试会再建一个会话。没有 idempotent createSession 原语时无法原子收敛；
+   * 不得靠猜/清理掩盖。该窗口登记在 B-SPEC §8 阻塞清单。
+   *
+   * 群 thread：wire 不含 providerMessageId/发送者身份（§3.3 params），因此不走群输入
+   * admission 台账；唤醒正文以普通首发进入新会话，回复经 task stream + deliveryTarget
+   * 回群。群授权在 readContext 之后显式校验 enabled/ownerId（与 withAuthorizedContext
+   * 同规则），失败响亮。
+   */
+  async function createBotTaskFromTriggerUnserialized(
+    input: BotTriggerCreateTaskInput,
+  ): Promise<{ sessionId: string }> {
+    const parsed = parseTriggerThreadKey(input.threadKey);
+    if (!parsed) {
+      throw new Error(`createBotTaskFromTrigger: 非法 bot threadKey: ${input.threadKey}`);
+    }
+    const bound = await triggerTaskBindingStore.get(input.triggerId);
+    if (bound) {
+      if (
+        bound.workspaceIdentity !== input.workspaceIdentity ||
+        bound.threadKey !== input.threadKey
+      ) {
+        throw new Error(
+          `createBotTaskFromTrigger: triggerId ${input.triggerId} 已绑定到其他 workspace/thread`,
+        );
+      }
+      return { sessionId: bound.sessionId };
+    }
+    const bot = findBot(await repo.readConfig(), parsed.botId);
+    if (!bot || !bot.enabled) {
+      throw new Error(`createBotTaskFromTrigger: bot 不可用 ${parsed.botId}`);
+    }
+    const state = await repo.readState();
+    const groupContext = state.bots[botTriggerGroupKey(parsed)]?.group;
+    const isGroup = parsed.threadId !== undefined || groupContext !== undefined;
+    if (!isGroup && !state.bots[bot.id]) {
+      // 私聊 threadKey 的 peer 是 chatId 或 providerUserId（mint 规则二选一），无法由它
+      // 区分「未知群」；只有已存在的私聊上下文才能证明这是绑定会话。
+      throw new Error(
+        `createBotTaskFromTrigger: thread 归属不可判定（无私聊上下文也无群上下文）bot=${bot.id} thread=${input.threadKey}`,
+      );
+    }
+    const actor: BotActor = isGroup
+      ? {
+          botId: bot.id,
+          provider: bot.provider,
+          providerUserId: "", // wire 不含发送者身份；群授权只认 context.group，不认该字段
+          chatType: "group",
+          chatId: parsed.peer,
+          ...(parsed.threadId ? { threadId: parsed.threadId } : {}),
+        }
+      : {
+          botId: bot.id,
+          provider: bot.provider,
+          // 私聊授权必须用 threadKey 的 peer（= providerUserId）交给 findBoundUser 校验；
+          // 不能填 bot.providerUserId，否则任意 peer 都会被当成 owner（weixin 例外由
+          // findBoundUser 按 legacy 处理）。
+          providerUserId: parsed.peer,
+          chatType: "private",
+          chatId: parsed.peer,
+        };
+    let context = await readContext(actor, bot);
+    if (!context) {
+      throw new Error(
+        `createBotTaskFromTrigger: thread 未启用或无授权 bot=${bot.id} thread=${input.threadKey}`,
+      );
+    }
+    // readContext 对已存在的群/话题上下文只回现值，不校验 enabled/ownerId；授权必须
+    // 在这里与 withAuthorizedContext 同规则校验，否则停用群/owner 漂移会被放行。
+    if (isGroup) {
+      if (
+        context.group?.enabled !== true ||
+        context.group.ownerId !== bot.providerUserId
+      ) {
+        throw new Error(
+          `createBotTaskFromTrigger: 群未启用或 owner 不匹配 bot=${bot.id} thread=${input.threadKey}`,
+        );
+      }
+    }
+    const contextIdentity = context.workspaceIdentity?.trim() || context.workspacePath.trim();
+    if (contextIdentity !== input.workspaceIdentity) {
+      throw new Error(
+        `createBotTaskFromTrigger: 跨 workspace thread=${input.threadKey} context=${contextIdentity} request=${input.workspaceIdentity}`,
+      );
+    }
+    const user = context.group
+      ? {
+          ...bot,
+          currentOptions: context.group.currentOptions,
+          replyMode: "summary_changes" as const,
+        }
+      : findBoundUser(bot, actor);
+    if (!user) {
+      throw new BotAdminRequiredError(
+        "user",
+        `createBotTaskFromTrigger: 私聊用户未绑定 bot=${bot.id} user=${actor.providerUserId}`,
+      );
+    }
+
+    let sessionId: string;
+    let modelSelection: ModelSelection | undefined;
+    let createdTask: ZCodeTaskMeta | undefined;
+    if (context.mode === "task" && context.activeTaskId) {
+      // 上一次尝试已建会话但绑定未落：收敛到该会话，不再建第二个任务。
+      sessionId = context.activeTaskId;
+    } else {
+      const draftOptions = context.draftOptions ?? (await buildInitializedDraftOptions(context));
+      const selectionView = await readModelSelectionView(context, draftOptions.modelSelection);
+      const submissionModelSelection = draftOptions.modelSelection
+        ? selectionView?.effectiveSelection
+        : selectionView?.preferredSelection;
+      if (
+        !submissionModelSelection ||
+        (draftOptions.modelSelection && selectionView?.selectionIssue)
+      ) {
+        throw new BotAdminRequiredError("model", "Bot 无法从目标 Host 解析 Submission 模型");
+      }
+      const submissionDraftOptions: BotDraftOptions = {
+        ...draftOptions,
+        modelSelection: {
+          providerId: submissionModelSelection.providerId,
+          modelId: submissionModelSelection.modelId,
+          ...(submissionModelSelection.options
+            ? { options: { ...submissionModelSelection.options } }
+            : {}),
+        },
+      };
+      const zcodeTaskService = await resolveZCodeTaskServiceForContext(context);
+      const task = await zcodeTaskService.createTask({
+        workspacePath: context.workspacePath,
+        workspaceIdentity: context.workspaceIdentity,
+        projectId: context.projectId ?? null,
+        additionalDirectories: context.additionalDirectories ?? [],
+        provider: draftOptions.provider,
+        modelSelection: submissionDraftOptions.modelSelection,
+        v4Create: true,
+        ...(context.group ? { permissionScope: "session" as const } : {}),
+      });
+      const taskTitle = context.group
+        ? [
+            bot.provider === "lark" ? "Lark" : "飞书",
+            context.group.name,
+            ...(context.group.threadId ? [context.group.topicTitle || context.group.threadId] : []),
+          ].join(" · ")
+        : deriveTaskTitle(input.payload, []);
+      const traceId = generateTraceId(task.taskId);
+      try {
+        await applyDraftConfigOptions(
+          { ...context, draftOptions: submissionDraftOptions },
+          task.taskId,
+          traceId,
+        );
+      } catch (error) {
+        // 与 legacy 首发一致：初始配置失败先删临时 task，避免留下不可继续的空会话。
+        await zcodeTaskService
+          .deleteTask({
+            taskId: task.taskId,
+            workspacePath: context.workspacePath,
+            workspaceIdentity: context.workspaceIdentity,
+          })
+          .catch(() => undefined);
+        throw error;
+      }
+      context = {
+        ...context,
+        mode: "task" as const,
+        activeTaskId: task.taskId,
+        draftOptions: undefined,
+      };
+      await writeContext(context);
+      createdTask = taskTitle ? { ...task, title: taskTitle } : task;
+      await broadcastTaskListChange(context, task.taskId, "created", {
+        task: createdTask,
+      });
+      sessionId = task.taskId;
+      modelSelection = submissionDraftOptions.modelSelection;
+    }
+
+    // 唤醒文本的 commandId 固定为 `triggerId:sessionId`（与 child owned/resume 同一幂等键）；
+    // 重试/收敛重投由 CommandInbox 吸收，不会在同一会话执行两轮。
+    const traceId = `${input.triggerId}:${sessionId}`;
+    if (!context.group) runningTasks.add(sessionId);
+    await watchTaskStream(bot, actor, context, user);
+    await broadcastTaskListChange(context, sessionId, "prompt_sent", {
+      ...(createdTask ? { task: createdTask } : {}),
+      prompt: {
+        content: input.payload,
+        messageId: `bot-${traceId}`,
+        sentAt: Date.now(),
+      },
+    });
+    sendPromptInBackground(
+      bot,
+      actor,
+      context,
+      sessionId,
+      traceId,
+      input.payload,
+      [],
+      resolveAutomationBotDeliveryTarget(actor),
+      modelSelection,
+    );
+    await triggerTaskBindingStore.set(input.triggerId, {
+      workspaceIdentity: input.workspaceIdentity,
+      threadKey: input.threadKey,
+      sessionId,
+      createdAt: Date.now(),
+    });
+    return { sessionId };
+  }
+
+  async function createBotTaskFromTrigger(
+    input: BotTriggerCreateTaskInput,
+  ): Promise<{ sessionId: string }> {
+    // 复合 key 与裸域 key 必须落到同一队列；否则同一 thread 的两种 wire 形态可并发。
+    return serializeTriggerCreateTask(
+      `${input.workspaceIdentity}|${stripTriggerThreadKeyWorkspacePrefix(input.threadKey)}`,
+      () => createBotTaskFromTriggerUnserialized(input),
+    );
+  }
+
+  /**
+   * B-SPEC §3.3 `host.autoReplyGuard`：`admitAutoReplyTurn` 包装。
+   *
+   * 判定事实来自 wire 的规范化 payload（senderType/mentionedBot/groupCardAction/
+   * elicitation/providerMessageId/commandText/chatType），不再用 actorId 猜测
+   * 「是否机器人」——actorId 是发送者身份，bot.providerUserId 是 owner 真人身份。
+   * 占额与消息去重完全复用 legacy（原子写 group.autoReplyGuard），适用于卡片回调/
+   * elicitation/私聊等非守卫面原样 true。
+   */
+  async function evaluateBotAutoReplyGuard(input: BotAutoReplyGuardInput): Promise<boolean> {
+    const parsed = parseTriggerThreadKey(input.threadKey);
+    if (!parsed) {
+      throw new Error(`evaluateBotAutoReplyGuard: 非法 bot threadKey: ${input.threadKey}`);
+    }
+    if (parsed.botId !== input.botId) {
+      throw new Error(
+        `evaluateBotAutoReplyGuard: threadKey bot=${parsed.botId} 与请求 bot=${input.botId} 不一致`,
+      );
+    }
+    const state = await repo.readState();
+    const groupContext = state.bots[botTriggerGroupKey(parsed)];
+    const contextIdentity =
+      groupContext?.workspaceIdentity?.trim() || groupContext?.workspacePath?.trim();
+    if (contextIdentity && contextIdentity !== input.workspaceIdentity) {
+      throw new Error(
+        `evaluateBotAutoReplyGuard: 跨 workspace thread=${input.threadKey} context=${contextIdentity} request=${input.workspaceIdentity}`,
+      );
+    }
+    const chatType =
+      input.chatType ?? (groupContext?.group ? "group" : parsed.threadId ? "group" : "private");
+    const conversationKey = getBotConversationKey({
+      botId: input.botId,
+      chatType,
+      chatId: parsed.peer,
+      threadId: parsed.threadId,
+    });
+    return admitAutoReplyTurnFacts({
+      botId: input.botId,
+      conversationKey,
+      chatType,
+      senderType: input.senderType,
+      providerMessageId: input.providerMessageId,
+      threadId: parsed.threadId,
+      mentionedBot: input.mentionedBot,
+      commandText: input.commandText,
+      groupCardAction: input.groupCardAction,
+      elicitation: input.elicitation,
+    });
+  }
+
   service = {
     async syncAppRuntimePreferences(preferences) {
       await deps.remoteWorkspaceService?.syncAppRuntimePreferences?.(preferences);
@@ -9014,6 +9392,8 @@ export function createBotsService(
     },
     retryBotOutboxDeadLetters,
     watchAutomationRun,
+    createBotTaskFromTrigger,
+    evaluateBotAutoReplyGuard,
     async handleInboundMessage(message: BotInboundMessage) {
       if (shutdownPromise) return [];
       if (message.senderType === "app") {

@@ -1,7 +1,7 @@
 /**
  * Core child→Core 回调处理器（B-SPEC §3.3）单测：用真实处理器 + 服务投影替身，
- * 验证 host.command 转发/ACK 原样、worker.find/resume 的 Core 投影查询，以及
- * 结构缺口（createTask/autoReplyGuard）的 typed unimplemented。
+ * 验证 host.command 转发/ACK 原样、worker.find/resume 的 Core 投影查询、createTask/
+ * autoReplyGuard 的窄方法转发，以及窄方法缺席时的 typed unimplemented。
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -55,17 +55,15 @@ interface FakeAgent {
 function createServices(options: {
   agent?: FakeAgent;
   botStates?: BotContextState[];
+  bots?: Record<string, unknown>;
 }): SuperAgentHostServiceAccess {
+  const bots =
+    options.bots ??
+    (options.botStates ? { getBotStates: async () => options.botStates } : undefined);
   return {
     getOptional<T>(descriptor: ServiceDescriptor<T>): T | undefined {
-      if (descriptor === IZCodeAgentService) return (options.agent as T | undefined);
-      if (descriptor === IBotsService) {
-        return (
-          options.botStates
-            ? ({ getBotStates: async () => options.botStates } as T)
-            : undefined
-        );
-      }
+      if (descriptor === IZCodeAgentService) return options.agent as T | undefined;
+      if (descriptor === IBotsService) return bots as T | undefined;
       return undefined;
     },
   };
@@ -275,7 +273,14 @@ describe("Core control-plane host handlers", () => {
         threadKey: "bot:bot-2+chat-1/other-thread",
       }),
     ).toBeNull();
-    expect(listed).toEqual([["task-1"], ["task-2"]]);
+    // 生产 wire 的 threadKey 是 intake `mintThreadKey`（`<ws>|域键`），必须能解析。
+    expect(
+      await call("host.worker.find", {
+        workspaceIdentity: REMOTE_IDENTITY,
+        threadKey: `${REMOTE_IDENTITY}|bot:bot-1+user-1`,
+      }),
+    ).toEqual({ sessionId: "task-1", terminal: true, stoppedByHuman: false });
+    expect(listed).toEqual([["task-1"], ["task-2"], ["task-1"]]);
   });
 
   it("host.worker.resume：转发真实 session 并返回权威 sessionId", async () => {
@@ -303,7 +308,121 @@ describe("Core control-plane host handlers", () => {
     expect(resumed).toEqual([{ sessionId: "session-9", workspacePath: "/srv/repo" }]);
   });
 
-  it("结构缺口 createTask/autoReplyGuard → typed unimplemented（retriable=false）", async () => {
+  it("host.worker.createTask：转发窄方法并按 triggerId 原样交付 sessionId", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const call = handler(
+      createServices({
+        bots: {
+          getBotStates: async () => [],
+          createBotTaskFromTrigger: async (input: Record<string, unknown>) => {
+            calls.push(input);
+            return { sessionId: "task-9" };
+          },
+        },
+      }),
+    );
+    await expect(
+      call("host.worker.createTask", {
+        workspaceIdentity: REMOTE_IDENTITY,
+        threadKey: "bot:bot-1+user-1",
+        triggerId: "trigger-1",
+        payload: "wake",
+        context: { goalSummary: "goal" },
+      }),
+    ).resolves.toEqual({ sessionId: "task-9" });
+    expect(calls).toEqual([
+      {
+        workspaceIdentity: REMOTE_IDENTITY,
+        threadKey: "bot:bot-1+user-1",
+        triggerId: "trigger-1",
+        payload: "wake",
+        context: { goalSummary: "goal" },
+      },
+    ]);
+    // 复合 key（<ws>|bot:...）原样转发给 botsService；解析与授权由服务侧负责。
+    const composite = `${REMOTE_IDENTITY}|bot:bot-1+user-1`;
+    await expect(
+      call("host.worker.createTask", {
+        workspaceIdentity: REMOTE_IDENTITY,
+        threadKey: composite,
+        triggerId: "trigger-2",
+        payload: "wake",
+      }),
+    ).resolves.toEqual({ sessionId: "task-9" });
+    expect(calls[1]).toMatchObject({ threadKey: composite, triggerId: "trigger-2" });
+  });
+
+  it("host.autoReplyGuard：转发只读判定，false 原样作为 admitted=false 返回", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const call = handler(
+      createServices({
+        bots: {
+          evaluateBotAutoReplyGuard: async (input: Record<string, unknown>) => {
+            calls.push(input);
+            return false;
+          },
+        },
+      }),
+    );
+    await expect(
+      call("host.autoReplyGuard", {
+        workspaceIdentity: REMOTE_IDENTITY,
+        botId: "bot-1",
+        threadKey: "bot:bot-1+chat-1/thread-1",
+        actorId: "user-1",
+      }),
+    ).resolves.toEqual({ admitted: false });
+    expect(calls).toEqual([
+      {
+        workspaceIdentity: REMOTE_IDENTITY,
+        botId: "bot-1",
+        threadKey: "bot:bot-1+chat-1/thread-1",
+        actorId: "user-1",
+      },
+    ]);
+  });
+
+  it("host.autoReplyGuard：发送者/寻址事实原样转发（不按 actorId 猜身份）", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const call = handler(
+      createServices({
+        bots: {
+          evaluateBotAutoReplyGuard: async (input: Record<string, unknown>) => {
+            calls.push(input);
+            return true;
+          },
+        },
+      }),
+    );
+    await expect(
+      call("host.autoReplyGuard", {
+        workspaceIdentity: REMOTE_IDENTITY,
+        botId: "bot-1",
+        threadKey: "bot:bot-1+chat-1",
+        actorId: "bot-other-app",
+        chatType: "group",
+        senderType: "app",
+        mentionedBot: false,
+        groupCardAction: false,
+        elicitation: false,
+        providerMessageId: "msg-1",
+        commandText: "hello",
+      }),
+    ).resolves.toEqual({ admitted: true });
+    expect(calls[0]).toMatchObject({
+      actorId: "bot-other-app",
+      chatType: "group",
+      senderType: "app",
+      mentionedBot: false,
+      groupCardAction: false,
+      elicitation: false,
+      providerMessageId: "msg-1",
+      commandText: "hello",
+    });
+    expect(calls[0]).not.toHaveProperty("providerUserId");
+  });
+
+  it("窄方法缺席 → typed unimplemented（retriable=false），不伪造成功", async () => {
     const call = handler(createServices({}));
     await expect(
       call("host.worker.createTask", {

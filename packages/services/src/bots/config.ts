@@ -21,6 +21,9 @@ export const BOTS_LEGACY_MODEL_CACHE_FILE = "bots-model-cache.json";
 export const BOTS_MODEL_CACHE_FILE = "bots-model-cache.v2.json";
 // M7③ 出站死信：独立 version 1 文件；缺失时创建空表，未来版本不被旧代码重新解释。
 export const BOTS_OUTBOX_DEAD_LETTER_FILE = "bot-outbox-dead-letter.v1.json";
+// B-SPEC §3.3 createTask 幂等：triggerId → sessionId 绑定；Core 侧唯一权威（child 域库
+// 的 trigger_subscriptions 不可跨进程读写）。缺失 = 尚未创建，损坏/版本不符必须响亮失败。
+export const BOTS_TRIGGER_TASK_BINDINGS_FILE = "bot-trigger-task-bindings.v1.json";
 const BOT_CREDENTIAL_PREFIX = "bot";
 
 export function createDefaultBotsConfig(): BotsConfigFile {

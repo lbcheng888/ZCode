@@ -7,15 +7,14 @@
  *   `commands/query`/handleCommand 的宿主窄入口），admission 回执原样作为 CommandAck；
  * - `host.worker.find` → botsService `getBotStates()`（threadKey→activeTaskId）+
  *   agent `listSessions`（会话终态投影）；
- * - `host.worker.resume` → agent `resumeSession`（幂等打开既有会话）。
+ * - `host.worker.resume` → agent `resumeSession`（幂等打开既有会话）；
+ * - `host.worker.createTask` → botsService `createBotTaskFromTrigger`（按 triggerId
+ *   幂等的 Core 侧绑定；复用既有 createTask/sendPrompt 路径）；
+ * - `host.autoReplyGuard` → botsService `evaluateBotAutoReplyGuard`（`admitAutoReplyTurn`
+ *   包装，含占额写 state；不按 actorId 猜发送者身份）。
  *
- * 结构缺口必须 typed 拒绝，不伪造：
- * - `host.worker.createTask`：需要「同一 triggerId 只建一次」的 Core 侧投递去重/订阅
- *   唯一约束 + bot 会话绑定；Core 本地没有该幂等状态（B-SPEC §3.3 实施缺口），
- *   直接返回 proto.unimplemented，不做「先建再说」。
- * - `host.autoReplyGuard`：`admitAutoReplyTurn` 仍是 botsService 内部函数，未暴露窄
- *   IBotsService 方法（同 §3.3 实施缺口）；返回 proto.unimplemented，不拿 bot 状态
- *   近似守卫语义。
+ * 服务投影未暴露对应窄方法时仍返回 typed proto.unimplemented（retriable=false），
+ * 不拿近似状态伪造成功。
  *
  * 注意：`host.worker.resume` 的 wire params 只有 `{workspaceIdentity, sessionId,
  * triggerId}`（§3.3 方法表），本处理器只打开既有会话、不投递文本。唤醒文本由 child
@@ -37,8 +36,10 @@ import {
   backfillSeedsParamsSchema,
   backfillSeedsResultSchema,
   hostAutoReplyGuardParamsSchema,
+  hostAutoReplyGuardResultSchema,
   hostCommandParamsSchema,
   hostWorkerCreateTaskParamsSchema,
+  hostWorkerCreateTaskResultSchema,
   hostWorkerFindParamsSchema,
   hostWorkerResumeParamsSchema,
   type HostDeliveryLane,
@@ -85,10 +86,25 @@ interface ParsedBotThreadKey {
   threadId?: string;
 }
 
+/**
+ * 入站 wire 的 threadKey 来自 `trigger_events.thread_key`（intake `mintThreadKey` =
+ * `<workspaceIdentity>|<域键>`，§1.2），不是裸域键。只有后缀是已知域前缀时才剥离，
+ * 避免把普通字符串里的 `|` 当分界；裸 `bot:` 键（autoReplyGuard hint）保持原样。
+ */
+function stripThreadKeyWorkspacePrefix(threadKey: string): string {
+  const separator = threadKey.lastIndexOf("|");
+  if (separator <= 0) return threadKey;
+  const suffix = threadKey.slice(separator + 1);
+  return suffix.startsWith("bot:") || suffix.startsWith("schedule:") || suffix.startsWith("webhook:")
+    ? suffix
+    : threadKey;
+}
+
 function parseBotThreadKey(threadKey: string): ParsedBotThreadKey | null {
+  const normalized = stripThreadKeyWorkspacePrefix(threadKey);
   const prefix = "bot:";
-  if (!threadKey.startsWith(prefix)) return null;
-  const rest = threadKey.slice(prefix.length);
+  if (!normalized.startsWith(prefix)) return null;
+  const rest = normalized.slice(prefix.length);
   const plus = rest.indexOf("+");
   if (plus <= 0) return null;
   const botId = rest.slice(0, plus);
@@ -253,9 +269,10 @@ function findBotStateForThreadKey(
  * 会话是否已终态（可 resume）。`idle` 无活动回合、`completed/error` 已结束；
  * `running/waiting/paused` 均视为在跑（human-explicit 走 busying guide 投递）。
  *
- * `stoppedByHuman`：Core 会话投影没有「用户显式停止」事实面（task/session 状态只有
- * idle/running/waiting/paused/completed/error）。按存档单会话 worker 的同一诚实边界
- * 返回 false，不伪造 user-stop；该字段的权威归 runtime 控制面后续接线。
+ * `stoppedByHuman`：已核对 Core 的 `listSessions` / tasks-index，没有可查询的「用户显式
+ * 停止」事实（只存在 turn 级 cancelled 事件，不落可读状态）。故恒返回 false，不伪造
+ * user-stop；human-explicit 因此可能把被停会话走 resume 而不是 createTask。该字段的权威
+ * 需由 runtime 控制面新增稳定事实后接入（B-SPEC §3.3 遗留缺口）。
  */
 function sessionIsTerminal(status: string): boolean {
   return status === "idle" || status === "completed" || status === "error";
@@ -354,6 +371,73 @@ async function handleWorkerResume(
 }
 
 /**
+ * `host.worker.createTask`：转发到 botsService 的幂等窄方法。Core 不自己建会话——
+ * triggerId→sessionId 的权威绑定在 botsService 内，Core 只做 wire → 服务投影转发。
+ */
+async function handleWorkerCreateTask(
+  services: SuperAgentHostServiceAccess,
+  rawParams: unknown,
+): Promise<{ sessionId: string }> {
+  const params = parseOrThrow(
+    hostWorkerCreateTaskParamsSchema,
+    rawParams,
+    "host.worker.createTask",
+  );
+  const bots = services.getOptional(IBotsService);
+  if (!bots?.createBotTaskFromTrigger) {
+    throw unimplemented(
+      "host.worker.createTask",
+      "botsService createBotTaskFromTrigger unavailable in Core (不得「先建再说」)",
+    );
+  }
+  const result = await bots.createBotTaskFromTrigger({
+    workspaceIdentity: params.workspaceIdentity,
+    threadKey: params.threadKey,
+    triggerId: params.triggerId,
+    payload: params.payload,
+    ...(params.context ? { context: params.context } : {}),
+  });
+  return hostWorkerCreateTaskResultSchema.parse({ sessionId: result.sessionId });
+}
+
+/**
+ * `host.autoReplyGuard`：转发到 botsService 的 `admitAutoReplyTurn` 包装。false =
+ * 快路径拒绝；占额与消息去重在 botsService 内原子完成，Core 不另做近似判定。
+ */
+async function handleAutoReplyGuard(
+  services: SuperAgentHostServiceAccess,
+  rawParams: unknown,
+): Promise<{ admitted: boolean }> {
+  const params = parseOrThrow(hostAutoReplyGuardParamsSchema, rawParams, "host.autoReplyGuard");
+  const bots = services.getOptional(IBotsService);
+  if (!bots?.evaluateBotAutoReplyGuard) {
+    throw unimplemented(
+      "host.autoReplyGuard",
+      "botsService evaluateBotAutoReplyGuard unavailable in Core",
+    );
+  }
+  return hostAutoReplyGuardResultSchema.parse({
+    admitted: await bots.evaluateBotAutoReplyGuard({
+      workspaceIdentity: params.workspaceIdentity,
+      botId: params.botId,
+      threadKey: params.threadKey,
+      actorId: params.actorId,
+      ...(params.chatType !== undefined ? { chatType: params.chatType } : {}),
+      ...(params.senderType !== undefined ? { senderType: params.senderType } : {}),
+      ...(params.mentionedBot !== undefined ? { mentionedBot: params.mentionedBot } : {}),
+      ...(params.groupCardAction !== undefined
+        ? { groupCardAction: params.groupCardAction }
+        : {}),
+      ...(params.elicitation !== undefined ? { elicitation: params.elicitation } : {}),
+      ...(params.providerMessageId !== undefined
+        ? { providerMessageId: params.providerMessageId }
+        : {}),
+      ...(params.commandText !== undefined ? { commandText: params.commandText } : {}),
+    }),
+  });
+}
+
+/**
  * Core 侧入站方法处理器（§3.3）。未知/未实现方法一律 `proto.unimplemented`
  * （retriable=false），不把结构缺口伪装成可重试错误让 child 无限重投。
  */
@@ -405,18 +489,26 @@ export function createSuperAgentControlPlaneInboundHandler(
         return await handleWorkerResume(services, params);
       }
       case "host.worker.createTask": {
-        parseOrThrow(hostWorkerCreateTaskParamsSchema, params, "host.worker.createTask");
-        throw unimplemented(
-          "host.worker.createTask",
-          "Core 缺少按 triggerId 幂等的会话创建/订阅绑定面，禁止「先建再说」",
-        );
+        const services = options.getServices();
+        if (!services) {
+          throw new ControlPlaneRpcError(
+            CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+            "host.worker.createTask: Core services not initialized",
+            true,
+          );
+        }
+        return await handleWorkerCreateTask(services, params);
       }
       case "host.autoReplyGuard": {
-        parseOrThrow(hostAutoReplyGuardParamsSchema, params, "host.autoReplyGuard");
-        throw unimplemented(
-          "host.autoReplyGuard",
-          "botsService admitAutoReplyTurn 尚未暴露窄方法；不能用 bot 状态近似守卫",
-        );
+        const services = options.getServices();
+        if (!services) {
+          throw new ControlPlaneRpcError(
+            CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+            "host.autoReplyGuard: Core services not initialized",
+            true,
+          );
+        }
+        return await handleAutoReplyGuard(services, params);
       }
       default:
         throw unimplemented(String(method), `Core has no handler for control-plane inbound method`);

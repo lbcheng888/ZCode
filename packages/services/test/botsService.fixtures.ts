@@ -31,6 +31,10 @@ import {
   type BotOutboxDeadLetterRow,
   type BotOutboxDeadLetterStore,
 } from "../src/bots/outboxDeadLetter.js";
+import type {
+  BotTriggerTaskBinding,
+  BotTriggerTaskBindingStore,
+} from "../src/bots/botTriggerTaskBindings.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -104,6 +108,24 @@ export function createMemoryOutboxDeadLetterStore(): BotOutboxDeadLetterStore & 
     },
     snapshot() {
       return structuredClone(file);
+    },
+  };
+}
+
+/** 内存版 triggerId→sessionId 绑定：与文件版同一严格记录形状，不做重建/兜底。 */
+export function createMemoryTriggerTaskBindingStore(): BotTriggerTaskBindingStore & {
+  snapshot(): Record<string, BotTriggerTaskBinding>;
+} {
+  const bindings: Record<string, BotTriggerTaskBinding> = {};
+  return {
+    async get(triggerId) {
+      return bindings[triggerId];
+    },
+    async set(triggerId, binding) {
+      bindings[triggerId] = binding;
+    },
+    snapshot() {
+      return structuredClone(bindings);
     },
   };
 }

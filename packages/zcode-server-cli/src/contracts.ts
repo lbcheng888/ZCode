@@ -196,8 +196,9 @@ export type CoreCommand = z.infer<typeof coreCommandSchema>;
 // 组合根。control-plane 使用独立严格 schema，协议版本随该 schema 演进；子进程协议不兼容时
 // 必须显式失败，不静默降级。milestone-b-spec §2.4 要求 schema 新增字段与协议版本同批 bump：
 // v2 增 firstReadyAt；v3 增 health 扩展字段（leader/pending/degraded/workspaceErrors/
-// peer/protocol 计数）。health 字段集直接复用 shared schema，避免 Supervisor 严格快照
-// 与 child 消息两侧漂移。
+// peer/protocol 计数）；v4 增 host.autoReplyGuard 的 additive-optional 发送者/寻址事实
+// （strict params 跨进程，不同步 bump 会让旧 Core 静默拒帧）。health 字段集直接复用
+// shared schema，避免 Supervisor 严格快照与 child 消息两侧漂移。
 // 生命周期消息/命令/版本已迁 @zcode/shared（headless child 与 Core 侧共用同一契约），
 // 本文件只 re-export 保持既有调用方导入路径不变。
 export {

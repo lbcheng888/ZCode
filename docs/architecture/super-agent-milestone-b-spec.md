@@ -290,7 +290,7 @@ Framing：每行一个 JSON；单帧上限 256 KiB；超限断开并计错。RPC
 | `host.worker.find` | `{ workspaceIdentity, threadKey }` | `ResumableWorker \| null` | 10s | 订阅/worker 投影查询 |
 | `host.worker.resume` | `{ workspaceIdentity, sessionId, triggerId }` | `{ sessionId }` | 60s | 经 Core `resumeSession`/admission；幂等键 `triggerId` |
 | `host.worker.createTask` | `{ workspaceIdentity, threadKey, triggerId, payload, context? }` | `{ sessionId }` | 60s | 经 Core `createSession`/admission；同一 trigger 只建一次 |
-| `host.autoReplyGuard` | `{ workspaceIdentity, botId, threadKey, actorId }` | `{ admitted:boolean }` | 5s | Core 的 botsService `admitAutoReplyTurn` 包装 |
+| `host.autoReplyGuard` | `{ workspaceIdentity, botId, threadKey, actorId }` + additive-optional `chatType/senderType/mentionedBot/groupCardAction/elicitation/providerMessageId/commandText` | `{ admitted:boolean }` | 5s | Core 的 botsService `admitAutoReplyTurn` 包装（含占额写 state）；发送者身份只认出口规范化事实，不由 actorId 推断 |
 | `backfill.seeds` | `{ workspaceIdentity }` | `SubscriptionBackfillSeed[]` | 10s | leader 接管时取最新种子；替代启动期静态快照 |
 
 实现缺口（待实现）：
@@ -631,6 +631,7 @@ B 期目标（待实现）：
 | 9 | `tasks-index` 迁移证明 | 不能以「文件存在」推断迁移 | 桥构造前 `prepare` 检查表存在；失败响亮；沿用 trigger-subsystem-spec §8-16① |
 | 10 | P6 边界 | deviceScope/能力票据未实现；RPC 目前仅本机 | B 不实现 P6；未来远程复用 RPC 必须先加 capability ticket/吊销，禁止裸复用 |
 | 11 | 平台可达性矩阵的裁决状态 | 设计 §9 开放问题⑥ 要求平台矩阵与 headless 派发策略由产品裁决；§6.1 的通过条件目前是实施建议，不是已定案 | 先按 §6.1 建议的判据顺序执行；产品另行裁决时只改门禁表与启动判据、不改拓扑；被否决平台保留 Desktop 回退 |
+| 12 | `host.worker.createTask` 崩溃窗口 | `createTask` 已建会话、context 尚未写 `activeTaskId` 时进程崩溃，重投会再建第二个会话；`triggerId` 绑定要等创建成功后才落。当前实现不是原子幂等 | 需 runtime 提供幂等 `createSession` 命令键，或先落可反查 intent 行并在重投时收敛；缺口关闭前不得把 createTask 标成已闭环幂等 |
 
 ---
 

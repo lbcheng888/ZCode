@@ -24,8 +24,11 @@ import { commandAckSchema, commandEnvelopeSchema } from "./zcode-protocol-v4/com
  * v3：health 增加 leaderWorkspaceCount / pendingDispatchCount / degraded /
  * workspaceErrors / rejectedPeerCount / protocolErrorCount / followerIngestCount /
  * notEnsuredIngestCount（§2.4/§2.5/§3.8）。
+ * v4：`host.autoReplyGuard` 增加 additive-optional 的发送者/寻址事实（senderType /
+ * mentionedBot / groupCardAction / elicitation / providerMessageId / commandText /
+ * chatType），使 Core 能复用 `admitAutoReplyTurn` 的占额语义；旧 child 仍按缺省值工作。
  */
-export const CONTROL_PLANE_PROTOCOL_VERSION = 3;
+export const CONTROL_PLANE_PROTOCOL_VERSION = 4;
 
 /** JSONL RPC 帧版本（spec §3.1 `v:1`）；与生命周期协议版本正交。 */
 export const CONTROL_PLANE_RPC_VERSION = 1;
@@ -506,12 +509,25 @@ export const hostWorkerCreateTaskResultSchema = z
   .object({ sessionId: z.string().min(1) })
   .strict();
 
+/**
+ * `host.autoReplyGuard` params。除定位事实外，additive-optional 携带出口已规范化的
+ * 发送者/寻址事实（与 `TriggerSinkEnvelope.payload` 同源）：Core 用它们复用
+ * `admitAutoReplyTurn` 的占额判定，而不是只看 actorId 猜发送者身份。旧 child 不传时
+ * senderType 缺省按 `"user"`（与 legacy `message.senderType !== "app"` 同义）。
+ */
 export const hostAutoReplyGuardParamsSchema = z
   .object({
     workspaceIdentity: z.string().trim().min(1),
     botId: z.string().min(1),
     threadKey: z.string().min(1),
     actorId: z.string().min(1),
+    chatType: z.enum(["private", "group"]).optional(),
+    senderType: z.enum(["user", "app"]).optional(),
+    mentionedBot: z.boolean().optional(),
+    groupCardAction: z.boolean().optional(),
+    elicitation: z.boolean().optional(),
+    providerMessageId: z.string().min(1).optional(),
+    commandText: z.string().optional(),
   })
   .strict();
 export const hostAutoReplyGuardResultSchema = z.object({ admitted: z.boolean() }).strict();

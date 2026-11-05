@@ -59,6 +59,47 @@ export interface BotBindCodeResult {
   expiresAt: number;
 }
 
+/** child `host.worker.createTask` 的 M2 冷启动上下文（与 wire schema 结构同源）。 */
+export interface BotTriggerWorkerContext {
+  goalSummary?: string;
+  recentNarrowResults?: string[];
+  openQuestions?: string[];
+  recallSeedIds?: string[];
+}
+
+/**
+ * child `host.worker.createTask`（B-SPEC §3.3）：按 `triggerId` 幂等创建 bot 会话，
+ * 并沿既有 createTask/sendPrompt 路径投递唤醒文本。`payload` 已是 child 装配后的
+ * 唤醒正文；`context` 随 wire 携带但正文优先，不做二次装配。
+ */
+export interface BotTriggerCreateTaskInput {
+  workspaceIdentity: string;
+  threadKey: string;
+  triggerId: string;
+  payload: string;
+  context?: BotTriggerWorkerContext;
+}
+
+/**
+ * child `host.autoReplyGuard`（B-SPEC §3.3）：`admitAutoReplyTurn` 包装。
+ * 除定位事实外携带出口已规范化的发送者/寻址事实（与 TriggerSinkEnvelope.payload 同源）；
+ * 判定与占额完全复用 legacy 守卫（命中即原子写 state），不按 actorId 猜发送者身份。
+ * 缺省 senderType = "user"（与 legacy `!== "app"` 同义）。
+ */
+export interface BotAutoReplyGuardInput {
+  workspaceIdentity: string;
+  botId: string;
+  threadKey: string;
+  actorId: string;
+  chatType?: "private" | "group";
+  senderType?: "user" | "app";
+  mentionedBot?: boolean;
+  groupCardAction?: boolean;
+  elicitation?: boolean;
+  providerMessageId?: string;
+  commandText?: string;
+}
+
 export interface BotListWorkspaceRefsParams {
   currentWorkspace?: BotWorkspaceRef;
 }
@@ -227,6 +268,15 @@ export interface IBotsService {
   retryBotOutboxDeadLetters?(params?: BotOutboxDeadLetterRetryParams): Promise<BotOutboxDeadLetterRetrySummary>;
   /** 在 automation prompt 派发前订阅终态，并把结果回推到创建它的 Bot 会话。 */
   watchAutomationRun(params: BotAutomationRunWatchParams): Promise<void>;
+  /**
+   * child `host.worker.createTask` 窄方法：按 triggerId 幂等（Core 持久化绑定），
+   * 复用既有 bots createTask/sendPrompt 路径。结构缺口时由 Core handler 报 unimplemented。
+   */
+  createBotTaskFromTrigger?(input: BotTriggerCreateTaskInput): Promise<{ sessionId: string }>;
+  /**
+   * child `host.autoReplyGuard` 窄方法：复用 `admitAutoReplyTurn`（含占额写 state）。
+   */
+  evaluateBotAutoReplyGuard?(input: BotAutoReplyGuardInput): Promise<boolean>;
   handleInboundMessage(message: BotInboundMessage): Promise<BotOutboundMessage[]>;
   handleProviderCallback(provider: BotProvider, payload: unknown): Promise<BotOutboundMessage[]>;
   handleProviderCallbackResponse(
