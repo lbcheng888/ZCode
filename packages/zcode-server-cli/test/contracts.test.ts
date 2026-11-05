@@ -15,6 +15,9 @@ describe("R2 control contract", () => {
     expect(controlRequestSchema.safeParse({ id: "1", command: "runtime-identity" }).success).toBe(
       true,
     );
+    expect(
+      controlRequestSchema.safeParse({ id: "1", command: "control-plane-status" }).success,
+    ).toBe(true);
     expect(controlRequestSchema.safeParse({ id: "1", command: "kill-pid", pid: 4 }).success).toBe(
       false,
     );

@@ -6,17 +6,26 @@ import { mkdir } from "node:fs/promises";
 import { createServiceLogger } from "@zcode/services/node";
 import { SOURCE_SERVER_UPDATE_RUNNING_TASKS_ERROR_CODE } from "@zcode/shared";
 import {
+  CONTROL_PLANE_KILL_TIMEOUT_MS,
+  CONTROL_PLANE_PROTOCOL_VERSION,
+  CONTROL_PLANE_READY_TIMEOUT_MS,
+  CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS,
   CORE_KILL_TIMEOUT_MS,
   CORE_READY_TIMEOUT_MS,
   CORE_STOP_GRACE_TIMEOUT_MS,
+  controlPlaneMessageSchema,
+  controlPlaneStatusSchema,
   coreMessageSchema,
   SERVER_CLI_PROTOCOL_VERSION,
+  type ControlPlaneState,
+  type ControlPlaneStatus,
   type ControlRequest,
   type LifecycleState,
   type ReleaseManifest,
   type RuntimeIdentity,
   type ServerStatus,
 } from "../contracts.js";
+import type { ControlPlaneLauncher } from "./controlPlaneLauncher.js";
 import { createControlServer, type ControlHandler } from "../ipc/controlServer.js";
 import { ControlRequestError } from "../ipc/controlError.js";
 import { DataRootLock } from "../runtime/lock.js";
@@ -36,9 +45,25 @@ export interface CoreLauncher {
   launch(generation: number, release?: ReleaseManifest | null): ChildProcess;
 }
 
+/**
+ * 受管 control-plane 子进程配置。缺省（undefined）= feature flag 关闭，不创建任何子进程。
+ * launcher、崩溃预算与 ready/停止预算都与 Core 独立，control-plane 崩溃不得拖垮 Core。
+ */
+export interface ControlPlaneOptions {
+  launcher: ControlPlaneLauncher;
+  readyTimeoutMs?: number;
+  stopGraceTimeoutMs?: number;
+  killTimeoutMs?: number;
+  /** 独立崩溃预算；测试注入短退避，生产缺省沿用 Server CLI 预算。 */
+  crashBackoffMs?: readonly number[];
+  crashWindowMs?: number;
+  now?: () => number;
+}
+
 export interface SupervisorOptions {
   layout?: ServerLayout;
   launcher: CoreLauncher;
+  controlPlane?: ControlPlaneOptions;
   version: string;
   /** 当前 Supervisor bundle 所属 immutable release；开发态入口允许缺失。 */
   supervisorReleaseId?: string;
@@ -60,6 +85,19 @@ export class Supervisor {
   private readonly crashBudget: CrashBudget;
   private readonly releaseManager: ReleaseManager;
   private core: ChildProcess | undefined;
+  private readonly controlPlaneCrashBudget: CrashBudget | undefined;
+  private controlPlane: ChildProcess | undefined;
+  private controlPlaneState: ControlPlaneState = "stopped";
+  private controlPlaneGeneration = 0;
+  private controlPlaneStartedAt: number | null = null;
+  // 本 Supervisor 生命周期（= daemon 代际）内首次 ready；child 重启只是新 generation，
+  // 不会清零。它是「本代际曾 ready」的持久证据，供 §3.6 状态判断与排障。
+  private controlPlaneFirstReadyAt: number | null = null;
+  private controlPlaneLastExitReason: string | null = null;
+  private controlPlaneHealth: ControlPlaneStatus["health"] = null;
+  private controlPlaneReadyTimer: NodeJS.Timeout | undefined;
+  private controlPlaneKillTimer: NodeJS.Timeout | undefined;
+  private controlPlaneRestartTimer: NodeJS.Timeout | undefined;
   private control: Awaited<ReturnType<typeof createControlServer>> | undefined;
   private state: LifecycleState = "stopped";
   private generation = 0;
@@ -81,6 +119,17 @@ export class Supervisor {
     this.layout = options.layout ?? resolveServerLayout();
     this.lock = new DataRootLock(this.layout.lockFile);
     this.crashBudget = new CrashBudget({ now: options.now });
+    this.controlPlaneCrashBudget = options.controlPlane
+      ? new CrashBudget({
+          now: options.controlPlane.now ?? options.now,
+          ...(options.controlPlane.crashBackoffMs
+            ? { backoffMs: options.controlPlane.crashBackoffMs }
+            : {}),
+          ...(options.controlPlane.crashWindowMs !== undefined
+            ? { windowMs: options.controlPlane.crashWindowMs }
+            : {}),
+        })
+      : undefined;
     this.releaseManager = new ReleaseManager(this.layout);
     this.persistStatusSnapshot = createStatusPersister(
       this.layout.statusFile,
@@ -118,6 +167,7 @@ export class Supervisor {
         version: this.options.version,
       });
       this.launchCore();
+      this.launchControlPlane();
       await this.persistStatusSnapshot();
       return this.status();
     } catch (error) {
@@ -146,7 +196,20 @@ export class Supervisor {
         }
       }
 
-      if (coreStopped && controlClosed) {
+      let controlPlaneStopped = true;
+      if (this.options.controlPlane) {
+        try {
+          await this.stopControlPlane("startup-failed");
+        } catch (controlPlaneError) {
+          controlPlaneStopped = false;
+          log.error(
+            "failed to stop control plane after supervisor startup failure",
+            controlPlaneError,
+          );
+        }
+      }
+
+      if (coreStopped && controlClosed && controlPlaneStopped) {
         // 恢复失败本身已经写入 stop-failed；即使没有 Core/control 需要收口，也保留该
         // 状态，让 status 继续暴露待人工处理的事务，同时释放锁允许同实例稍后重试。
         this.state = recoveryFailed ? "stop-failed" : "stopped";
@@ -175,16 +238,29 @@ export class Supervisor {
   }
 
   private async stopInternal(reason: string): Promise<ServerStatus> {
-    if (!this.core) {
-      this.state = "stopped";
-      await this.persistStatusSnapshot();
-      await this.control?.close();
-      this.control = undefined;
-      await this.lock.release();
-      if (reason !== "restart") this.options.onStopped?.();
-      return this.status();
+    // Core 与 control-plane 是两个独立受管子进程：任一停止失败都必须保留锁并进入
+    // stop-failed，但不能因此跳过另一个子进程的收口。
+    let stopError: unknown;
+    if (this.core) {
+      try {
+        await this.stopCore(reason);
+      } catch (error) {
+        stopError = error;
+      }
     }
-    await this.stopCore(reason);
+    if (this.options.controlPlane) {
+      try {
+        await this.stopControlPlane(reason);
+      } catch (error) {
+        stopError ??= error;
+        if (this.state !== "stop-failed") {
+          this.state = "stop-failed";
+          this.lastExitReason = error instanceof Error ? error.message : String(error);
+          await this.persistStatusSnapshot();
+        }
+      }
+    }
+    if (stopError) throw stopError;
     this.state = "stopped";
     await this.persistStatusSnapshot();
     await this.control?.close();
@@ -276,6 +352,96 @@ export class Supervisor {
     }
   }
 
+  private async stopControlPlane(reason: string): Promise<void> {
+    this.clearControlPlaneRestartTimer();
+    this.clearControlPlaneKillTimer();
+    if (!this.controlPlane) {
+      this.controlPlaneState = "stopped";
+      this.clearControlPlaneScopedStatus();
+      return;
+    }
+    this.controlPlaneState = "stopping";
+    this.controlPlaneLastExitReason = reason;
+    log.info("stopping super-agent control plane", { reason, pid: this.controlPlane.pid });
+    const controlPlane = this.controlPlane;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let killTimer: NodeJS.Timeout | undefined;
+        let settled = false;
+        const cleanup = (): void => {
+          clearTimeout(graceTimer);
+          if (killTimer) clearTimeout(killTimer);
+          controlPlane.off("exit", finish);
+          controlPlane.off("close", finish);
+          controlPlane.off("error", handleError);
+        };
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve();
+        };
+        const fail = (): void => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(
+            new Error(
+              `Super-agent control plane pid ${controlPlane.pid ?? "unknown"} did not terminate after SIGKILL`,
+            ),
+          );
+        };
+        const handleError = (error: Error): void => {
+          log.warn(
+            "super-agent control plane emitted an error while stopping; awaiting exit or close",
+            error,
+          );
+        };
+        const forceKill = (): void => {
+          log.warn("super-agent control plane did not exit within grace period, sending SIGKILL", {
+            pid: controlPlane.pid,
+          });
+          controlPlane.kill("SIGKILL");
+          if (!settled) {
+            killTimer = setTimeout(
+              fail,
+              this.options.controlPlane?.killTimeoutMs ?? CONTROL_PLANE_KILL_TIMEOUT_MS,
+            );
+          }
+        };
+        const graceTimer = setTimeout(
+          () => forceKill(),
+          this.options.controlPlane?.stopGraceTimeoutMs ?? CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS,
+        );
+        controlPlane.once("exit", finish);
+        controlPlane.once("close", finish);
+        controlPlane.once("error", handleError);
+        try {
+          controlPlane.send({ command: "shutdown" } satisfies { command: "shutdown" });
+        } catch {
+          // IPC 已关闭不代表 OS 进程已退出；直接强杀后仍等待 exit/close 终态。
+          clearTimeout(graceTimer);
+          forceKill();
+        }
+      });
+    } catch (error) {
+      if (this.controlPlane === controlPlane) {
+        this.controlPlaneState = "stop-failed";
+        this.controlPlaneLastExitReason = error instanceof Error ? error.message : String(error);
+        this.state = "stop-failed";
+        this.lastExitReason = this.controlPlaneLastExitReason;
+        await this.persistStatusSnapshot();
+      }
+      throw error;
+    }
+    this.clearControlPlaneReadyTimer();
+    if (this.controlPlane === controlPlane) {
+      this.controlPlane = undefined;
+      this.controlPlaneState = "stopped";
+      this.clearControlPlaneScopedStatus();
+    }
+  }
+
   private async applyUpdate(force: boolean): Promise<unknown> {
     const pending = await this.releaseManager.readPending();
     if (!pending) throw new Error("No pending release is prepared");
@@ -289,6 +455,7 @@ export class Supervisor {
     const previous = await this.releaseManager.readCurrent();
     log.info("applying pending release", { version: pending.version, force });
     await this.stopCore("update");
+    await this.stopControlPlane("update");
     this.state = "updating";
     await this.persistStatusSnapshot();
     try {
@@ -296,6 +463,7 @@ export class Supervisor {
       this.activeRelease = pending;
       this.state = "starting";
       this.launchCore();
+      this.launchControlPlane();
       await waitForUpdateReady(
         () => this.state,
         this.options.coreReadyTimeoutMs ?? CORE_READY_TIMEOUT_MS,
@@ -316,6 +484,15 @@ export class Supervisor {
           throw stopError;
         }
       }
+      // candidate control-plane 也属于坏 release：回滚前必须收口，否则随后拉起旧 release
+      // control-plane 会与仍在运行的新 release 子进程并存（双 leader 租约竞争）。
+      try {
+        await this.stopControlPlane("update-rollback");
+      } catch (stopError) {
+        log.error("failed to stop unhealthy control plane during rollback", stopError);
+        await this.persistStatusSnapshot();
+        throw stopError;
+      }
       // 恢复 current 指针，避免下一次启动继续使用坏 release。
       log.error("release apply failed, restoring previous current pointer", error);
       try {
@@ -334,6 +511,7 @@ export class Supervisor {
       if (previous) {
         this.state = "starting";
         this.launchCore();
+        this.launchControlPlane();
         try {
           await waitForUpdateReady(
             () => this.state,
@@ -343,7 +521,11 @@ export class Supervisor {
           log.error("previous release rollback failed", rollbackError);
           // 旧 release ready 超时只改状态会让仍存活的 Core、PID 和 lock 与 stopped 脱节；复用 stopCore 等待 exit/close，失败则保持 stop-failed。
           if (this.core) await this.stopCore("update-rollback");
-          this.state = "stopped";
+          await this.stopControlPlane("update-rollback").catch((stopError: unknown) => {
+            log.error("failed to stop control plane after rollback ready timeout", stopError);
+          });
+          // stopControlPlane 失败已置 stop-failed；不能被 stopped 覆盖掉锁保护。
+          if ((this.state as LifecycleState) !== "stop-failed") this.state = "stopped";
         }
       }
       await this.persistStatusSnapshot();
@@ -369,6 +551,30 @@ export class Supervisor {
       crashBudget: this.crashBudget.snapshot(),
       updatedAt: Date.now(),
     };
+  }
+
+  /**
+   * control-plane 状态独立于 ServerStatus：ServerStatus 是已持久化的严格契约，
+   * 向其中加字段会让旧版 Supervisor 回滚时解析新快照失败。flag 关闭时返回 null。
+   */
+  public controlPlaneStatus(): ControlPlaneStatus | null {
+    if (!this.options.controlPlane) return null;
+    return controlPlaneStatusSchema.parse({
+      state: this.controlPlaneState,
+      pid: this.controlPlane?.pid ?? null,
+      generation: this.controlPlaneGeneration,
+      protocolVersion: CONTROL_PLANE_PROTOCOL_VERSION,
+      startedAt: this.controlPlaneStartedAt,
+      firstReadyAt: this.controlPlaneFirstReadyAt,
+      lastExitReason: this.controlPlaneLastExitReason,
+      health: this.controlPlaneHealth,
+      crashBudget:
+        this.controlPlaneCrashBudget?.snapshot() ?? {
+          crashCount: 0,
+          nextRestartDelayMs: 0,
+          exhausted: false,
+        },
+    });
   }
 
   private runtimeIdentity(): RuntimeIdentity {
@@ -493,6 +699,229 @@ export class Supervisor {
     void this.persistStatusSnapshot();
   }
 
+  private launchControlPlane(): void {
+    const options = this.options.controlPlane;
+    if (!options) return;
+    this.clearControlPlaneRestartTimer();
+    this.clearControlPlaneReadyTimer();
+    this.clearControlPlaneKillTimer();
+    const generation = ++this.controlPlaneGeneration;
+    const child = options.launcher.launch({
+      generation,
+      protocolVersion: CONTROL_PLANE_PROTOCOL_VERSION,
+      dataBaseDir: this.layout.dataBaseDir,
+      serverRoot: this.layout.serverRoot,
+      release: this.activeRelease,
+    });
+    this.controlPlane = child;
+    this.controlPlaneState = "starting";
+    this.controlPlaneStartedAt = null;
+    this.controlPlaneHealth = null;
+    this.controlPlaneLastExitReason = null;
+    log.info("launching super-agent control plane", { generation, pid: child.pid });
+
+    // ready 门：只接受当前 child + 当前 generation + 同源协议的 ready；超时则强杀，
+    // 由统一崩溃路径计数/重启，避免一个永远不 ready 的子进程被当成健康。
+    const readyTimer = setTimeout(() => {
+      if (this.controlPlane !== child || this.controlPlaneState !== "starting") return;
+      log.error("super-agent control plane ready timeout", {
+        pid: child.pid,
+        generation,
+      });
+      this.killControlPlaneWithoutTerminal(
+        child,
+        `control plane pid ${child.pid ?? "unknown"} did not report ready within ${options.readyTimeoutMs ?? CONTROL_PLANE_READY_TIMEOUT_MS}ms`,
+        generation,
+      );
+    }, options.readyTimeoutMs ?? CONTROL_PLANE_READY_TIMEOUT_MS);
+    readyTimer.unref();
+    this.controlPlaneReadyTimer = readyTimer;
+
+    child.on("message", (raw: unknown) =>
+      this.handleControlPlaneMessage(child, generation, raw),
+    );
+    let terminalObserved = false;
+    let spawnErrorReason: string | undefined;
+    const handleTerminal = (reason: string): void => {
+      if (terminalObserved) return;
+      terminalObserved = true;
+      if (this.controlPlane !== child || this.controlPlaneState === "stopping") return;
+      this.clearControlPlaneReadyTimer();
+      this.clearControlPlaneKillTimer();
+      this.controlPlane = undefined;
+      this.clearControlPlaneScopedStatus();
+      if (this.controlPlaneState === "stop-failed") {
+        // SIGKILL 后 kill 预算内仍未观察到终态时已显式失败；迟到的 exit/close 只证明进程
+        // 确实收口并清除引用，不得据此拉起替代进程（未观察终态前禁止重启）。
+        this.controlPlaneLastExitReason = reason;
+        return;
+      }
+      if (this.state === "stopping" || this.state === "stopped" || this.state === "stop-failed") {
+        // Supervisor 正在收口/已处于不可恢复终态时不得再拉起替代进程；用户重试 stop 后再收口。
+        this.controlPlaneState = "stopped";
+        this.controlPlaneLastExitReason = reason;
+        return;
+      }
+      this.controlPlaneState = "crashed";
+      this.controlPlaneLastExitReason = reason;
+      const decision = this.controlPlaneCrashBudget?.recordCrash() ?? {
+        shouldRestart: false,
+        delayMs: 0,
+        exhausted: true,
+      };
+      if (!decision.shouldRestart) {
+        this.controlPlaneState = "crash-loop-stopped";
+        log.error("super-agent control plane crash budget exhausted", {
+          lastExitReason: reason,
+        });
+        return;
+      }
+      log.warn("super-agent control plane crashed, scheduling restart", {
+        lastExitReason: reason,
+        delayMs: decision.delayMs,
+      });
+      const restartTimer = setTimeout(() => {
+        this.controlPlaneRestartTimer = undefined;
+        if (this.controlPlaneState !== "crashed") return;
+        this.controlPlaneState = "starting";
+        this.launchControlPlane();
+      }, decision.delayMs);
+      restartTimer.unref();
+      this.controlPlaneRestartTimer = restartTimer;
+    };
+    child.once("error", (error: Error & { code?: string }) => {
+      spawnErrorReason = `control plane spawn error code=${error.code ?? "unknown"}: ${error.message}`;
+      this.controlPlaneLastExitReason = spawnErrorReason;
+      log.error("super-agent control plane process error", error);
+    });
+    // 终态原因优先级：spawn error > 本代际已记录的描述性原因（ready 超时 / 协议不匹配 /
+    // fatal / stopped 上报）> 通用 exit/close 串。否则描述性原因会被退出串覆盖，
+    // control-plane-status 只剩 code=… signal=…，与 §2.4「stopped 记录退出原因」不符。
+    child.once("exit", (code, signal) => {
+      handleTerminal(
+        spawnErrorReason ??
+          this.controlPlaneLastExitReason ??
+          `control plane exited code=${code ?? "null"} signal=${signal ?? "none"}`,
+      );
+    });
+    child.once("close", (code, signal) => {
+      handleTerminal(
+        spawnErrorReason ??
+          this.controlPlaneLastExitReason ??
+          `control plane closed code=${code ?? "null"} signal=${signal ?? "none"}`,
+      );
+    });
+  }
+
+  private handleControlPlaneMessage(
+    child: ChildProcess,
+    expectedGeneration: number,
+    raw: unknown,
+  ): void {
+    if (this.controlPlane !== child) return;
+    const parsed = controlPlaneMessageSchema.safeParse(raw);
+    if (!parsed.success) return;
+    const message = parsed.data;
+    if (message.type === "ready") {
+      if (message.generation !== expectedGeneration) return;
+      if (message.protocolVersion !== CONTROL_PLANE_PROTOCOL_VERSION) {
+        log.error("super-agent control plane protocol mismatch", {
+          expected: CONTROL_PLANE_PROTOCOL_VERSION,
+          received: message.protocolVersion,
+        });
+        // 不兼容的子进程不能作为 ready 使用；强杀后走统一崩溃/重启预算。
+        this.killControlPlaneWithoutTerminal(
+          child,
+          `control plane protocol mismatch: expected ${CONTROL_PLANE_PROTOCOL_VERSION}, got ${message.protocolVersion}`,
+          expectedGeneration,
+        );
+        return;
+      }
+      if (this.controlPlaneState !== "starting") return;
+      this.controlPlaneState = "ready";
+      this.controlPlaneStartedAt = Date.now();
+      this.controlPlaneFirstReadyAt ??= this.controlPlaneStartedAt;
+      this.clearControlPlaneReadyTimer();
+      log.info("super-agent control plane ready", {
+        generation: message.generation,
+        ...(message.version ? { version: message.version } : {}),
+      });
+    } else if (message.type === "health") {
+      this.controlPlaneHealth = {
+        at: message.at,
+        ...(message.pendingEventCount !== undefined
+          ? { pendingEventCount: message.pendingEventCount }
+          : {}),
+      };
+      log.debug("super-agent control plane health", {
+        pendingEventCount: message.pendingEventCount,
+      });
+    } else if (message.type === "fatal") {
+      // child 已明确不可恢复（路径不一致 / 门禁开但 eventRouter 关 / socket bind 冲突）：
+      // 先记录一等失败原因，再确保进程收口，由统一崩溃预算决定是否重启。
+      log.error("super-agent control plane reported fatal error", {
+        message: message.message,
+        generation: expectedGeneration,
+      });
+      this.killControlPlaneWithoutTerminal(
+        child,
+        `control plane reported fatal: ${message.message}`,
+        expectedGeneration,
+      );
+    } else {
+      this.controlPlaneLastExitReason = message.reason;
+      log.info("super-agent control plane reported stopped", { reason: message.reason });
+    }
+  }
+
+  private clearControlPlaneReadyTimer(): void {
+    if (this.controlPlaneReadyTimer) clearTimeout(this.controlPlaneReadyTimer);
+    this.controlPlaneReadyTimer = undefined;
+  }
+
+  private clearControlPlaneKillTimer(): void {
+    if (this.controlPlaneKillTimer) clearTimeout(this.controlPlaneKillTimer);
+    this.controlPlaneKillTimer = undefined;
+  }
+
+  /**
+   * 对不再接受的 child 发 SIGKILL，并挂 kill 预算。SIGKILL 只可能被不可中断等待推迟；
+   * 若预算内仍无 exit/close，置显式 stop-failed 并保留 child 引用，未观察终态前不得拉起替代进程。
+   */
+  private killControlPlaneWithoutTerminal(
+    child: ChildProcess,
+    reason: string,
+    generation: number,
+  ): void {
+    if (this.controlPlane !== child) return;
+    this.controlPlaneLastExitReason = reason;
+    this.clearControlPlaneReadyTimer();
+    this.clearControlPlaneKillTimer();
+    child.kill("SIGKILL");
+    const killTimer = setTimeout(() => {
+      this.controlPlaneKillTimer = undefined;
+      if (this.controlPlane !== child) return;
+      this.controlPlaneState = "stop-failed";
+      this.controlPlaneLastExitReason = `${reason}; still no exit/close within ${this.options.controlPlane?.killTimeoutMs ?? CONTROL_PLANE_KILL_TIMEOUT_MS}ms after SIGKILL`;
+      log.error("super-agent control plane did not terminate after SIGKILL", {
+        generation,
+        pid: child.pid,
+      });
+    }, this.options.controlPlane?.killTimeoutMs ?? CONTROL_PLANE_KILL_TIMEOUT_MS);
+    killTimer.unref();
+    this.controlPlaneKillTimer = killTimer;
+  }
+
+  private clearControlPlaneRestartTimer(): void {
+    if (this.controlPlaneRestartTimer) clearTimeout(this.controlPlaneRestartTimer);
+    this.controlPlaneRestartTimer = undefined;
+  }
+
+  private clearControlPlaneScopedStatus(): void {
+    this.controlPlaneStartedAt = null;
+    this.controlPlaneHealth = null;
+  }
+
   private enterUpdateRollback(): void {
     // 候选 Core 崩溃后 handleTerminal 会将状态置为 crashed 并安排自动重启；
     // 回滚文件操作期间必须先离开 crashed，否则定时器会用坏的 activeRelease 再次拉起 Core。
@@ -519,6 +948,8 @@ export class Supervisor {
         return this.runningTasks ?? null;
       case "runtime-identity":
         return this.runtimeIdentity();
+      case "control-plane-status":
+        return this.controlPlaneStatus();
       case "stop":
         this.startAcknowledgedLifecycleOperation("stop", () =>
           this.stopInternal("control request"),

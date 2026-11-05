@@ -16,6 +16,8 @@ import {
 } from "../src/cli.js";
 import {
   CONTROL_CLOSE_TIMEOUT_MS,
+  CONTROL_PLANE_KILL_TIMEOUT_MS,
+  CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS,
   CORE_KILL_TIMEOUT_MS,
   CORE_READY_TIMEOUT_MS,
   CORE_STOP_GRACE_TIMEOUT_MS,
@@ -85,16 +87,25 @@ describe("Server CLI routing", () => {
   const noUpdateDaemonHandoff = { converge: async (): Promise<void> => undefined };
 
   it("budgets apply-update timeout for the complete bounded rollback path", () => {
-    // 旧 Core 停止、新 Core ready、新 Core 回滚停止、旧 Core ready、旧 Core ready 超时后的再次停止。
+    // 旧 Core 停止、新 Core ready、新 Core 回滚停止、旧 Core ready、旧 Core ready 超时后的再次停止；
+    // 每个停止点启用 control-plane 时还会串行收口一次 CP（宽限 + 强杀）。
     expect(APPLY_UPDATE_TIMEOUT_MS).toBeGreaterThan(
-      3 * (CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS) + 2 * CORE_READY_TIMEOUT_MS,
+      3 * (CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS) +
+        3 * (CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS + CONTROL_PLANE_KILL_TIMEOUT_MS) +
+        2 * CORE_READY_TIMEOUT_MS,
     );
   });
 
   it("budgets stop waiters for the complete Supervisor stop path", () => {
     expect(CORE_KILL_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
+    expect(CONTROL_PLANE_KILL_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
+    // stopInternal 串行停 Core 再停 control-plane：等待上限必须同时覆盖两者。
     expect(SERVER_STOP_WAIT_TIMEOUT_MS).toBeGreaterThan(
-      CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS + CONTROL_CLOSE_TIMEOUT_MS,
+      CORE_STOP_GRACE_TIMEOUT_MS +
+        CORE_KILL_TIMEOUT_MS +
+        CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS +
+        CONTROL_PLANE_KILL_TIMEOUT_MS +
+        CONTROL_CLOSE_TIMEOUT_MS,
     );
   });
 

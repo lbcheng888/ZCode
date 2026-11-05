@@ -7,6 +7,8 @@ import type { Readable, Writable } from "node:stream";
 import { isPublicZCodeErrorCode, ZCODE_VERSION } from "@zcode/shared";
 import { SourceServerWorkspaceAliasRepo } from "@zcode/services/node";
 import {
+  CONTROL_PLANE_KILL_TIMEOUT_MS,
+  CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS,
   CORE_KILL_TIMEOUT_MS,
   CORE_READY_TIMEOUT_MS,
   CORE_STOP_GRACE_TIMEOUT_MS,
@@ -16,6 +18,7 @@ import {
   type ServerStatus,
 } from "./contracts.js";
 import { requestControl } from "./ipc/controlClient.js";
+import type { ControlPlaneOptions } from "./supervisor/supervisor.js";
 import {
   resolveCanonicalServerLayout,
   resolveServerLayout,
@@ -60,6 +63,11 @@ export interface ServerCliRuntimeOptions {
   workspaceAliasRepo?: Pick<SourceServerWorkspaceAliasRepo, "retryFailedWorkspace">;
   /** process/service manager 是更新协调器的外部边界；测试可注入受控实现。 */
   updateDaemonHandoff?: UpdateDaemonHandoff;
+  /**
+   * 受管 control-plane 子进程（设计裁决 7）。缺省 undefined = flag 关闭，不建子进程；
+   * 生产 flag 来源（features.eventRouter）与 headless bootstrap 入口随里程碑 B 接线。
+   */
+  controlPlane?: ControlPlaneOptions;
 }
 
 const stdout = (io: CliIO, value: unknown): void =>
@@ -415,6 +423,7 @@ async function runServe(
     },
     version: ZCODE_VERSION,
     ...(supervisorReleaseId ? { supervisorReleaseId } : {}),
+    ...(runtimeOptions.controlPlane ? { controlPlane: runtimeOptions.controlPlane } : {}),
     serviceRegistered,
     onStopped: () => {
       process.stdin.pause();
@@ -450,11 +459,15 @@ async function runServe(
 }
 
 // apply-update 服务端最坏路径包含旧 Core 停止、新 Core ready 等待、新 Core 回滚停止、
-// 旧 Core ready 等待以及旧 Core ready 超时后的再次停止，即三次停止预算加两次 ready 预算，
+// 旧 Core ready 等待以及旧 Core ready 超时后的再次停止，即三次停止预算加两次 ready 预算；
+// control-plane 启用时三个停止点都各自串行再收口一次 CP（宽限 + 强杀），必须同时计入。
 // 另需为 current/pending 文件操作和 IPC 调度留出余量。客户端超时必须覆盖完整回滚路径，
-// 否则 CLI 会在 update 仍在后台执行时误报超时（R2-CLI-08）。
+// 否则 CLI 会在 update 仍在后台执行时误报超时（R2-CLI-08）。flag 关闭只是多留余量，无行为变化。
 export const APPLY_UPDATE_TIMEOUT_MS =
-  3 * (CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS) + 2 * CORE_READY_TIMEOUT_MS + 30_000;
+  3 * (CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS) +
+  3 * (CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS + CONTROL_PLANE_KILL_TIMEOUT_MS) +
+  2 * CORE_READY_TIMEOUT_MS +
+  30_000;
 
 async function stopExistingSupervisor(
   layout: ReturnType<typeof resolveServerLayout>,

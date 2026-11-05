@@ -14,9 +14,19 @@ export const CORE_STOP_GRACE_TIMEOUT_MS = 5_000;
 export const CORE_KILL_TIMEOUT_MS = 10_000;
 export const CORE_READY_TIMEOUT_MS = 15_000;
 export const CONTROL_CLOSE_TIMEOUT_MS = 2_000;
-// stop 等待方需要覆盖宽限 + 强杀等待 + control socket 关闭，另留状态落盘和锁释放余量。
+export const CONTROL_PLANE_READY_TIMEOUT_MS = 15_000;
+export const CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS = 5_000;
+export const CONTROL_PLANE_KILL_TIMEOUT_MS = 10_000;
+// stopInternal 串行收口 Core 与 control-plane 两个独立子进程；等待方预算必须覆盖
+// 「Core 宽限 + 强杀」「control-plane 宽限 + 强杀」以及 control socket 关闭，
+// 另留状态落盘和锁释放余量。control-plane flag 关闭时多留的余量不改变行为。
 export const SERVER_STOP_WAIT_TIMEOUT_MS =
-  CORE_STOP_GRACE_TIMEOUT_MS + CORE_KILL_TIMEOUT_MS + CONTROL_CLOSE_TIMEOUT_MS + 3_000;
+  CORE_STOP_GRACE_TIMEOUT_MS +
+  CORE_KILL_TIMEOUT_MS +
+  CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS +
+  CONTROL_PLANE_KILL_TIMEOUT_MS +
+  CONTROL_CLOSE_TIMEOUT_MS +
+  3_000;
 
 export const lifecycleStateSchema = z.enum([
   "starting",
@@ -113,6 +123,7 @@ export const controlRequestSchema = z.discriminatedUnion("command", [
   requestBase.extend({ command: z.literal("stop") }),
   requestBase.extend({ command: z.literal("restart") }),
   requestBase.extend({ command: z.literal("runtime-identity") }),
+  requestBase.extend({ command: z.literal("control-plane-status") }),
   requestBase.extend({ command: z.literal("prepare-update") }),
   requestBase.extend({ command: z.literal("apply-update"), force: z.boolean().optional() }),
   requestBase.extend({ command: z.literal("prepare-uninstall") }),
@@ -171,6 +182,88 @@ export const coreCommandSchema = z.discriminatedUnion("command", [
   z.object({ command: z.literal("shutdown") }),
 ]);
 export type CoreCommand = z.infer<typeof coreCommandSchema>;
+
+// 设计裁决 7（super-agent-trigger-subsystem-spec §7-7）：daemon 用受管子进程承载 bootstrap
+// 组合根。control-plane 使用独立严格 schema，协议版本随该 schema 演进；子进程协议不兼容时
+// 必须显式失败，不静默降级。milestone-b-spec §2.4 要求 schema 新增字段与协议版本同批 bump：
+// ControlPlaneStatus 增 firstReadyAt（代际 ever-ready 证据），故版本从与 Server CLI 同源的 1 升到 2。
+export const CONTROL_PLANE_PROTOCOL_VERSION = 2;
+
+/**
+ * control-plane 子进程启动参数。launcher 负责映射为具体命令行/env；Supervisor 只认这一个
+ * 契约，避免把 bootstrap 组合根的路径知识塞进 daemon 进程管理状态机。
+ */
+export interface ControlPlaneLaunchParams {
+  generation: number;
+  protocolVersion: typeof CONTROL_PLANE_PROTOCOL_VERSION;
+  dataBaseDir: string;
+  serverRoot: string;
+  release: ReleaseManifest | null;
+}
+
+export const controlPlaneMessageSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("ready"),
+      protocolVersion: z.number().int().nonnegative(),
+      generation: z.number().int().nonnegative(),
+      version: z.string().min(1).optional(),
+      releaseId: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("health"),
+      at: z.number().int().nonnegative(),
+      pendingEventCount: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+  z.object({ type: z.literal("stopped"), reason: z.string().max(500) }).strict(),
+  // milestone-b-spec §2.3：路径不一致、门禁开但 eventRouter 关、socket bind 冲突等启动级
+  // 不可恢复错误由 child 上报 fatal；Supervisor 必须把它当一等失败事件处理，不能降级成普通退出。
+  z.object({ type: z.literal("fatal"), message: z.string().max(500) }).strict(),
+]);
+export type ControlPlaneMessage = z.infer<typeof controlPlaneMessageSchema>;
+
+export const controlPlaneCommandSchema = z.discriminatedUnion("command", [
+  z.object({ command: z.literal("shutdown") }),
+]);
+export type ControlPlaneCommand = z.infer<typeof controlPlaneCommandSchema>;
+
+export const controlPlaneStateSchema = z.enum([
+  "starting",
+  "ready",
+  "crashed",
+  "crash-loop-stopped",
+  "stopping",
+  "stop-failed",
+  "stopped",
+]);
+export type ControlPlaneState = z.infer<typeof controlPlaneStateSchema>;
+
+export const controlPlaneStatusSchema = z
+  .object({
+    state: controlPlaneStateSchema,
+    pid: z.number().int().positive().nullable(),
+    generation: z.number().int().nonnegative(),
+    protocolVersion: z.literal(CONTROL_PLANE_PROTOCOL_VERSION),
+    startedAt: z.number().int().nonnegative().nullable(),
+    // 本 daemon 代际内首次 ready 的时间；跨 child 重启不清零。startedAt/generation 每次
+    // launch 都会变化，仅靠它们无法区分「从未 ready」与「曾 ready 后重启」；此字段保留
+    // 本代际 ever-ready 证据，供 §3.6 状态判断与排障（启动窗口是否关闭还需结合 crash 信号）。
+    firstReadyAt: z.number().int().nonnegative().nullable(),
+    lastExitReason: z.string().max(500).nullable(),
+    health: z
+      .object({
+        at: z.number().int().nonnegative(),
+        pendingEventCount: z.number().int().nonnegative().optional(),
+      })
+      .strict()
+      .nullable(),
+    crashBudget: crashBudgetSchema,
+  })
+  .strict();
+export type ControlPlaneStatus = z.infer<typeof controlPlaneStatusSchema>;
 
 export const releaseManifestSchema = z
   .object({

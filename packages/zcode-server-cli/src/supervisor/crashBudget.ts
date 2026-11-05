@@ -1,21 +1,34 @@
 import { CRASH_BACKOFF_MS, CRASH_WINDOW_MS, type CrashBudgetSnapshot } from "../contracts.js";
 
+export interface CrashBudgetOptions {
+  now?: () => number;
+  /** 测试/独立子进程可注入退避序列；生产缺省使用 Server CLI 的统一预算。 */
+  backoffMs?: readonly number[];
+  windowMs?: number;
+}
+
 export class CrashBudget {
   private windowStartedAt: number | undefined;
   private crashCount = 0;
 
-  public constructor(private readonly options: { now?: () => number } = {}) {}
+  public constructor(private readonly options: CrashBudgetOptions = {}) {}
+
+  private backoff(): readonly number[] {
+    return this.options.backoffMs ?? CRASH_BACKOFF_MS;
+  }
 
   public recordCrash(): { shouldRestart: boolean; delayMs: number; exhausted: boolean } {
     const now = this.options.now?.() ?? Date.now();
-    if (this.windowStartedAt === undefined || now - this.windowStartedAt >= CRASH_WINDOW_MS) {
+    const windowMs = this.options.windowMs ?? CRASH_WINDOW_MS;
+    const backoff = this.backoff();
+    if (this.windowStartedAt === undefined || now - this.windowStartedAt >= windowMs) {
       this.windowStartedAt = now;
       this.crashCount = 0;
     }
     const index = this.crashCount;
     this.crashCount += 1;
-    const delayMs = CRASH_BACKOFF_MS[Math.min(index, CRASH_BACKOFF_MS.length - 1)] ?? 0;
-    const exhausted = index >= CRASH_BACKOFF_MS.length;
+    const delayMs = backoff[Math.min(index, backoff.length - 1)] ?? 0;
+    const exhausted = index >= backoff.length;
     return { shouldRestart: !exhausted, delayMs, exhausted };
   }
 
@@ -26,16 +39,18 @@ export class CrashBudget {
 
   public snapshot(): CrashBudgetSnapshot {
     const now = this.options.now?.() ?? Date.now();
-    if (this.windowStartedAt !== undefined && now - this.windowStartedAt >= CRASH_WINDOW_MS) {
+    const windowMs = this.options.windowMs ?? CRASH_WINDOW_MS;
+    const backoff = this.backoff();
+    if (this.windowStartedAt !== undefined && now - this.windowStartedAt >= windowMs) {
       this.reset();
     }
     const nextRestartDelayMs =
-      this.crashCount < CRASH_BACKOFF_MS.length ? (CRASH_BACKOFF_MS[this.crashCount] ?? 0) : 0;
+      this.crashCount < backoff.length ? (backoff[this.crashCount] ?? 0) : 0;
     return {
       ...(this.windowStartedAt === undefined ? {} : { windowStartedAt: this.windowStartedAt }),
       crashCount: this.crashCount,
       nextRestartDelayMs,
-      exhausted: this.crashCount > CRASH_BACKOFF_MS.length,
+      exhausted: this.crashCount > backoff.length,
     };
   }
 }
