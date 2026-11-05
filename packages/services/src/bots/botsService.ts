@@ -3986,7 +3986,11 @@ export function createBotsService(
       };
       // Phase 2 出口（spec §5.2）：构造信封 → TriggerSink.ingest。markInboundDelivery 快速
       // 守卫已在上面；DB unique 幂等由 intake 权威兜底（重启后 Map 失效的重投仍单行）。
-      if (triggerSink) {
+      // A9 bot 维度灰度（spec §5.4）：全局 features.eventRouter=true 只决定 sink 是否注入，
+      // 具体 bot 还要 BotConfig.eventRouterEnabled=true 才进新链路。未开 / 未知 bot 一律
+      // 不进 sink（等价 handled:false），继续下面的 legacy 直路——不能因全局 flag 打开
+      // 就让所有 bot 都进 EventRouter。
+      if (triggerSink && bot?.eventRouterEnabled === true) {
         const envelope = await mintTriggerEnvelope(inboundMessage);
         let sinkOutcome: TriggerSinkOutcome;
         try {

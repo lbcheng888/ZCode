@@ -1035,8 +1035,9 @@ exceptions:
     rule: unmanaged-new-file
     paths:
       - apps/zcode-cli/packages/bootstrap/src/app/super-agent-control-plane.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/super-agent-admission-facts.ts
       - apps/zcode-cli/packages/cli/src/tui-prompt-handler-queries.ts
-    reason: super-agent 组合根装配面（M2/M3/W 接线）与 TUI would-accept 查询接线（§8-11 最后一公里）的零星新文件，沿用本表先例逐文件准入；接管整个 bootstrap/src/app 或 cli 包不在本次范围内。
+    reason: super-agent 组合根装配面（M2/M3/W 接线）、M4 mandateFacts 准入交接面与 TUI would-accept 查询接线（§8-11 最后一公里）的零星新文件，沿用本表先例逐文件准入；接管整个 bootstrap/src/app 或 cli 包不在本次范围内。
   - id: super-agent-phase2-misc-unmanaged-new-file
     rule: unmanaged-new-file
     paths:

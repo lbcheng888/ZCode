@@ -1972,3 +1972,23 @@ TodoWrite 成功写库后新增会话事件 `todos_updated`（`TodosUpdatedPaylo
   tests/super-agent（mandate / trigger-verdicts / trigger-verdicts-tier /
   adjudication / would-accept-scheme / would-accept-promote / spec-run-dispatcher /
   storage-migrations）全绿。
+
+### 2026-11-05 M4 mandateFacts 生产者接通（admission → 工具权限）
+
+- `PromptAdmissionOptions` 增 additive-optional `triggerSource` / `mandateFacts`
+  （`PromptAdmissionMandateFacts` = tier/mandateId/expiresAt + triggerId）；
+  `prompt-admission.ts` 在准入边界校验：trigger 来源缺 facts、user 来源带 facts
+  均响亮抛错，不静默按 user-origin 放行。
+- `PermissionService.bindTurnPermissionFacts`：admission 把结论绑定到
+  sessionId+queryId 的回合作用域（v4 sendText 的 queryId 与 inputId=commandId
+  同源，排队提升后 key 不变）；`checkPermission` 缺省把绑定事实并入本次
+  `PermissionContext`（显式字段优先），M4 门按既有逻辑执行。flag 关从未绑定。
+- 生产者：`createSuperAgentControlPlane.resolveAdmissionMandateFacts(triggerId)`
+  = trigger_events 行 → `deriveTriggerClass` → `mandate.resolveFor` 真契约
+  （显式档补 expiresAt）。`features.mandateGate=true` 时 create-app 包装
+  `hostPorts.handleCommand`，按 wire commandId 登记；input-facade 在 admission
+  前取出、起步/拒绝后释放，排队输入保留到提升边界。缺 trigger 行/缺结论 =
+  响亮失败。
+- 验证：core permission-mandate-admission（auto 放行 / record_only、缺
+  mandateId、过期 deny / 无 facts 字节兼容 / 缺 facts 准入抛错）；bootstrap
+  admission-mandate-facts；既有 permission/admission 套件全绿。

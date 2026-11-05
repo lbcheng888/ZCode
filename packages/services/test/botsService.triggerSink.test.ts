@@ -22,8 +22,16 @@ const actor = {
   chatType: "private" as const,
 };
 
-function createService(sink?: TriggerSink) {
-  const repo = f.createMemoryRepo(f.baseConfig);
+/** bot 维度灰度打开：全局 flag 已由组合根决定注入 sink，BotConfig 还要显式开。 */
+function eventRouterConfig(): typeof f.baseConfig {
+  return {
+    ...f.baseConfig,
+    bots: [{ ...f.baseConfig.bots[0]!, eventRouterEnabled: true }],
+  };
+}
+
+function createService(sink?: TriggerSink, config: typeof f.baseConfig = f.baseConfig) {
+  const repo = f.createMemoryRepo(config);
   const legacyTaskService = f.createLegacyTaskService();
   const service = f.createBotsService({
     credentialService: f.createCredentialService({ "secret-1": "secret" }),
@@ -76,7 +84,7 @@ describe("botsService TriggerSink 出口（spec §5.2）", () => {
         return noopTriggerSink.ingest(envelope);
       },
     };
-    const { service, legacyTaskService } = createService(sink);
+    const { service, legacyTaskService } = createService(sink, eventRouterConfig());
     await bind(service);
 
     const response = await service.handleProviderCallbackResponse("webhook", helloPayload("msg-2"));
@@ -103,13 +111,28 @@ describe("botsService TriggerSink 出口（spec §5.2）", () => {
     service.disposeAll();
   });
 
+  it("全局 flag 开但 bot 未开 eventRouterEnabled：零事件，legacy 直路不变", async () => {
+    const ingest = vi.fn<TriggerSink["ingest"]>();
+    const sink: TriggerSink = { ingest };
+    // 全局 features.eventRouter=true 已由组合根决定注入真实 sink；bot 维度仍未开。
+    const { service, legacyTaskService } = createService(sink);
+    await bind(service);
+
+    const response = await service.handleProviderCallbackResponse("webhook", helloPayload("msg-off"));
+
+    expect(response.ok).toBe(true);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(legacyTaskService.createTask).toHaveBeenCalledTimes(1);
+    service.disposeAll();
+  });
+
   it("sink 返回 handled=true：跳过 legacy 直路（不 createTask、无 replies）", async () => {
     const sink: TriggerSink = {
       async ingest() {
         return { handled: true, triggerId: "trigger-1", route: "human_explicit" };
       },
     };
-    const { service, legacyTaskService } = createService(sink);
+    const { service, legacyTaskService } = createService(sink, eventRouterConfig());
     await bind(service);
 
     const response = await service.handleProviderCallbackResponse("webhook", helloPayload("msg-3"));
@@ -126,7 +149,7 @@ describe("botsService TriggerSink 出口（spec §5.2）", () => {
       .mockRejectedValueOnce(new Error("intake db down"))
       .mockResolvedValueOnce({ handled: false });
     const sink: TriggerSink = { ingest };
-    const { service, legacyTaskService } = createService(sink);
+    const { service, legacyTaskService } = createService(sink, eventRouterConfig());
     await bind(service);
 
     await expect(

@@ -118,9 +118,9 @@ Duration    3.01s (tests 1.90s)
 
 1. **specRun 生产 launch 适配器**：已关闭（§3）。剩余 `specEgress.allowHosts` 配置未接，缺省零 egress。
 2. **automation/offpeak owner 心跳**：**未接**。`AutomationRunProjectionPort.register` 无 heartbeat 字段，`touch` 只改 `ownerSession`（`packages/services/src/session/automationService.ts:33-48`）；沿用 watchdog“未声明不判活”，归 P4/Y 后续批。
-3. **`PromptAdmissionOptions.mandateFacts`**：**未接**。消费侧门已存在（`permission/service.ts:306-347`，`origin=event` 且写操作时 fail-closed），但全仓没有任何生产者设置 `origin="event"` 或 `mandate`；`PromptAdmissionOptions`（`core/src/runtime/types.ts:545-555`）无该字段。结果是 M4 门在当前生产路径上处于“未激活”状态：事件回合仍按缺省 user 处理。flag-on 试点若要真正执行 mandate 档位，必须先补生产者。
-4. **宿主准入三件**：协议宿主 `gateway.handleCommand` / `autoReplyGuard` 注入已接（`zcode-protocol/server-operations.ts:3623`）；services 侧 `TriggerSink` 注入与 `BotConfig.eventRouterEnabled` 读点仍未接（全仓仅 schema/测试，无生产消费者）。因此 flag-on 的“生产全链”目前只在测试注入下成立。
-5. **would-accept 可见面**：TUI 查询缝与本地子命令已接（`tui-prompt-handler-queries.ts:82-93`），但 CLI 宿主 `createAppFactory` 从不注入 `options.superAgent`，flag-on 下 `zcode tui` 会在 create-app 通用门响亮失败；desktop/web `WouldAcceptInbox` 仍无渲染点。数据面 `listPendingWouldAccept` 正常。
+3. **`PromptAdmissionOptions.mandateFacts`**：**已接（2026-11-05，lane C）**。`PromptAdmissionOptions` 增 `triggerSource` / `mandateFacts`；控制面 `resolveAdmissionMandateFacts(triggerId)` 走真 `mandate.resolveFor`，create-app 在唯一 `handleCommand` 入口按 commandId 登记，input-facade 在 admission 前交给 Core；Core admission 在准入边界绑定（键 = sessionId+turnId；2026-11-05 修订），`checkPermission` 的既有 fail-closed 门直接消费。flag 关（`mandateGate=false`）不登记 ⇒ user-origin 字节兼容；flag 开缺 facts/缺 trigger 行一律响亮失败。**2026-11-05 接缝收口（spec §8-18）**：producer 按 `trigger_events.fast_path` 分类，`human_explicit` 返回 exempt（免 Mandate，按 user-origin，不再被隐式 record_only 判成只读）；owned/unowned_candidate 走三档；fast_path=NULL 与跨 workspace 响亮失败；登记表进程级共享且排队项保留，宿主 sendText 把 `triggerSource` 一路带到 Core。已知接缝：进程重启后已持久化队列项的提升仍会丢 facts（退化为 user-origin），跨重启保持 fail-closed 需把 triggerId 随 QueueItem/session_input intent 持久化（spec §8-17③/§8-18）。
+4. **宿主准入三件**：协议宿主 `gateway.handleCommand` / `autoReplyGuard` 注入已接（`zcode-protocol/server-operations.ts:3623`）；services 侧 `TriggerSink` 注入与 `BotConfig.eventRouterEnabled` 读点：**bot 维度读点已接（2026-11-05，lane C）**——`botsService.processProviderCallback` 在 sink 调用点要求 `bot.eventRouterEnabled === true`，全局 flag 打开而 bot 未开 / 未知 bot 一律 skip sink 继续 legacy 直路（A9 语义）。`TriggerSink` 的进程跨度注入仍归入站宿主下沉批（§5.2/§7-7），flag-on 的跨进程生产链仍只在测试注入下成立。
+5. **would-accept 可见面**：**已关闭（2026-11-05，lane B）**。① TUI 启动路径（`tui-prompt-handler.ts`）注入 `options.superAgent`：`handleCommand` 延迟绑定当前 app → `app.sendInput`，`autoReplyGuard` 缺 botsService 状态时只对群内 IM 响亮拒绝，域库路径与协议宿主同根；TUI 不注入 `tasksIndexDatabasePath`（派发桥循环未接线，且旧 Desktop 遗留文件的存在不能当迁移证明，构造期会因缺 `dispatch_requests` 表阻断启动）；flag-on 下 `zcode tui` 不再缺注入启动失败，flag-off 该字段被 create-app 忽略。② desktop/web `WouldAcceptInbox` 挂到 v4 右侧状态面板（`ConversationStatusPanel`），数据源 = 快照 `pendingWouldAccept`（undefined/空数组都不渲染），promote 经既有 v4 命令面新增最小 `promoteWouldAccept` 命令调控制面；控制面缺席回 rejected。卡片展开渲染 M6 五字段 scheme（现状证据/候选代价/最佳推荐/影响面/验证方案），用户看得到方案内容才可点批转。裁决产卡 / 批转成功后控制面经 host 触发 `pendingWouldAccept` delta，已订阅客户端直接收敛。详见 spec §8-16。
 6. **写租约 admission**：`specWriteLease=false` 下只有仓储与建表，Phase 5 才接检查点。
 7. **派发桥/durable dispatch**：桥行延后写入；桥循环未接前保持 legacy 直派，`durableSchedulerDispatch` 不开。
 8. **close 关机窄竞态**：`app.close` 先 abort 再 `plane.stop()`，在途裁决批可能落在关库之后，经 onError 告警、零写入、候选行留 `pending` 待下次补扫（spec §8-12，已登记不假装避免）。
@@ -147,8 +147,8 @@ P6 属可选里程碑，不进入当前灰度批次。建议按依赖顺序排�
 
 **需要 flag-on 试点的能力（按顺序解锁）**：
 
-1. **M2 触发路由试点**：`eventRouter=true` + `mandateGate=false`，单 bot、单 workspace。观察 intake 幂等、owned/human-explicit/unowned 三边路由、would-accept 卡生成。前置：services `TriggerSink` 注入 + `BotConfig.eventRouterEnabled` 读点。
-2. **M4/M6 mandate 与方案卡试点**：`mandateGate=true`。前置：`PromptAdmissionOptions.mandateFacts` 生产者接通，否则门不生效；确认 would-accept 出口门与五字段卡在真实数据上不误拦。观察 promote → auto mandate 行、事件回合写操作权限。
+1. **M2 触发路由试点**：`eventRouter=true` + `mandateGate=false`，单 bot、单 workspace（该 bot 需显式 `eventRouterEnabled=true`，读点已接）。观察 intake 幂等、owned/human-explicit/unowned 三边路由、would-accept 卡生成。前置：services `TriggerSink` 的跨进程注入（入站宿主下沉批）。
+2. **M4/M6 mandate 与方案卡试点**：`mandateGate=true`。前置：`PromptAdmissionOptions.mandateFacts` 生产者已接通（2026-11-05，lane C；spec §8-17），确认 would-accept 出口门与五字段卡在真实数据上不误拦。观察 promote → auto mandate 行、事件回合写操作权限；注意进程重启会丢失进行中队列项的 mandate facts（退化为 user-origin，已在 §8-17③ 登记）。
 3. **M5 spec lane 试点**：`speculative` 档 + 零 egress（`allowHosts=[]`）起步，单 repo、单 workspace。前置：§3 适配器提交完成；观察受限 profile、无凭据 env、run 终态 egress 关闭、失败原样上浮。
 4. **`specWriteLease` / `durableSchedulerDispatch`**：继续关。分别在 Phase 5 admission 检查点、派发桥循环接线后单独灰度。
 
