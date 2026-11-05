@@ -47,8 +47,11 @@ async function createSelectionSideSession(
         text: firstInput.text,
         requestedDelivery: "startNow",
       }),
-      // P6：子会话首条输入沿用本次命令连接的附件事实。
+      // P6：子会话首条输入沿用本次命令连接的附件事实与票据授权域。
       ...(admission.attachment ? { attachment: admission.attachment } : {}),
+      ...(admission.capabilityTicket
+        ? { capabilityTicket: admission.capabilityTicket }
+        : {}),
     });
     const input = {
       delivery: started.admission.kind === "queued" ? ("queue" as const) : ("startNow" as const),

@@ -13,6 +13,7 @@ import {
   CAPABILITY_TICKET_MAX_TTL_MS,
   type AttachmentRole,
   type CapabilityTicket,
+  type CapabilityTicketBinding,
   type CapabilityTicketFailureCode,
   type CapabilityTicketMode,
   type CapabilityTicketRedeemRequest,
@@ -95,6 +96,30 @@ export interface CapabilityTicketBrokerOptions {
   maxTtlMs?: number;
 }
 
+/**
+ * 命令入口 admission 的授权域（公开事实，无 secret）。只描述“该票据在本次命令上仍有效”
+ * 与允许的工具范围；**不**代表票据已兑换或凭据已注入（C2）。
+ */
+export interface CapabilityTicketAdmissionAuthorization {
+  ticketId: string;
+  binding: CapabilityTicketBinding;
+  scope: CapabilityTicketScope;
+  expiresAt: number;
+  revocationEpoch: number;
+}
+
+export type CapabilityTicketAdmissionResult =
+  | { ok: true; authorization: CapabilityTicketAdmissionAuthorization }
+  | { ok: false; code: CapabilityTicketFailureCode };
+
+export interface CapabilityTicketAdmitRequest {
+  ticketId: string;
+  /** 宿主权威绑定（registry 签发时记录，不接受客户端自报）。 */
+  binding: CapabilityTicketBinding;
+  /** 当前宿主派生角色；缺失（已吊销/查不到）即拒绝。 */
+  role?: AttachmentRole;
+}
+
 export interface CapabilityTicketStatus extends CapabilityTicket {
   /**
    * broker 当前全局 epoch（审计用）。票据自带的 `revocationEpoch` 是该票据自身的快照：
@@ -105,6 +130,11 @@ export interface CapabilityTicketStatus extends CapabilityTicket {
 
 export interface CapabilityTicketBroker {
   issue(request: IssueCapabilityTicketRequest): IssuedCapabilityTicket;
+  /**
+   * 命令入口 admission（不兑换、不消费）。校验存在性/TTL/吊销/绑定/角色 scope，
+   * 通过则返回可随可信 carrier 下发的公开授权域；失败给 typed code。绝不返回 secret。
+   */
+  admit(request: CapabilityTicketAdmitRequest): CapabilityTicketAdmissionResult;
   redeem(request: CapabilityTicketRedeemRequest): CapabilityTicketRedeemResult;
   revoke(ticketId: string): boolean;
   revokeByAttachment(attachmentId: string): number;
@@ -301,6 +331,43 @@ export function createCapabilityTicketBroker(
     return revocationEpoch;
   }
 
+  /**
+   * 命令入口 admission。与 redeem 的差异是**不消费**：票据仍在 issued/active 状态，
+   * 每次命令 admission 都可复核（spec §1.4「每次 admission 复核」）。
+   *
+   * 授权域只含公开事实；secret 永不出现在返回值。
+   */
+  function admit(request: CapabilityTicketAdmitRequest): CapabilityTicketAdmissionResult {
+    const record = records.get(request.ticketId);
+    if (!record) return { ok: false, code: "ticket.unknown" };
+    const at = now();
+    if (at >= record.ticket.expiresAt) {
+      markExpired(record.ticket);
+      return { ok: false, code: "ticket.expired" };
+    }
+    if (record.ticket.state === "revoked") return { ok: false, code: "ticket.revoked" };
+    if (record.ticket.state === "expired") return { ok: false, code: "ticket.expired" };
+    if (record.ticket.state === "consumed") return { ok: false, code: "ticket.replayed" };
+    if (!capabilityTicketBindingsMatch(record.ticket.binding, request.binding)) {
+      return { ok: false, code: "ticket.binding_mismatch" };
+    }
+    // 角色缺失 = attachment 已 detach/吊销；不能把无角色当 host。
+    if (request.role === undefined) return { ok: false, code: "ticket.revoked" };
+    if (!capabilityTicketScopeWithinRole(request.role, record.ticket.scope)) {
+      return { ok: false, code: "ticket.scope_denied" };
+    }
+    return {
+      ok: true,
+      authorization: {
+        ticketId: record.ticket.ticketId,
+        binding: { ...record.ticket.binding },
+        scope: { ...record.ticket.scope },
+        expiresAt: record.ticket.expiresAt,
+        revocationEpoch: record.ticket.revocationEpoch,
+      },
+    };
+  }
+
   function redeem(request: CapabilityTicketRedeemRequest): CapabilityTicketRedeemResult {
     const parsed = capabilityTicketRedeemRequestSchema.safeParse(request);
     if (!parsed.success) {
@@ -374,6 +441,7 @@ export function createCapabilityTicketBroker(
 
   return {
     issue,
+    admit,
     redeem,
     revoke,
     revokeByAttachment,

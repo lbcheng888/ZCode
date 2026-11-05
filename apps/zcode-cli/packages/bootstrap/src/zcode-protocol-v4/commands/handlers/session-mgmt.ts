@@ -111,8 +111,11 @@ async function createSession(
         inputId: envelope.commandId,
         intent,
         ...(attachments ? { attachments } : {}),
-        // P6：新会话首条输入同样按当前连接复核附件角色。
+        // P6：新会话首条输入同样按当前连接复核附件角色与票据授权域。
         ...(admission.attachment ? { attachment: admission.attachment } : {}),
+        ...(admission.capabilityTicket
+          ? { capabilityTicket: admission.capabilityTicket }
+          : {}),
       });
       firstInput = {
         delivery: started.admission.kind === "queued" ? "queue" : "startNow",

@@ -1,12 +1,21 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
 import {
   SPEC_RESTRICTED_PROFILE_NAME,
   filterSpecRestrictedToolNames,
 } from "@zcode/core";
 
+import { buildSpecRunEnv } from "../../../adapters/src/network/subprocess-env.js";
 import {
   FenceStartupError,
+  createFencedExecutionPort,
+  createSpecFence,
   createSpecRunDispatcher,
+  createSuperAgentSpecLane,
   type PrepareFenceRequest,
   type PrepareSpecRunEgressRequest,
   type SpecFenceContract,
@@ -216,6 +225,32 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
     expect(egress.stops).toEqual([WORKSPACE_ROOT]);
   });
 
+  it("生产围栏平台不可用（win32）→ run 拒绝启动、错误类型正确、launch 不执行", async () => {
+    const launched: SpecRunLaunchRequest[] = [];
+    const egress = fakeEgress();
+    const dispatcher = createSpecRunDispatcher({
+      egress,
+      // 生产实现（不是测试替身）：win32 平台矩阵登记为 unsupported。
+      fence: createSpecFence({ platform: "win32" }),
+      buildProcessEnv: proxyEnv,
+      resolveWorkspaceRoot: () => WORKSPACE_ROOT,
+      launch: {
+        launch: async (request) => {
+          launched.push(request);
+          return { runId: "run-1" };
+        },
+      },
+    });
+
+    await expect(dispatcher.start(specInput())).rejects.toBeInstanceOf(FenceStartupError);
+    await expect(dispatcher.start(specInput())).rejects.toMatchObject({
+      code: "fence.unsupported_platform",
+      platform: "win32",
+    });
+    expect(launched).toHaveLength(0);
+    expect(egress.stops.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("围栏建立成功 → launch 携带句柄，run 终态先拆围栏再停代理", async () => {
     const launched: SpecRunLaunchRequest[] = [];
     const events: string[] = [];
@@ -231,6 +266,8 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
           runId: request.runId,
           mechanism: "linux-netns-nftables",
           broker: request.broker,
+          // linux childBroker = veth relay 端点，dispatcher 必须据此重写 env/network。
+          childBroker: { host: "10.2.3.1", port: 54321 },
           wrapExecutionRequest: (execution) => execution,
           async teardown() {
             events.push(`fence.teardown:${request.runId}`);
@@ -271,6 +308,9 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
     expect(launched).toHaveLength(1);
     expect(launched[0]?.fence?.runId).toBe("t-1");
     expect(launched[0]?.fence?.broker).toEqual({ host: "127.0.0.1", port: 12345 });
+    // env/network 被改写到 childBroker（宿主 loopback broker 跨 netns 不可达）。
+    expect(launched[0]?.network.httpProxy).toBe("http://10.2.3.1:54321");
+    expect(launched[0]?.processEnv.HTTP_PROXY).toBe("http://10.2.3.1:54321");
     // 能力范围必须跟随本次 egress plan（Linux 非空白名单据此 typed 拒绝）。
     expect(fencePrepares[0]?.allowHosts).toEqual([]);
     expect(events).toEqual([
@@ -342,5 +382,87 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
       "launch:2:end",
       `stop:${WORKSPACE_ROOT}`,
     ]);
+  });
+});
+
+async function listen(server: Server): Promise<number> {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (typeof address !== "object" || address === null) throw new Error("无法解析监听端口");
+  return address.port;
+}
+
+// flag 开且围栏可用：dispatcher 的真实顺序（egress → fence → env(childBroker) →
+// launch）在 darwin 上真跑；launch 用生产 execution adapter + fenced port。
+describe.skipIf(process.platform !== "darwin")("spec run × 真围栏（darwin 真跑）", () => {
+  it("围栏句柄贯穿 dispatcher → launch，围栏内 --noproxy 直连被拒、代理白名单可达", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "zcode-dispatch-fence-"));
+    let requestCount = 0;
+    const mirror = createServer((_req, res) => {
+      requestCount += 1;
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("mirror-ok");
+    });
+    const mirrorPort = await listen(mirror);
+    const lane = createSuperAgentSpecLane();
+    try {
+      const dispatcher = createSpecRunDispatcher({
+        egress: lane,
+        fence: createSpecFence(),
+        // 生产 env 构造：dispatcher 已把 plan.proxyUrl 改写为 fence.childBroker。
+        buildProcessEnv: (plan) =>
+          buildSpecRunEnv({ proxyUrl: plan.proxyUrl, sourceEnv: { ...process.env } }),
+        resolveWorkspaceRoot: () => workspaceRoot,
+        resolveAllowHosts: () => [`127.0.0.1:${mirrorPort}`],
+        launch: {
+          launch: async (request: SpecRunLaunchRequest) => {
+            if (!request.fence) throw new Error("launch 未收到围栏句柄");
+            const basePort = createNodeExecutionAdapter({
+              outputRootDir: join(workspaceRoot, "exec"),
+              bashOutputTempDir: tmpdir(),
+              network: request.network,
+              processEnv: request.processEnv,
+            });
+            const fenced = createFencedExecutionPort(basePort, request.fence);
+            try {
+              const allowed = await fenced.run({
+                command: {
+                  mode: "shell",
+                  command: `curl -fsS --max-time 15 http://127.0.0.1:${mirrorPort}/`,
+                },
+                cwd: workspaceRoot,
+                timeoutMs: 30_000,
+              });
+              expect(allowed.status).toBe("completed");
+              expect(allowed.stdout.text).toBe("mirror-ok");
+
+              const bypass = await fenced.run({
+                command: {
+                  mode: "shell",
+                  command: `curl -fsS --noproxy '*' --max-time 15 http://127.0.0.1:${mirrorPort}/`,
+                },
+                cwd: workspaceRoot,
+                timeoutMs: 30_000,
+              });
+              expect(bypass.status).toBe("failed");
+              expect(bypass.stdout.text).not.toContain("mirror-ok");
+            } finally {
+              await basePort.close?.();
+            }
+            return { runId: "run-fence" };
+          },
+        },
+      });
+
+      await dispatcher.start({
+        ...specInput(),
+        workspaceIdentity: "ws-a",
+      });
+      expect(requestCount).toBeGreaterThan(0);
+    } finally {
+      await lane.stopSpecRunEgress(workspaceRoot);
+      await new Promise<void>((resolve) => mirror.close(() => resolve()));
+      await rm(workspaceRoot, { force: true, recursive: true });
+    }
   });
 });

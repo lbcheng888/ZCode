@@ -3,6 +3,20 @@ import { createSessionId } from "@zcode/contracts";
 import { AgentRuntime } from "../src/runtime.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
 import { createTestModelFactory } from "./test-runtime-model.js";
+import type { CapabilityTicketAuthorization } from "../src/permission/capability-ticket.js";
+
+const TICKET_AUTHORIZATION: CapabilityTicketAuthorization = {
+  ticketId: "ticket-test",
+  binding: {
+    workspaceIdentity: "workspace-test",
+    attachmentId: "attachment-test",
+    surfaceKind: "desktop",
+    subject: { kind: "session", id: "prompt-admission-test" },
+  },
+  scope: { toolClasses: ["read"] },
+  expiresAt: 2_000,
+  revocationEpoch: 0,
+};
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -118,6 +132,38 @@ describe("AgentRuntime prompt admission", () => {
       (item) => item.pendingInputId === (admission as { pendingInputId?: string }).pendingInputId,
     );
     expect(queued?.delivery).toBe("inject");
+  });
+
+  it("rejects queued capability-ticket input instead of deferring the authorization domain", async () => {
+    const runtime = createRuntime("prompt-admission-ticket-queue", async () => ({
+      finishReason: "stop",
+      text: "done",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    }));
+
+    await expect(
+      runtime.admitPrompt("ticket queue", undefined, {
+        ...admissionOptions("ticket-queue"),
+        requireQueue: true,
+        capabilityTicket: TICKET_AUTHORIZATION,
+      }),
+    ).rejects.toThrow(/capability ticket admission cannot be deferred/);
+  });
+
+  it("rejects inject capability-ticket input instead of deferring the authorization domain", async () => {
+    const runtime = createRuntime("prompt-admission-ticket-inject", async () => ({
+      finishReason: "stop",
+      text: "done",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    }));
+
+    await expect(
+      runtime.admitPrompt("ticket inject", undefined, {
+        ...admissionOptions("ticket-inject"),
+        queueDelivery: "inject",
+        capabilityTicket: TICKET_AUTHORIZATION,
+      }),
+    ).rejects.toThrow(/capability ticket admission cannot be deferred/);
   });
 
   it("keeps a direct inject steer on the inject lane when the goal layer flag is off", async () => {

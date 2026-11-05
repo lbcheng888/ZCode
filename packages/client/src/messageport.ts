@@ -70,6 +70,11 @@ export function createMessagePortServiceConnection(
  *
  * Desktop 模式下，utilityProcess（或 main 进程的远程代理）通过 MessagePort
  * 暴露 ChannelServer，renderer 用此函数建立 ChannelClient 连接。
+ *
+ * 注意：本便捷入口只返回 `services`，**丢弃** `capabilityTickets` 通道。P6 票据命令
+ * 信封的客户端接线尚未落地：renderer 没有把 `protocolFields()` 写进命令，生产 UI 命令
+ * 不携带 `capabilityTicketId`（见 P6 spec §2.5 已知残留与宿主启动告警）。需要票据语义的
+ * 调用方必须改用 `createMessagePortServiceConnection` 并显式携带该公开字段。
  */
 export function connectViaMessagePort(
   port: MessagePort,

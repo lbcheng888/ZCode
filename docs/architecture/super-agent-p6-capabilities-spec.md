@@ -218,7 +218,7 @@ state          issued | active | consumed | expired | revoked
 - 与 §1 联动：read_mostly 不得申请凭据类票据；interactive 只能申请宿主预批 scope。
 - 分阶段：C1 表+broker 签发/兑换（无凭据注入先打通）→ C2 注入接线（CUA/执行适配器）→ C3 吊销传播 → C4 设备维度批量吊销。
 
-**2026-11-05 落地状态（如实登记，不夸大）**：宿主内存 broker + attachment MessagePort 受控通道已实现；`ZCODE_P6_CAPABILITY_TICKETS=1` 时 `desktop-continuous` 的 remote attachment 签发/投递/兑换/吊销生效。仍未接线：CLI 执行端 admission 消费 `capabilityTicketId` 与凭据注入（C2）、SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程。因此开启该 flag 是 **issue-only（execution not gated）**，宿主启动会输出一条明确告警，运维不得按“设备级执行授权已生效”宣传。平台覆盖：web/mobile 的 `web-remote-replayable` relay 只转发 `Uint8Array` RPC 帧，secret 控制帧不可达，登记为 **secret delivery 未实现**——该形态不签发、不投递，并记录 typed `transport-unimplemented`。epoch 校验按票据自身快照判定，避免同一 broker 下其他 attachment 的吊销误伤未受影响的票据。
+**2026-11-05 落地状态（如实登记，不夸大）**：宿主内存 broker + attachment MessagePort 受控通道已实现；`ZCODE_P6_CAPABILITY_TICKETS=1` 时 `desktop-continuous` 的 remote attachment 签发/投递/兑换/吊销生效。**执行侧 admission 已接线**：带 `capabilityTicketId` 的命令在宿主入口经 broker 校验（存在性/绑定/TTL/吊销/角色 scope），通过后把公开授权域（scope + binding + expiry + 票据自身 epoch，**无 secret**）随可信 carrier 下发给 CLI；CLI prompt admission 绑定该域，工具准入在既有权限管线与附件矩阵之后按 scope 只收紧（过期/越界 deny）。无 ticketId 保持字节兼容；带票据命令强制真正起轮（忙时拒绝，不落队列，避免授权域脱离 turn）；edit/retry 的 idle 判定在 branch cut **之前**执行，忙时拒绝不截断历史，rewind 后的恢复分支也不再降级到会丢票据的 queue 路径。仍未接线：凭据注入（C2）——broker 在 Desktop main、执行在 CLI 进程且无控制面通道，结构不可达；scope 命中 credential 类工具时返回 typed `ticket.credential_injection_unimplemented` 并拒绝，不伪造注入。SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程亦未实现。因此开启该 flag 是 **execution gated by capabilityTicketId（C2 credential injection unimplemented）**；宿主启动会输出一条明确告警，运维不得按“凭据注入已生效”宣传。平台覆盖：web/mobile 的 `web-remote-replayable` relay 只转发 `Uint8Array` RPC 帧，secret 控制帧不可达，登记为 **secret delivery 未实现**——该形态不签发、不投递，并记录 typed `transport-unimplemented`。epoch 校验按票据自身快照判定，避免同一 broker 下其他 attachment 的吊销误伤未受影响的票据。**已知残留（本批如实登记）**：①吊销只在下一条命令 admission 生效——CLI 进程与 Desktop broker 无控制面通道，turn 运行中无法复核新 epoch，已绑定的授权域按 `expiresAt` TTL 收敛（在途长命令走既有取消/杀进程路径），不宣称“吊销即中止运行中 turn”；②客户端命令信封尚未接线——renderer 没有调用 `capabilityTickets.protocolFields()`，生产 UI 命令不携带 `capabilityTicketId`，因此该 flag 只对携带票据的命令 gate（当前没有生产客户端携带），宿主启动告警逐条列出这两条限制。
 
 ## 3. OS 级 egress 围栏
 
@@ -310,6 +310,8 @@ edge daemon / fence supervisor
 - P6-E4 围栏与 spec-lane dispatcher 接线：`createSpecRunDispatcher` 的 prepare/launch/stop 增加 fence prepare/teardown；失败上浮。
 - 配置：建议新 flag `features.specEgressFence`（缺省 false = 现状协作式代理；true = 必须硬围栏，建立失败即拒绝）。不得把 flag=false 说成“安全模式”；对外文案按两档如实描述。
 - 依赖：P6 围栏不依赖票据，但高敏感事件建议同时启用票据与设备矩阵。
+
+**2026-11-05 落地状态（如实登记，不夸大）**：E4 组合根接线已落地——`features.specEgressFence`（缺省 false，开启要求 `eventRouter=true`）经 `create-app` 注入围栏并交给 spec-run dispatcher；darwin 路径为 sandbox-exec profile，真跑验证放行端口可达、非放行端口被拒。**Linux 登记为 unimplemented（fail-closed）**：netns/veth/nftables 命令脚手架虽已存在，但建网需要 init user namespace 的 CAP_SYS_ADMIN/CAP_NET_ADMIN（通常等于 root），被围栏子进程与父进程同 UID/同 capabilities，可 `nft flush ruleset` 解除规则或 `nsenter -t 1 -n` 进入宿主 netns 出网，E1/E3 语义不成立；探测只验证建网权限、不验证 relay 可达与逃逸，因此平台矩阵将其标为 `unimplemented`，`probeCapability` 在 Linux 上恒返回 typed `fence.unsupported_platform`，启用围栏即拒绝启动，不再宣称内核级 egress 围栏。后续需先实现子进程降权隔离（专用无 CAP 用户或 user namespace + drop capabilities）并增加逃逸负向探测，才可重新评估启用。win32 保持 typed `unsupported`。
 
 ## 4. 落地顺序与依赖
 

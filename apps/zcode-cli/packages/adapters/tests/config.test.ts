@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ConfigKey } from "@zcode/contracts";
 import { createConfig, updateUiLocaleInFileConfig } from "../src/config/index.js";
 import { parseEnvConfig } from "../src/config/env-config.adapter.js";
 import {
@@ -412,6 +413,25 @@ describe("config adapters", () => {
       await writeFile(path, JSON.stringify({ features: { goalLayer: false } }));
       const overridden = createConfig({ env: {}, userConfigPath: path });
       expect(overridden.config.features.goalLayer).toBe(false);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  it("defaults features.specEgressFence to off, parses file override, and backfills ConfigPort", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zcode-config-spec-fence-"));
+    const path = join(dir, "config.json");
+
+    try {
+      const defaults = createConfig({ env: {}, skipUserConfig: true });
+      expect(defaults.config.features.specEgressFence).toBe(false);
+      expect(defaults.configPort.get(ConfigKey.FeatureSpecEgressFence)).toBe(false);
+
+      // schema 必须接受并回填该键（passthrough 不能替代 typed feature 字段）。
+      await writeFile(path, JSON.stringify({ features: { specEgressFence: true } }));
+      const overridden = createConfig({ env: {}, userConfigPath: path });
+      expect(overridden.config.features.specEgressFence).toBe(true);
+      expect(overridden.configPort.get(ConfigKey.FeatureSpecEgressFence)).toBe(true);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }

@@ -23,7 +23,11 @@ import {
  * 状态（不夸大）：本批只有类型/纯函数 + 宿主内存 broker + 客户端携带/兑换。凭据注入
  * （spec §2.5 C2）、SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程均
  * 未实现；broker 重启即全部票据失效（C7 由内存权威天然满足）。生产组合根默认关闭票据
- * （显式 feature flag + fail-closed），执行端 admission 尚未消费 capabilityTicketId。
+ * （显式 feature flag + fail-closed）。执行端 admission 已消费 capabilityTicketId：宿主入口
+ * 经 broker 校验后把公开授权域随可信 carrier 下发给 CLI，CLI prompt admission 在既有权限
+ * 管线之后按 scope 只收紧；credential 类工具返回 typed deny（C2 凭据注入未实现）。
+ * 已知残留：CLI 在 turn 内无宿主控制面通道复核吊销（吊销只在下一条命令 admission 生效）；
+ * renderer 命令信封尚未携带 ticketId；`revocationEpoch` 在 CLI 侧是签发快照，不参与判定。
  */
 
 /**

@@ -29,7 +29,11 @@ import {
 import { resolveSessionFallbackModelSelection } from "../input-admission.js";
 import { preemptActiveTurnAndWait } from "./session-flow.js";
 import { V4CommandNoopError } from "../../v4-gateway.js";
-import { commandAttachmentOf, commandExecutionContextOf } from "../executor.js";
+import {
+  commandAttachmentOf,
+  commandCapabilityTicketOf,
+  commandExecutionContextOf,
+} from "../executor.js";
 export { V4SessionIdleTimeoutError } from "./session-flow.js";
 
 /** sendQueuedNow 在投影里查不到该项原文（已被 drain/删除或 id 无效）→ 拒绝。 */
@@ -205,6 +209,9 @@ async function sendQueuedNow(
     originAttachment,
     currentAttachment,
   );
+  // P6：票据授权域只用于本次提升命令。带票据的 sendText 从不入队，因此入队来源
+  // 不会残留旧授权域；提升命令自带域时按其 scope 收紧本次 turn。
+  const capabilityTicketAdmission = commandCapabilityTicketOf(envelope);
   const reservationId = envelope.commandId;
   const autoDrainPromotion = commandExecutionContextOf(envelope)?.autoDrainPromotion === true;
   const foregroundPromotionLeaseId = `queue-promotion:${reservationId}`;
@@ -370,6 +377,9 @@ async function sendQueuedNow(
         ...(turnExecution ? { modelExecution: createModelExecutionContext(turnExecution) } : {}),
         ...(attachments ? { attachments } : {}),
         ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
+        ...(capabilityTicketAdmission
+          ? { capabilityTicket: capabilityTicketAdmission }
+          : {}),
       });
       // 旧 fake app/兼容命令可能不返回 admission receipt；真实 app 已在 Core admission
       // 处完成 started 校验。只有明确 queued/rejected 才能判定 promotion 未启动。

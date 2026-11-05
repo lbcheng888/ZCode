@@ -25,6 +25,10 @@ import {
   parseAttachmentRole,
 } from "@zcode/shared";
 import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
+import {
+  evaluateCapabilityTicketRestriction,
+  type CapabilityTicketAuthorization,
+} from "./capability-ticket.js";
 import { readEscapesWorkspace } from "./attachment-workspace.js";
 import { resolvePlanModeTransitionPermission } from "./plan-mode-policy.js";
 import { webFetchRuleSubjects, wildcardToRegExp } from "./rule-matching.js";
@@ -80,6 +84,11 @@ export interface TurnPermissionFacts {
    * CLI/TUI 保持 host 现状）。来源与角色由 Host 显式给出，不从命令内容推断。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6：本回合命令携带的能力票据授权域（宿主 broker 已校验，公开事实，无 secret）。
+   * 缺失 = 本命令未声明 ticket 语义（字节兼容）；在场则工具准入按 scope 只收紧。
+   */
+  capabilityTicket?: CapabilityTicketAuthorization;
 }
 
 export interface PermissionContext {
@@ -104,6 +113,11 @@ export interface PermissionContext {
    * read_mostly fail-closed，不能只看字段是否存在。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6：本命令携带的票据授权域（由 prompt admission 绑定）。在场 = 该命令声明了 ticket
+   * 语义，工具准入必须叠加 scope（只收紧）；缺席 = 旧路径，零行为变化。
+   */
+  capabilityTicket?: CapabilityTicketAuthorization;
 }
 
 export interface PermissionToolCapability {
@@ -222,7 +236,41 @@ export class PermissionService {
     // P6 §1.3：附件矩阵必须在既有有序管线的**最终结论**之后叠加，且只收紧
     // （deny > ask > allow）。这里包住整个管线而非逐个 return 改，保证 mandate/plan/
     // alwaysAsk/yolo allow 等所有早返回分支都经过同一层，不会出现「allow 早返回漏叠加」。
-    return this.applyAttachmentRestriction(permissionContext, toolCapability, decision);
+    // 票据 scope 同样叠加在最终结论之后，且只 deny：命令声明票据语义时，超出 scope 的
+    // 工具不能被既有 allow 规则或 yolo 模式重新放行。
+    return this.applyCapabilityTicketRestriction(
+      permissionContext,
+      toolCapability,
+      this.applyAttachmentRestriction(permissionContext, toolCapability, decision),
+    );
+  }
+
+  /**
+   * P6 能力票据 scope 叠加（spec §2.5 C1/C2）。见 capability-ticket.ts：
+   * 过期 / 越界 / credential 注入不可达全部 typed deny，绝不放宽既有结论。
+   */
+  private applyCapabilityTicketRestriction(
+    context: PermissionContext,
+    toolCapability: PermissionToolCapability | undefined,
+    decision: PermissionDecisionResult,
+  ): PermissionDecisionResult {
+    const authorization = context.capabilityTicket;
+    if (authorization === undefined) return decision;
+    const capability = this.resolveCapability(context, toolCapability);
+    const restriction = evaluateCapabilityTicketRestriction({
+      authorization,
+      toolName: context.toolName,
+      permissionGroup: capability.permissionCapabilityGroup,
+    });
+    if (restriction === undefined || decision.decision === "deny") return decision;
+    return {
+      ...decision,
+      decision: "deny",
+      allowed: false,
+      escalated: false,
+      ruleId: restriction.ruleId,
+      reason: restriction.reason,
+    };
   }
 
   /** M4：显式字段优先；缺省取 admission 绑定的回合事实（未绑定 = 保持现状）。 */
@@ -239,6 +287,9 @@ export class PermissionService {
         : {}),
       ...(context.attachment === undefined && bound.attachment !== undefined
         ? { attachment: bound.attachment }
+        : {}),
+      ...(context.capabilityTicket === undefined && bound.capabilityTicket !== undefined
+        ? { capabilityTicket: bound.capabilityTicket }
         : {}),
     };
   }

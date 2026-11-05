@@ -10,9 +10,14 @@ import {
   resolveSessionFallbackModelSelection,
 } from "../input-admission.js";
 import { inputIntentMetadataFromCanonical } from "../input-intent.js";
-import { preflightPromptTurn, startPreflightedPromptTurn } from "../prompt-turn.js";
+import {
+  preflightPromptTurn,
+  startPreflightedPromptTurn,
+  V4PromptRejectedError,
+} from "../prompt-turn.js";
 import { createModelExecutionContext } from "../../../session-execution/index.js";
-import { commandAttachmentOf } from "../executor.js";
+import type { CapabilityTicketAuthorization } from "../../capability-ticket-admission.js";
+import { commandAttachmentOf, commandCapabilityTicketOf } from "../executor.js";
 import type { V4CommandCoreHost, V4SessionRecordView, V4TurnExecution } from "../types.js";
 import { applyGoalCommand, assertHostAttachmentGoalControl } from "./goal-compact.js";
 import type { ConversationEditTarget } from "../../product-projection.js";
@@ -92,6 +97,30 @@ function buildCanonicalIntent(
   return intent;
 }
 
+/**
+ * P6：带票据的命令必须在真正起轮（requireIdle）后才能执行，且**不能**在 branch cut 之后
+ * 才发现会话忙——那会留下已截断的历史与丢失的替换输入（Core admission 的 requireIdle
+ * 拒绝是不可恢复的）。所以在任何 rewind 之前按同一 idle 判据提前拒绝。
+ *
+ * 这是 fail-closed 的 `activePrompt`，不是排队降级：票据授权域只属于本次命令，排队会
+ * 让它在提升边界脱离本 turn（见 prompt-turn.ts 的 V4CapabilityTicketQueueingUnsupportedError）。
+ */
+function assertCapabilityTicketIdleBeforeBranchCut(
+  record: V4SessionRecordView,
+  capabilityTicket: CapabilityTicketAuthorization | undefined,
+): void {
+  if (capabilityTicket === undefined) return;
+  const runtimeBusy =
+    record.app.runtime?.getActiveTurnInfo?.() !== undefined ||
+    record.app.runtime?.hasActiveOrQueuedTurnWork?.() === true;
+  if (record.activeAbortController || runtimeBusy) {
+    throw new V4PromptRejectedError(
+      "activePrompt",
+      "capability ticket commands must start a new idle turn; branch cut rejected before rewind",
+    );
+  }
+}
+
 /** destructive edit/retry 在提交 branch cut 前调用；只检查模型，不接纳输入。 */
 export async function preflightCanonicalIntent(
   host: V4CommandCoreHost,
@@ -102,7 +131,9 @@ export async function preflightCanonicalIntent(
   attachmentRefs: ReturnType<typeof stableAttachmentRefs>,
   attachments: Awaited<ReturnType<typeof mapAttachmentRefsToTurnAttachments>>,
   highspeed?: CanonicalHighspeed,
+  capabilityTicket?: CapabilityTicketAuthorization,
 ): Promise<void> {
+  assertCapabilityTicketIdleBeforeBranchCut(record, capabilityTicket);
   if (editTarget.intent.kind === "sendGoalCommand") return;
   const intent = buildCanonicalIntent(
     record,
@@ -136,8 +167,9 @@ export async function startCanonicalIntent(
 ): Promise<void> {
   const requireQueue = options?.requireQueue === true;
   const retainQueuedTurnExecution = host.retainQueuedTurnExecution;
-  // P6：重发输入同样按本次命令的连接复核附件角色（编辑/重试不能洗掉远端限制）。
+  // P6：重发输入同样按本次命令的连接复核附件角色与票据授权域（编辑/重试不能洗掉限制）。
   const attachmentAdmission = commandAttachmentOf(envelope);
+  const capabilityTicketAdmission = commandCapabilityTicketOf(envelope);
   // 入队路径的凭据只能驻留内存；宿主不提供暂存能力时必须整体退回会话模型，不留半程加速。
   const canRetainQueuedHighspeed =
     requireQueue && highspeed !== undefined && retainQueuedTurnExecution !== undefined;
@@ -180,6 +212,7 @@ export async function startCanonicalIntent(
           : {}),
       ...(attachments ? { attachments } : {}),
       ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
+      ...(capabilityTicketAdmission ? { capabilityTicket: capabilityTicketAdmission } : {}),
     });
     if (requireQueue && started.admission.kind !== "queued") {
       throw new Error("edited input was not admitted to the queue");

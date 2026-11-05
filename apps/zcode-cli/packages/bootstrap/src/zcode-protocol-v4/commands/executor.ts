@@ -9,6 +9,7 @@ import type {
   HostAttachmentAdmissionFacts,
 } from "@zcode/shared/zcode-protocol-v4";
 import { NATIVE_HANDLERS } from "./handlers/index.js";
+import type { CapabilityTicketAuthorization } from "../capability-ticket-admission.js";
 import type { V4CommandCoreHost } from "./types.js";
 
 const SELECTION_SIDE_CHAT_RESTRICTED_COMMANDS = new Set<CommandEnvelope["type"]>([
@@ -74,6 +75,11 @@ export interface V4CommandAdmission {
    * 缺失 = 无 attachment 语义，保持 host 现状。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6：本次命令的宿主 broker 已验证票据授权域（公开事实，无 secret）。
+   * 缺失 = 本命令未声明 ticketId（旧路径）；在场则本 turn 的工具准入按 scope 只收紧。
+   */
+  capabilityTicket?: CapabilityTicketAuthorization;
 }
 
 export interface V4CommandExecutionContext {
@@ -107,4 +113,11 @@ export function commandAttachmentOf(
   envelope: CommandEnvelope,
 ): HostAttachmentAdmissionFacts | undefined {
   return commandAdmissionOf(envelope).attachment;
+}
+
+/** 本次命令的票据授权域；所有会启动 turn 的 handler 必须原样传给 prompt admission。 */
+export function commandCapabilityTicketOf(
+  envelope: CommandEnvelope,
+): CapabilityTicketAuthorization | undefined {
+  return commandAdmissionOf(envelope).capabilityTicket;
 }

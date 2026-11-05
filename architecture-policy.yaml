@@ -1106,3 +1106,16 @@ exceptions:
     paths:
       - packages/shared/src/attachment-role.ts
     reason: P6 设备权限矩阵（super-agent-p6-capabilities-spec §1）的角色/矩阵契约与纯函数新增文件，位于未受管 shared 模块根目录；模块边界与既有导出形态不变，接管整个 shared 包不在本次范围内。enforcement 接线（core PermissionContext / v4 连接登记）另批实施，本例外不覆盖那边的新文件。
+  - id: p6-ticket-execution-admission-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/capability-ticket-admission.ts
+      - apps/zcode-cli/packages/core/src/permission/capability-ticket.ts
+    reason: P6 票据执行侧消费（super-agent-p6-capabilities-spec §2.5 C1）的可信 carrier 解析/闭环校验与工具准入叠加 helper；前者在 v4 gateway 同层，后者拆出以免 permission/service.ts 继续膨胀。两个未受管 legacy 模块内逐文件准入，不移动既有模块边界，接管整个 zcode-cli 包不在本次范围内。
+  - id: chengcode-brand-post-fork-files-unmanaged-edit
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/cli/src/tui-prompt-handler-runtime.ts
+      - packages/desktop/src/main/windowsCuaOperationIndicatorContent.ts
+      - packages/ui/src/v4/officeSuggestedPrompts.ts
+    reason: 这三个文件是 fork 之后上游 v3.15.1 引入的既有文件，本次仅把其中用户可见的 ZCode 品牌文案改为 ChengCode（品牌迁移，不改模块边界、不新增依赖、不移动文件）；architecture 以 merge-base 判定为 new，沿用本表逐文件准入先例。

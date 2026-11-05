@@ -107,6 +107,7 @@ import type {
 import type { ModelProviderSourceTitle } from "../model-config.js";
 import type { ZCodeInstalledPluginData } from "../plugins.js";
 import type { SessionTranscriptMessage } from "../session-transcript.js";
+import type { SpecFenceContract } from "../super-agent/spec-lane/index.js";
 import type { NodeReplBrowserBroker } from "./node-repl-browser-broker.js";
 import type { ProviderRegistryModelSource } from "./provider-registry-model-runtime.js";
 import type {
@@ -230,6 +231,11 @@ export interface ZCodeAppOptions {
    * （kill-switch 只认 flag=false，不静默回 legacy 直路）；flag 关闭时本字段被忽略。
    */
   superAgent?: SuperAgentHostPorts;
+  /**
+   * P6 OS 围栏构造器（features.specEgressFence=true 时使用；缺省 createSpecFence）。
+   * 仅供组合根/嵌入宿主替换实现，flag=false 时不调用。
+   */
+  specFenceFactory?: () => SpecFenceContract;
 }
 
 export interface SubmitPromptOptionsBase {

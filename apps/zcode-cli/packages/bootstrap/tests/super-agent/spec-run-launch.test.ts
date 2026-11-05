@@ -337,6 +337,7 @@ describe("M5 launch 适配器的围栏接线（request.fence → 执行端口改
       runId: "r-fence",
       mechanism: "darwin-sandbox-exec",
       broker: { host: "127.0.0.1", port: 1 },
+      childBroker: { host: "127.0.0.1", port: 1 },
       wrapExecutionRequest: (request) => {
         wrappedRequests.push(request);
         return { ...request, command: { mode: "argv", file: "fenced-bin" } };

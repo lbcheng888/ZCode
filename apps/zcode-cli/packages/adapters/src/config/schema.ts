@@ -43,6 +43,8 @@ const featuresSchema = z.object({
   mandateGate: z.boolean().optional(),
   specWriteLease: z.boolean().optional(),
   durableSchedulerDispatch: z.boolean().optional(),
+  // P6 OS 级 egress 围栏（spec §3.6）：缺省 false = 协作式 env 代理。
+  specEgressFence: z.boolean().optional(),
 });
 
 const memorySchema = z.object({

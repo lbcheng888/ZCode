@@ -1,9 +1,18 @@
 /* eslint-disable max-lines -- 三类 V4 topic 的同构 connection ownership 生命周期集中在单一 facade。 */
 // V4 connection-scoped service facade：每个 RPC attachment 独立持有 subscription
 // ownership；base service 仍只转发 CLI 事实，不在 host/main/relay 复制业务状态。
+import { z } from "zod";
 import { Emitter, Event as RpcEvent, type Event, type IDisposable } from "@zcode/rpc";
 import {
+  capabilityTicketBindingSchema,
+  capabilityTicketIdSchema,
+  capabilityTicketScopeSchema,
+  type CapabilityTicketBinding,
+  type CapabilityTicketFailureCode,
+} from "@zcode/shared";
+import {
   V4_WIRE_PROTOCOL_VERSION,
+  TRUSTED_V4_CONNECTION_FIELD,
   clientHelloSchema,
   clientSupportsWorkflowRunDeltas,
   conversationTopic,
@@ -27,6 +36,58 @@ import type {
 
 export type ZCodeAgentV4ClientMode = "desktop-continuous" | "web-remote-replayable";
 
+/**
+ * P6 能力票据的**已验证授权域**（spec §2.3/§2.5 C2 前置）。
+ *
+ * 由宿主 broker 在命令入口校验（存在性/绑定/TTL/吊销/scope）后产生，随可信连接
+ * carrier 下发给 CLI 执行端。**不含 secret**：secret 只存在于 broker 与 attachment
+ * 受控通道，绝不进入协议帧、carrier、日志或模型上下文。
+ */
+export const zCodeAgentCapabilityTicketAuthorizationSchema = z
+  .object({
+    ticketId: capabilityTicketIdSchema,
+    binding: capabilityTicketBindingSchema,
+    scope: capabilityTicketScopeSchema,
+    expiresAt: z.number().int().nonnegative(),
+    /** 该票据自身的吊销 epoch 快照（公开，无 secret）。 */
+    revocationEpoch: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ZCodeAgentCapabilityTicketAuthorization = z.infer<
+  typeof zCodeAgentCapabilityTicketAuthorizationSchema
+>;
+
+/**
+ * 宿主侧票据授权校验端口（Desktop 组合根用真实 broker 实现）。
+ *
+ * 只做 admission 校验，不兑换/不消费：单次票据的实际消费发生在执行端凭据注入
+ * （C2，本仓结构不可达，按 typed unimplemented 拒绝，见 core permission）。
+ */
+export interface ZCodeAgentCapabilityTicketAuthority {
+  admit(input: {
+    ticketId: string;
+    connectionId: string;
+  }):
+    | { ok: true; authorization: ZCodeAgentCapabilityTicketAuthorization }
+    | { ok: false; code: CapabilityTicketFailureCode };
+}
+
+/** 宿主校验失败必须拒绝整条命令（fail-closed），不得静默退回无票据路径。 */
+export class CapabilityTicketCommandRejectedError extends Error {
+  readonly code: CapabilityTicketFailureCode;
+
+  constructor(code: CapabilityTicketFailureCode) {
+    super(`fault.command.capabilityTicketRejected: ${code}`);
+    this.name = "CapabilityTicketCommandRejectedError";
+    this.code = code;
+  }
+}
+
+export interface ZCodeAgentConnectionScopeOptions {
+  /** 缺省 = 该连接不接受/校验票据；带 capabilityTicketId 的命令会被拒绝。 */
+  capabilityTicket?: ZCodeAgentCapabilityTicketAuthority;
+}
+
 export interface ZCodeAgentV4ConnectionContext {
   connectionId: string;
   clientMode: ZCodeAgentV4ClientMode;
@@ -43,9 +104,14 @@ export interface ZCodeAgentV4ConnectionContext {
    * 一律被清理后覆盖。角色每次由 Host 现取（getter），因此 setRole/吊销在下一命令生效。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6 能力票据授权域（公开事实，无 secret）。只随**携带 capabilityTicketId 的单条命令**
+   * 下发；不是连接级授权，不能跨命令复用。
+   */
+  capabilityTicket?: ZCodeAgentCapabilityTicketAuthorization;
 }
 
-const TRUSTED_CONNECTION_FIELD = "__zcodeTrustedV4Connection";
+const TRUSTED_CONNECTION_FIELD = TRUSTED_V4_CONNECTION_FIELD;
 const TRUSTED_UNSUBSCRIBE_ROUTE_FIELD = "__zcodeTrustedV4UnsubscribeRoute";
 
 type TrustedConnectionCarrier = {
@@ -96,6 +162,14 @@ export function readTrustedZCodeAgentV4Connection(
     const parsed = hostAttachmentAdmissionSchema.safeParse(rawAttachment);
     attachment = parsed.success ? parsed.data : { source: "remote" };
   }
+  // 票据授权域只接受宿主写入的合法结构；解析失败即丢弃（下游若仍声明 ticketId，
+  // CLI admission 会按授权域缺失 fail-closed，绝不落到无票据路径）。
+  const rawTicket = context.capabilityTicket;
+  const parsedTicket =
+    rawTicket === undefined
+      ? undefined
+      : zCodeAgentCapabilityTicketAuthorizationSchema.safeParse(rawTicket);
+  const capabilityTicket = parsedTicket?.success ? parsedTicket.data : undefined;
   return {
     connectionId: context.connectionId,
     clientMode: context.clientMode,
@@ -103,6 +177,7 @@ export function readTrustedZCodeAgentV4Connection(
     ...(context.workflowRunDeltas === true ? { workflowRunDeltas: true } : {}),
     ...(context.historyFirst === true ? { historyFirst: true } : {}),
     ...(attachment !== undefined ? { attachment } : {}),
+    ...(capabilityTicket !== undefined ? { capabilityTicket } : {}),
   };
 }
 
@@ -125,6 +200,9 @@ function withTrustedConnection<T extends object>(
   delete forwarded["historyFirst"];
   // P6：附件事实只能来自 Host 连接元数据，调用方传入的同名键一律丢弃。
   delete forwarded["attachment"];
+  // 票据授权域同理：只能由本 facade 在命令入口经宿主 broker 校验后写入；
+  // 调用方（renderer/mobile）自带的同名字段一律丢弃。
+  delete forwarded["capabilityTicket"];
   forwarded[TRUSTED_CONNECTION_FIELD] = context;
   return forwarded as T;
 }
@@ -278,6 +356,7 @@ export interface ZCodeAgentConnectionScope {
 export function createZCodeAgentConnectionScope(
   base: IZCodeAgentService,
   context: ZCodeAgentV4ConnectionContext,
+  options: ZCodeAgentConnectionScopeOptions = {},
 ): ZCodeAgentConnectionScope {
   assertConnectionId(context.connectionId);
   const role = context.role ?? "terminal-client";
@@ -315,6 +394,10 @@ export function createZCodeAgentConnectionScope(
         ...(downstream.historyFirst === true ? { historyFirst: true } : {}),
         // 附件角色同理属于下游那一端的宿主连接记录。
         ...(downstream.attachment !== undefined ? { attachment: downstream.attachment } : {}),
+        // 票据授权域只由下游宿主 broker 校验过才可能出现；relay 透传，不自行签发。
+        ...(downstream.capabilityTicket !== undefined
+          ? { capabilityTicket: downstream.capabilityTicket }
+          : {}),
       };
     }
     return {
@@ -761,8 +844,39 @@ export function createZCodeAgentConnectionScope(
       // command 过去只校验 envelope.clientId，却没有像订阅、附件一样注入
       // host 真值，导致 mobile 可伪造顶层 clientMode，且 relay 下游身份在 command 链路丢失。
       // envelope 仍原样透传；可信连接上下文只通过 host 内部 carrier 传给 base service。
+      //
+      // P6：带 capabilityTicketId 的命令先在宿主入口经 broker 校验（绑定/TTL/吊销/scope），
+      // 通过后把「已验证授权域」随 carrier 下发；失败或无校验端口一律拒绝（fail-closed），
+      // 不做“无票据继续执行”的降级。无 ticketId 的旧命令路径字节兼容。
+      const declaredTicketId = params.envelope.capabilityTicketId;
+      let commandConnection = forwardedConnection(params);
+      if (declaredTicketId !== undefined) {
+        const authority = options.capabilityTicket;
+        if (authority !== undefined) {
+          const admitted = authority.admit({
+            ticketId: declaredTicketId,
+            connectionId: commandConnection.connectionId,
+          });
+          if (!admitted.ok) throw new CapabilityTicketCommandRejectedError(admitted.code);
+          // broker 的授权域必须对应本命令声明的票据，不许被错配到别的句柄。
+          if (admitted.authorization.ticketId !== declaredTicketId) {
+            throw new CapabilityTicketCommandRejectedError("ticket.binding_mismatch");
+          }
+          commandConnection = {
+            ...commandConnection,
+            capabilityTicket: admitted.authorization,
+          };
+        } else if (
+          commandConnection.capabilityTicket !== undefined &&
+          commandConnection.capabilityTicket.ticketId === declaredTicketId
+        ) {
+          // relay 场景：上游宿主 broker 已完成校验，授权域随下游可信连接透传。
+        } else {
+          throw new CapabilityTicketCommandRejectedError("ticket.broker_unavailable");
+        }
+      }
       return base.sendConversationCommandV4(
-        withTrustedConnection(params, forwardedConnection(params)),
+        withTrustedConnection(params, commandConnection),
       );
     },
     async queryConversationCommandsV4(params) {

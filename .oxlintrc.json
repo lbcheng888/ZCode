@@ -39,6 +39,9 @@
         "src/runtime/methods/turn.ts",
         "src/runtime/methods/turn-model-step.ts",
         "src/tool/executor/background-tasks.ts",
+        // P6 能力票据：既有权限管线在同一前端门叠加票据 scope（只 deny），
+        // 新增入口与 typed 拒绝把文件推过 800 行；不为行数机械拆权限判定链。
+        "src/permission/service.ts",
         "**/packages/ui/src/remote-connection-flow/index.ts"
       ],
       "rules": {

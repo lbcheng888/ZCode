@@ -90,6 +90,8 @@
 - 验证：根 typecheck、architecture 0、CLI lint 0 errors；累计 47 提交
 
 ## 已知接缝（登记、非阻塞）
+- 能力票据吊销只在下一条命令 admission 生效（CLI turn 内无宿主控制面通道复核 epoch；`revocationEpoch` 只是签发快照）
+- 能力票据客户端信封接线（renderer 未调用 `capabilityTickets.protocolFields()`，生产 UI 命令不携带 `capabilityTicketId`；flag 仅 gate 携带票据的命令）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
 - PromptAdmissionOptions.mandateFacts 接缝

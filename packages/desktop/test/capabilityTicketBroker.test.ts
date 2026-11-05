@@ -579,4 +579,97 @@ describe("capability ticket broker", () => {
     });
     expect(publicPayload).not.toContain("secret-1");
   });
+
+  it("admit 校验绑定/角色/TTL/吊销，返回公开授权域且不消费票据", () => {
+    const clock = createClock();
+    let sequence = 0;
+    const broker = createCapabilityTicketBroker({
+      now: clock.now,
+      createTicketId: () => `ticket-${++sequence}`,
+      createSecret: () => `secret-${sequence}`,
+    });
+    const issued = broker.issue({
+      binding: BINDING,
+      scope: { toolClasses: ["read"] },
+      role: "read_mostly",
+      mode: "single_use",
+    });
+    const admitRequest = {
+      ticketId: issued.ticket.ticketId,
+      binding: BINDING,
+      role: "read_mostly" as const,
+    };
+
+    const admitted = broker.admit(admitRequest);
+    expect(admitted).toMatchObject({
+      ok: true,
+      authorization: {
+        ticketId: "ticket-1",
+        scope: { toolClasses: ["read"] },
+        expiresAt: issued.ticket.expiresAt,
+        revocationEpoch: 0,
+      },
+    });
+    expect(JSON.stringify(admitted)).not.toContain("secret-1");
+    // admission 不消费：票据仍可兑换一次。
+    expect(broker.status("ticket-1")?.state).toBe("issued");
+    expect(broker.admit({ ...admitRequest, ticketId: "missing" })).toMatchObject({
+      ok: false,
+      code: "ticket.unknown",
+    });
+    expect(
+      broker.admit({
+        ...admitRequest,
+        binding: { ...BINDING, attachmentId: "other" },
+      }),
+    ).toMatchObject({ ok: false, code: "ticket.binding_mismatch" });
+    // 角色缺失（已 detach/吊销）不是 host，直接拒绝。
+    expect(broker.admit({ ...admitRequest, role: undefined })).toMatchObject({
+      ok: false,
+      code: "ticket.revoked",
+    });
+    expect(
+      broker.redeem({
+        ticketId: issued.ticket.ticketId,
+        ticketSecret: issued.ticketSecret,
+        binding: BINDING,
+        action: { toolName: "Read" },
+        nonce: "n1",
+        seq: 1,
+        revocationEpoch: 0,
+      }),
+    ).toMatchObject({ ok: true });
+    // single_use 兑换后 admission 不可再用（旧授权域不能续命）。
+    expect(broker.admit(admitRequest)).toMatchObject({ ok: false, code: "ticket.replayed" });
+
+    const expiring = broker.issue({
+      binding: { ...BINDING, attachmentId: "attachment-exp" },
+      scope: { toolClasses: ["read"] },
+      role: "read_mostly",
+      mode: "sequential",
+    });
+    clock.advance(expiring.ticket.expiresAt - clock.now() + 1);
+    expect(
+      broker.admit({
+        ticketId: expiring.ticket.ticketId,
+        binding: { ...BINDING, attachmentId: "attachment-exp" },
+        role: "read_mostly",
+      }),
+    ).toMatchObject({ ok: false, code: "ticket.expired" });
+
+    const revocable = broker.issue({
+      binding: { ...BINDING, attachmentId: "attachment-rev" },
+      scope: { toolClasses: ["read"] },
+      role: "read_mostly",
+      mode: "sequential",
+    });
+    broker.revoke(revocable.ticket.ticketId);
+    expect(
+      broker.admit({
+        ticketId: revocable.ticket.ticketId,
+        binding: { ...BINDING, attachmentId: "attachment-rev" },
+        role: "read_mostly",
+      }),
+    ).toMatchObject({ ok: false, code: "ticket.revoked" });
+  });
 });

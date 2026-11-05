@@ -41,6 +41,7 @@ export const ConfigKey = {
   FeatureMandateGate: "features.mandateGate",
   FeatureSpecWriteLease: "features.specWriteLease",
   FeatureDurableSchedulerDispatch: "features.durableSchedulerDispatch",
+  FeatureSpecEgressFence: "features.specEgressFence",
 
   // Memory
   MemoryUse: "memory.use",
@@ -112,6 +113,7 @@ export type ConfigValue<K extends ConfigKey> = K extends "modelStream.idleTimeou
                   | "features.mandateGate"
                   | "features.specWriteLease"
                   | "features.durableSchedulerDispatch"
+                  | "features.specEgressFence"
                 ? boolean | undefined
                 : K extends
                       | "features.compact"
@@ -245,6 +247,9 @@ export interface RuntimeConfig {
     mandateGate?: boolean;
     specWriteLease?: boolean;
     durableSchedulerDispatch?: boolean;
+    // P6 OS 级 egress 围栏（spec §3.6）：缺省 false = 现状协作式 env 代理；
+    // true = spec run 必须建立硬围栏，不可用即拒绝启动（绝不回退协作式代理）。
+    specEgressFence?: boolean;
   };
   memory: {
     use: boolean;
@@ -341,6 +346,8 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     mandateGate: false,
     specWriteLease: false,
     durableSchedulerDispatch: false,
+    // P6 围栏缺省关：保持协作式 env 代理的现有字节行为；开启后建立失败即拒绝启动。
+    specEgressFence: false,
   },
   memory: {
     use: true,

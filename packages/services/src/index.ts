@@ -149,11 +149,15 @@ export {
   ZCodeAgentMcpStatusModeUnsupportedError,
 } from "./zcode-agent/zcodeAgentErrors.js";
 export {
+  CapabilityTicketCommandRejectedError,
   createZCodeAgentConnectionScope,
   readTrustedZCodeAgentV4Connection,
 } from "./zcode-agent/zcodeAgentConnectionScope.js";
 export type {
+  ZCodeAgentCapabilityTicketAuthority,
+  ZCodeAgentCapabilityTicketAuthorization,
   ZCodeAgentConnectionScope,
+  ZCodeAgentConnectionScopeOptions,
   ZCodeAgentV4ClientMode,
   ZCodeAgentV4ConnectionContext,
 } from "./zcode-agent/zcodeAgentConnectionScope.js";

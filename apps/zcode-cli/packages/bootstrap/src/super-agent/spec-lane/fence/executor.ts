@@ -11,18 +11,10 @@
  * fence.residual_conflict；死 pid / 无 owner 且超过乐观等待窗的目录回收计数。
  */
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import {
-  access,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { access, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -32,6 +24,7 @@ import {
   FenceStartupError,
   fencePlatformMatrixEntry,
   type FenceCapability,
+  type FenceChildBroker,
   type FenceErrorCode,
   type FenceRunStatus,
   type PrepareFenceRequest,
@@ -39,17 +32,33 @@ import {
   type SpecFenceHandle,
 } from "./contract.js";
 import {
+  DEFAULT_IP_PATH,
+  DEFAULT_NFT_PATH,
   DEFAULT_POSIX_SHELL_PATH,
   DEFAULT_SANDBOX_EXEC_PATH,
-  DEFAULT_UNSHARE_PATH,
   buildDarwinFenceProfile,
   buildFencedExecutionCommand,
   buildFenceCommandPlan,
+  buildLinuxFenceNetworkSetupCommands,
   buildLinuxFenceRuleset,
+  buildLinuxFenceRulesetCommand,
   type DarwinFenceCommandPlan,
   type FenceCommandPlan,
   type LinuxFenceCommandPlan,
 } from "./command-plan.js";
+import {
+  cleanupLinuxNetwork,
+  execNetworkCommand,
+  execNetworkCommands,
+  startBrokerRelay,
+  type BrokerRelayHandle,
+} from "./linux-network.js";
+import {
+  createFenceTempDir,
+  forgetFenceTempDir,
+  releaseFenceTempDir,
+  sweepResidualFences,
+} from "./residual.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -58,37 +67,30 @@ const PROBE_BROKER_PORT = 65535;
 const PROBE_TIMEOUT_MS = 10_000;
 /** 探测进程的临时目录 owner 标记（不是真实 run）。 */
 const PROBE_RUN_ID = "__probe__";
-const FENCE_DIR_PREFIX = "zcode-spec-fence-";
-const FENCE_OWNER_FILE = "owner.json";
-/**
- * 无 owner.json 的目录可能正处于 mkdtemp 与写 owner 之间的极窄窗口（跨进程），
- * 在此窗口内不回收，避免误删并发 run 的配置。
- */
-const RESIDUAL_OWNERLESS_GRACE_MS = 60_000;
 /** sandbox-exec 语义探测：连接被拒绝时脚本的退出码。 */
 const PROBE_CONNECT_DENIED_EXIT = 42;
 
-interface FenceOwnerRecord {
-  runId: string;
-  pid: number;
-  startedAt: number;
+/** Linux 网络计划默认熵（每次调用独立随机，避免 namespace/地址冲突）。 */
+function defaultLinuxEntropy(): Uint8Array {
+  return randomBytes(8);
 }
 
 interface ActiveFenceRecord extends FenceRunStatus {
   dir: string;
 }
 
-/** 本进程内活跃的围栏（status 只读面 + sweep 不误删）。 */
+/** 本进程内活跃的围栏（status 只读面）。 */
 const activeFences = new Map<string, ActiveFenceRecord>();
-/** 本进程内活跃的临时目录（含并发 probe 目录）。 */
-const activeFenceDirs = new Set<string>();
 
 export interface CreateSpecFenceOptions {
   /** 缺省 process.platform；测试可显式指定。 */
   platform?: NodeJS.Platform;
   shellPath?: string;
-  unsharePath?: string;
+  ipPath?: string;
+  nftPath?: string;
   sandboxExecPath?: string;
+  /** 网络计划熵（测试注入固定值）；缺省随机 8 字节。 */
+  linuxNetworkEntropy?: () => Uint8Array;
   /** 启动对账回收残留后的可观测钩子（计数）；钩子抛错按启动失败处理（fail-loud）。 */
   onResidualSwept?: (result: { removed: number }) => void;
 }
@@ -129,144 +131,6 @@ async function fileExecutable(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM = 进程存在但无权发信号；其余（ESRCH 等）= 已退出。
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-async function readFenceOwner(dir: string): Promise<FenceOwnerRecord | undefined> {
-  try {
-    const parsed = JSON.parse(
-      await readFile(join(dir, FENCE_OWNER_FILE), "utf8"),
-    ) as Partial<FenceOwnerRecord>;
-    if (
-      typeof parsed.runId !== "string" ||
-      typeof parsed.pid !== "number" ||
-      !Number.isFinite(parsed.pid)
-    ) {
-      return undefined;
-    }
-    return {
-      runId: parsed.runId,
-      pid: parsed.pid,
-      startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : 0,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-async function directoryAgeMs(dir: string): Promise<number | undefined> {
-  try {
-    const stats = await stat(dir);
-    return Date.now() - stats.mtimeMs;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * 创建受管临时目录并写入 owner.json。任何一步失败都向调用方上抛原始错误，
- * 由 prepare/probe 边界收敛成 typed FenceStartupError / unavailable。
- */
-async function createFenceTempDir(runId: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), FENCE_DIR_PREFIX));
-  activeFenceDirs.add(dir);
-  try {
-    const owner: FenceOwnerRecord = { runId, pid: process.pid, startedAt: Date.now() };
-    await writeFile(join(dir, FENCE_OWNER_FILE), JSON.stringify(owner), "utf8");
-    return dir;
-  } catch (error) {
-    activeFenceDirs.delete(dir);
-    await rm(dir, { force: true, recursive: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-/** 释放临时目录；返回清理失败细节（不把清理失败变成未捕获的 raw Error）。 */
-async function releaseFenceTempDir(dir: string): Promise<string | undefined> {
-  activeFenceDirs.delete(dir);
-  try {
-    await rm(dir, { force: true, recursive: true });
-    return undefined;
-  } catch (error) {
-    return errorDetail(error);
-  }
-}
-
-/**
- * 启动期残留对账（spec §3.4/§3.5 E7）：回收死进程留下的围栏目录。
- * 存活的其他 run 不误删；同 runId 存活 = 冲突，直接拒绝启动。
- */
-async function sweepResidualFences(
-  platform: NodeJS.Platform,
-  currentRunId: string,
-): Promise<{ removed: number }> {
-  let entries;
-  try {
-    entries = await readdir(tmpdir(), { withFileTypes: true });
-  } catch (error) {
-    throw new FenceStartupError(
-      "fence.startup_failed",
-      platform,
-      `无法枚举围栏临时目录，残留状态不确定: ${errorDetail(error)}`,
-      { cause: error },
-    );
-  }
-
-  let removed = 0;
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith(FENCE_DIR_PREFIX)) continue;
-    const dir = join(tmpdir(), entry.name);
-    if (activeFenceDirs.has(dir)) continue;
-
-    const owner = await readFenceOwner(dir);
-    if (owner) {
-      if (owner.pid === process.pid) {
-        // 同进程（可能另一 worker/模块实例）无法安全判定是否活跃：保留。
-        // 进程被 kill -9 后重启时 pid 不同，死进程残留由下面的存活检查回收。
-        continue;
-      }
-      if (isProcessAlive(owner.pid)) {
-        if (owner.runId === currentRunId) {
-          throw new FenceStartupError(
-            "fence.residual_conflict",
-            platform,
-            `runId ${currentRunId} 仍被存活进程 ${owner.pid} 持有围栏`,
-          );
-        }
-        // 其他 run 正在使用，保留。
-        continue;
-      }
-    }
-    if (!owner) {
-      const age = await directoryAgeMs(dir);
-      if (age !== undefined && age < RESIDUAL_OWNERLESS_GRACE_MS) {
-        // 可能是并发进程刚 mkdtemp 还没写 owner，先不回收。
-        continue;
-      }
-    }
-    try {
-      await rm(dir, { force: true, recursive: true });
-      removed += 1;
-    } catch (error) {
-      throw new FenceStartupError(
-        "fence.startup_failed",
-        platform,
-        `残留围栏目录清理失败（${dir}）: ${errorDetail(error)}`,
-        { cause: error },
-      );
-    }
-  }
-  return { removed };
 }
 
 interface ProbeServer {
@@ -402,73 +266,23 @@ async function verifyDarwinFenceSemantics(input: {
   }
 }
 
+/**
+ * Linux 围栏在子进程降权隔离落地前一律不可用（平台矩阵 status=unimplemented）。
+ *
+ * 只验证「netns/veth/nftables 能建」不构成安全证据：建网需要 init user namespace 的
+ * CAP_SYS_ADMIN/CAP_NET_ADMIN，被围栏子进程与父进程同 UID/同 capabilities，可直接
+ * `nft flush ruleset` 或 `nsenter -t 1 -n` 进入宿主 netns 出网（E1/E3 不成立）。
+ * 因此这里绝不返回 available；命令脚手架保留供后续实现降权 + 逃逸负向验证。
+ */
 async function probeLinux(plan: LinuxFenceCommandPlan): Promise<FenceCapability> {
-  const platform: NodeJS.Platform = "linux";
-  if (!(await fileExecutable(plan.shellPath))) {
-    return {
-      available: false,
-      platform,
-      mechanism: plan.mechanism,
-      code: "fence.startup_failed",
-      detail: `围栏内 shell 不可执行: ${plan.shellPath}`,
-    };
-  }
-  let dir: string | undefined;
-  // fail-closed 缺省：探测未完成前一律按不可用。
-  let capability: FenceCapability = {
+  return {
     available: false,
-    platform,
+    platform: "linux",
     mechanism: plan.mechanism,
-    code: "fence.startup_failed",
-    detail: "Linux 围栏探测未完成",
+    code: "fence.unsupported_platform",
+    detail:
+      "Linux netns 围栏未启用：子进程与特权父进程同 UID/同 capabilities，可 nft flush 或进入宿主 netns；降权隔离与逃逸负向验证未实现（spec §3.3）",
   };
-  try {
-    dir = await createFenceTempDir(PROBE_RUN_ID);
-    const rulesetPath = join(dir, "ruleset.nft");
-    await writeFile(rulesetPath, buildLinuxFenceRuleset(PROBE_BROKER_PORT), "utf8");
-    // 真跑一次：unshare 建 netns → lo up → nft 载入默认拒绝规则 → /bin/true。
-    // 任一步失败（user namespace 被禁、无 CAP_NET_ADMIN、ip/nft 缺失）都算不可用。
-    await execFileAsync(
-      plan.unsharePath,
-      [
-        "--net",
-        "--map-root-user",
-        "--fork",
-        "--",
-        plan.shellPath,
-        "-c",
-        plan.setupScript,
-        "zcode-spec-fence",
-        rulesetPath,
-        "/bin/true",
-      ],
-      { timeout: PROBE_TIMEOUT_MS, encoding: "utf8" },
-    );
-    capability = {
-      available: true,
-      platform,
-      mechanism: plan.mechanism,
-      detail:
-        "unshare --net + nftables 探测通过（当前仅零 egress：宿主 127.0.0.1 上的 broker 跨新 netns 不可达，allowHosts 非空会被拒绝）",
-    };
-  } catch (error) {
-    const failure = classifyFailure(error);
-    capability = {
-      available: false,
-      platform,
-      mechanism: plan.mechanism,
-      code: failure.code,
-      detail: `unshare --net/nftables 探测失败: ${failure.detail}`,
-    };
-  } finally {
-    if (dir) {
-      const cleanupFailure = await releaseFenceTempDir(dir);
-      if (cleanupFailure) {
-        capability.detail = `${capability.detail}；探测残留清理失败: ${cleanupFailure}`;
-      }
-    }
-  }
-  return capability;
 }
 
 async function probeDarwin(plan: DarwinFenceCommandPlan): Promise<FenceCapability> {
@@ -549,11 +363,13 @@ async function probeCapability(
   options: CreateSpecFenceOptions,
 ): Promise<FenceCapability> {
   const entry = fencePlatformMatrixEntry(platform);
-  if (entry.mechanism === "unsupported") {
+  // status 而非仅 mechanism 决定可用性：已有脚手架但语义不成立的平台（Linux）也必须
+  // 在矩阵层 fail-closed，避免仅改 mechanism 字段就意外启用。
+  if (entry.status !== "implemented" || entry.mechanism === "unsupported") {
     return {
       available: false,
       platform,
-      mechanism: "unsupported",
+      mechanism: entry.mechanism,
       code: "fence.unsupported_platform",
       detail: entry.notes,
     };
@@ -562,7 +378,10 @@ async function probeCapability(
     platform,
     broker: { host: "localhost", port: PROBE_BROKER_PORT },
     shellPath: options.shellPath ?? DEFAULT_POSIX_SHELL_PATH,
-    unsharePath: options.unsharePath ?? DEFAULT_UNSHARE_PATH,
+    ipPath: options.ipPath ?? DEFAULT_IP_PATH,
+    nftPath: options.nftPath ?? DEFAULT_NFT_PATH,
+    runId: PROBE_RUN_ID,
+    linuxEntropy: (options.linuxNetworkEntropy ?? defaultLinuxEntropy)(),
     sandboxExecPath: options.sandboxExecPath ?? DEFAULT_SANDBOX_EXEC_PATH,
   });
   if (plan.mechanism === "unsupported") {
@@ -582,17 +401,6 @@ async function prepareFence(
   options: CreateSpecFenceOptions,
   request: PrepareFenceRequest,
 ): Promise<SpecFenceHandle> {
-  const entry = fencePlatformMatrixEntry(platform);
-  // 配置级能力门先于探测：Linux netns 的 broker 跨 namespace 不可达，非空白名单
-  // 结构性无法满足（E5），必须在启动期 typed 拒绝，不能先 accept/启动再中途失败。
-  if (entry.egressScope === "zero-egress-only" && (request.allowHosts?.length ?? 0) > 0) {
-    throw new FenceStartupError(
-      "fence.unsupported_platform",
-      platform,
-      `该围栏机制只支持零 egress（${entry.egressScope}）：broker 跨围栏不可达，allowHosts 非空拒绝启动（无降级）`,
-    );
-  }
-
   const capability = await probeCapability(platform, options);
   if (!capability.available) {
     throw new FenceStartupError(capability.code, platform, capability.detail);
@@ -605,7 +413,10 @@ async function prepareFence(
       platform,
       broker: request.broker,
       shellPath: options.shellPath ?? DEFAULT_POSIX_SHELL_PATH,
-      unsharePath: options.unsharePath ?? DEFAULT_UNSHARE_PATH,
+      ipPath: options.ipPath ?? DEFAULT_IP_PATH,
+      nftPath: options.nftPath ?? DEFAULT_NFT_PATH,
+      runId: request.runId,
+      linuxEntropy: (options.linuxNetworkEntropy ?? defaultLinuxEntropy)(),
       sandboxExecPath: options.sandboxExecPath ?? DEFAULT_SANDBOX_EXEC_PATH,
     });
   } catch (error) {
@@ -628,7 +439,14 @@ async function prepareFence(
     );
   }
   try {
-    const swept = await sweepResidualFences(platform, request.runId);
+    const swept = await sweepResidualFences(platform, request.runId, async (owner) => {
+      if (!owner.linuxNetwork) return;
+      const detail = await cleanupLinuxNetwork(
+        owner.linuxNetwork,
+        owner.ipPath ?? DEFAULT_IP_PATH,
+      );
+      if (detail) throw new Error(`残留 netns/veth 清理失败: ${detail}`);
+    });
     options.onResidualSwept?.({ removed: swept.removed });
   } catch (error) {
     if (error instanceof FenceStartupError) throw error;
@@ -642,7 +460,12 @@ async function prepareFence(
 
   let dir: string;
   try {
-    dir = await createFenceTempDir(request.runId);
+    dir = await createFenceTempDir(
+      request.runId,
+      plan.platform === "linux"
+        ? { linuxNetwork: plan.network, ipPath: plan.ipPath }
+        : undefined,
+    );
   } catch (error) {
     throw new FenceStartupError(
       "fence.startup_failed",
@@ -652,15 +475,50 @@ async function prepareFence(
     );
   }
 
+  let relay: BrokerRelayHandle | undefined;
+  let linuxPlan: LinuxFenceCommandPlan | undefined;
+  let linuxNetworkCreated = false;
   try {
     if (plan.platform === "linux") {
+      linuxPlan = plan;
+      const network = plan.network;
+      await execNetworkCommands(
+        buildLinuxFenceNetworkSetupCommands(network, { ipPath: plan.ipPath }),
+      );
+      linuxNetworkCreated = true;
+      // relay 监听 veth 宿主地址，原始 TCP 转发到宿主 loopback egress 代理。
+      relay = await startBrokerRelay({
+        listenHost: network.hostAddress,
+        target: request.broker,
+        platform,
+      });
+      const childBroker: FenceChildBroker = {
+        host: network.hostAddress,
+        port: relay.port,
+      };
       const rulesetPath = join(dir, "ruleset.nft");
-      await writeFile(rulesetPath, plan.rulesetText, "utf8");
-      const handle = makeHandle(request, plan, dir, { rulesetPath });
+      await writeFile(
+        rulesetPath,
+        buildLinuxFenceRuleset({ network, broker: childBroker }),
+        "utf8",
+      );
+      await execNetworkCommand(
+        buildLinuxFenceRulesetCommand(network, rulesetPath, {
+          ipPath: plan.ipPath,
+          nftPath: plan.nftPath,
+        }),
+      );
+      const relayHandle = relay;
+      const handle = makeHandle(request, plan, dir, { rulesetPath }, childBroker, async () => {
+        await relayHandle.close();
+        const cleanupFailure = await cleanupLinuxNetwork(network, plan.ipPath);
+        if (cleanupFailure) throw new Error(`Linux 围栏网络清理失败: ${cleanupFailure}`);
+      });
       activeFences.set(request.runId, {
         runId: request.runId,
         mechanism: plan.mechanism,
         broker: request.broker,
+        childBroker,
         pid: process.pid,
         startedAt: new Date(),
         dir,
@@ -669,22 +527,43 @@ async function prepareFence(
     }
     const profilePath = join(dir, "profile.sb");
     await writeFile(profilePath, plan.profileText, "utf8");
-    const handle = makeHandle(request, plan, dir, { profilePath });
+    const childBroker: FenceChildBroker = {
+      host: request.broker.host,
+      port: request.broker.port,
+    };
+    const handle = makeHandle(request, plan, dir, { profilePath }, childBroker);
     activeFences.set(request.runId, {
       runId: request.runId,
       mechanism: plan.mechanism,
       broker: request.broker,
+      childBroker,
       pid: process.pid,
       startedAt: new Date(),
       dir,
     });
     return handle;
   } catch (error) {
+    // 失败原样上抛前先回收本 prepare 自己创建的资源（relay/netns/veth/目录）；
+    // 清理失败追加到消息里，不掩盖主错误。
+    let cleanupDetail: string | undefined;
+    if (relay) {
+      try {
+        await relay.close();
+      } catch (closeError) {
+        cleanupDetail = `broker relay 清理失败: ${errorDetail(closeError)}`;
+      }
+    }
+    if (linuxNetworkCreated && linuxPlan) {
+      const networkCleanup = await cleanupLinuxNetwork(linuxPlan.network, linuxPlan.ipPath);
+      if (networkCleanup) {
+        cleanupDetail = `${cleanupDetail ? `${cleanupDetail}；` : ""}netns/veth 清理失败: ${networkCleanup}`;
+      }
+    }
     await releaseFenceTempDir(dir);
     throw new FenceStartupError(
       "fence.startup_failed",
       platform,
-      `围栏临时配置落盘失败: ${errorDetail(error)}`,
+      `围栏准备失败: ${errorDetail(error)}${cleanupDetail ? `；清理: ${cleanupDetail}` : ""}`,
       { cause: error },
     );
   }
@@ -695,11 +574,14 @@ function makeHandle(
   plan: LinuxFenceCommandPlan | DarwinFenceCommandPlan,
   dir: string,
   artifacts: { rulesetPath?: string; profilePath?: string },
+  childBroker: FenceChildBroker,
+  teardownExtra?: () => Promise<void>,
 ): SpecFenceHandle {
   return {
     runId: request.runId,
     mechanism: plan.mechanism,
     broker: request.broker,
+    childBroker,
     wrapExecutionRequest(execution: ExecutionRequest): ExecutionRequest {
       return {
         ...execution,
@@ -712,14 +594,18 @@ function makeHandle(
         }),
       };
     },
-    // 幂等：rm force 对已清理目录是 no-op。清理失败原样上浮（保留原始错误链）；
-    // finally 从活跃表移除，后续 sweep 仍能回收这条残留。
+    // 幂等：rm force 对已清理目录是 no-op；Linux 的 netns/veth 删除遇已消失视为成功。
+    // 清理失败原样上浮（保留原始错误链）；finally 从活跃表移除，后续 sweep 仍能回收残留。
     async teardown(): Promise<void> {
       try {
-        await rm(dir, { force: true, recursive: true });
+        if (teardownExtra) await teardownExtra();
       } finally {
-        activeFenceDirs.delete(dir);
-        activeFences.delete(request.runId);
+        try {
+          await rm(dir, { force: true, recursive: true });
+        } finally {
+          forgetFenceTempDir(dir);
+          activeFences.delete(request.runId);
+        }
       }
     },
   };
@@ -741,6 +627,7 @@ export function createSpecFence(options: CreateSpecFenceOptions = {}): SpecFence
         runId: active.runId,
         mechanism: active.mechanism,
         broker: active.broker,
+        childBroker: active.childBroker,
         pid: active.pid,
         startedAt: active.startedAt,
       };

@@ -18,7 +18,7 @@ import {
 } from "@zcode/contracts";
 import { mapAttachmentRefsToTurnAttachments } from "../attachment-refs.js";
 import { V4PromptRejectedError } from "../prompt-turn.js";
-import { commandAdmissionOf } from "../executor.js";
+import { commandAdmissionOf, commandCapabilityTicketOf } from "../executor.js";
 import { hasPromptInput, V4InputAdmissionRejectedError } from "../input-admission.js";
 import { requireRecord } from "../record-access.js";
 import type { V4CommandCoreHost, V4SessionRecordView } from "../types.js";
@@ -170,6 +170,7 @@ async function editUserQuery(
     attachmentRefs,
     attachments,
     highspeedEdit,
+    commandCapabilityTicketOf(envelope),
   );
   const runtimeHasActiveTurn =
     record.app.runtime?.getActiveTurnInfo?.() !== undefined ||
@@ -255,6 +256,18 @@ async function editUserQuery(
       highspeedEdit,
     );
   } catch (error) {
+    if (commandCapabilityTicketOf(envelope) !== undefined) {
+      // P6：票据授权域只属于本次命令。恢复分支绝不能把重发降级为 queue——授权域
+      // 会在提升边界脱离本 turn（Core admitPrompt 对 ticket+queue/inject 直接 typed 拒绝）。
+      // preflight 已在 rewind 前按 idle 判据拦截常规忙态；这里只剩 admission 竞态窗口，
+      // 原样上浮（fail-closed），不掩盖、不排队。
+      host.logger?.warn?.("v4 editUserQuery ticket admission failed without queue fallback", {
+        reason: error instanceof Error ? error.message : String(error),
+        sessionId: record.app.sessionId,
+        targetRowId: payload.target.rowId,
+      });
+      throw error;
+    }
     if (
       editTarget.intent.kind === "sendText" &&
       error instanceof V4PromptRejectedError &&
@@ -336,6 +349,8 @@ async function retryTurn(
     resolution.editTarget.intent.text,
     attachmentRefs,
     attachments,
+    undefined,
+    commandCapabilityTicketOf(envelope),
   );
   // 从 assistant 就近回溯 user 会误选中途的合成提醒；使用已解析的原始输入边界。
   await submitConversationRewind(host, record, resolution.editTarget.transcriptMessageId);

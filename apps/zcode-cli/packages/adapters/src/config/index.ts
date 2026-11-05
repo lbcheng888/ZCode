@@ -136,6 +136,8 @@ class ConfigStore {
         this.set(ConfigKey.FeatureSpecWriteLease, config.features.specWriteLease, scope);
       if (config.features.durableSchedulerDispatch !== undefined)
         this.set(ConfigKey.FeatureDurableSchedulerDispatch, config.features.durableSchedulerDispatch, scope);
+      if (config.features.specEgressFence !== undefined)
+        this.set(ConfigKey.FeatureSpecEgressFence, config.features.specEgressFence, scope);
     }
     if (config.memory) {
       if (config.memory.use !== undefined) this.set(ConfigKey.MemoryUse, config.memory.use, scope);
@@ -304,6 +306,9 @@ export class ConfigPortImpl implements ConfigPort {
         durableSchedulerDispatch:
           this.store.get(ConfigKey.FeatureDurableSchedulerDispatch) ??
           DefaultConfig.features.durableSchedulerDispatch,
+        specEgressFence:
+          this.store.get(ConfigKey.FeatureSpecEgressFence) ??
+          DefaultConfig.features.specEgressFence,
       },
       memory: {
         use: this.store.get(ConfigKey.MemoryUse) ?? DefaultConfig.memory.use,
@@ -432,6 +437,8 @@ function getDefaultValue(key: ConfigKey): unknown {
       return defaults.features.specWriteLease;
     case ConfigKey.FeatureDurableSchedulerDispatch:
       return defaults.features.durableSchedulerDispatch;
+    case ConfigKey.FeatureSpecEgressFence:
+      return defaults.features.specEgressFence;
     case ConfigKey.MemoryUse:
       return defaults.memory.use;
     case ConfigKey.McpServers:

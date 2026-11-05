@@ -24,6 +24,20 @@ const EVENT_ADMISSION_MISSING_QUERY_ID =
 const EVENT_ADMISSION_MISSING_TRIGGER_ID =
   "事件回合 mandateFacts 缺少 triggerId：无法证明本回合的事件权威";
 
+/**
+ * P6：带能力票据的输入不能排队/注入/steer。票据授权域是**本次命令**的 admission
+ * 结论，排队会把它挂到未来提升的 turn 上，而提升边界不会重新拿到宿主 broker 的校验
+ * 结果（等价于执行无票据 turn）。Bootstrap 已在命令层拒绝，本层是 Core 的兜底不变量。
+ */
+export class CapabilityTicketAdmissionUnsupportedError extends Error {
+  readonly reasonCode = "ticket.admissionUnsupported";
+
+  constructor(detail: string) {
+    super(`capability ticket admission cannot be deferred: ${detail}`);
+    this.name = "CapabilityTicketAdmissionUnsupportedError";
+  }
+}
+
 // 触发来源枚举与 wire schema 同源（设计 §7 Upgrade / spec §2.2「三处合同同步」）：
 // 枚举定义在 shared command.ts 的 promptTriggerSourceSchema，本文件只再导出 + 提供
 // 信封→来源的唯一推导函数，禁止在 admission 侧另写字面量枚举。
@@ -55,6 +69,7 @@ function resolveAdmissionPermissionFacts(
 ): TurnPermissionFacts | undefined {
   const mandateFacts = options?.mandateFacts;
   const attachment = options?.attachment;
+  const capabilityTicket = options?.capabilityTicket;
   if (mandateFacts) {
     if (
       typeof mandateFacts.triggerId !== "string" ||
@@ -77,14 +92,20 @@ function resolveAdmissionPermissionFacts(
         expiresAt: mandateFacts.expiresAt ?? null,
       },
       ...(attachment ? { attachment } : {}),
+      ...(capabilityTicket ? { capabilityTicket } : {}),
     };
   }
   if (options?.triggerSource === "trigger") {
     throw new Error(EVENT_ADMISSION_MISSING_MANDATE_FACTS);
   }
-  // P6：user 回合也可携带宿主附件事实（远端 attachment 的普通输入）。无 mandate 时
-  // 只绑 attachment，不伪造 event-origin；本地无 attachment 时保持 undefined 字节兼容。
-  return attachment ? { attachment } : undefined;
+  // P6：user 回合也可携带宿主附件事实（远端 attachment 的普通输入）与票据授权域。
+  // 无 mandate 时不伪造 event-origin；两者都缺席时保持 undefined 字节兼容。
+  return attachment || capabilityTicket
+    ? {
+        ...(attachment ? { attachment } : {}),
+        ...(capabilityTicket ? { capabilityTicket } : {}),
+      }
+    : undefined;
 }
 
 /**
@@ -102,6 +123,15 @@ export async function admitPrompt(
   // 退回 user-origin）。真正绑定发生在起轮分支：只有真实回合才有不可复用的 turnId；
   // 排队/steer 不绑，避免把结论挂到客户端可复用的 queryId 上。
   const admissionPermission = resolveAdmissionPermissionFacts(options);
+  if (options?.capabilityTicket !== undefined) {
+    // 票据命令必须真正起轮：任何“把输入推迟到未来 turn/step”的车道都让授权域脱离
+    // 本次 admission。这里与 bootstrap 的 typed 拒绝同源，防止漏接的调用方静默排队。
+    if (options.requireQueue === true || options.queueDelivery === "inject") {
+      throw new CapabilityTicketAdmissionUnsupportedError(
+        options.requireQueue === true ? "requireQueue" : "queueDelivery=inject",
+      );
+    }
+  }
   // P6：附件事实在场时禁止 steer/inject/guide。这些车道把输入内联进**正在运行**的宿主
   // 回合，不建立新回合、不绑定附件事实，远端 read_mostly 就能借 guide 把指令送进 host
   // 回合执行（设备矩阵失效）。此时一律降级为 queue，提升边界再按入队时的来源事实复核。
@@ -170,7 +200,12 @@ export async function admitPrompt(
     });
   }
   if (busy) {
-    if (options?.requireIdle === true || options?.modelExecution !== undefined) {
+    // P6：票据命令只能起新的 idle turn；忙时拒绝而不是 steer 进运行中的宿主回合。
+    if (
+      options?.requireIdle === true ||
+      options?.modelExecution !== undefined ||
+      options?.capabilityTicket !== undefined
+    ) {
       return {
         activeTurnId: this.activeTurn?.turnId,
         kind: "rejected",

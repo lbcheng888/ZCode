@@ -5,6 +5,7 @@ import type {
   PromptTriggerSource,
 } from "@zcode/shared/zcode-protocol-v4";
 import type { PermissionMandateFacts } from "../permission/service.js";
+import type { CapabilityTicketAuthorization } from "../permission/capability-ticket.js";
 import type { GetAgentDefinitions, LoadAgentDefinitions } from "../subagent/definitions.js";
 import type { RuntimeInputPresentation, TurnExecutionModelFallbackReason } from "@zcode/contracts";
 /* eslint-disable max-lines -- Runtime 类型集中承载 core/runtime 对外结构，拆分需要单独迁移。 */
@@ -582,6 +583,11 @@ export type PromptAdmissionOptions = ExecuteTurnOptions & {
    * 该事实在本次 admission 边界绑定到回合，后续工具判定复用同一结论。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6：命令携带的能力票据授权域（宿主 broker 已校验，公开事实，无 secret）。
+   * 在场则本回合工具准入按 scope 只收紧；缺席 = 旧路径字节兼容。
+   */
+  capabilityTicket?: CapabilityTicketAuthorization;
 };
 
 export type PromptAdmissionReceipt =

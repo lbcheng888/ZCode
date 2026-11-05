@@ -58,6 +58,7 @@ import {
   IZCodeSessionService,
   ICuaPipSessionService,
   createZCodeAgentConnectionScope,
+  type ZCodeAgentCapabilityTicketAuthority,
   type ZCodeAgentV4ClientMode,
   collectServiceMemoryDiagnostics,
 } from "@zcode/services";
@@ -2586,6 +2587,7 @@ function exposeServicesOnMessagePort(
   attachmentScope: WindowHostAttachmentScope = { kind: "local" },
   capabilities?: HostRemoteConnectionCapabilities,
   hostAttachment?: HostAttachmentProjectionSource,
+  capabilityTicketAuthority?: ZCodeAgentCapabilityTicketAuthority,
 ): ExposedServicePortHandle {
   const wrappedPort = wrapElectronPort(port);
   const protocol = new MessagePortProtocol(wrappedPort);
@@ -2606,7 +2608,11 @@ function exposeServicesOnMessagePort(
     ...(hostAttachmentFacts ? { attachment: hostAttachmentFacts } : {}),
   };
   const connectionScope = agentService
-    ? createZCodeAgentConnectionScope(agentService, connectionContext)
+    ? createZCodeAgentConnectionScope(
+        agentService,
+        connectionContext,
+        capabilityTicketAuthority ? { capabilityTicket: capabilityTicketAuthority } : undefined,
+      )
     : undefined;
   services.register(IWindowControllerService, windowHostControllerRuntime.service);
   // 未读自动写入只归窗口 base renderer；手机和 remote facade 不能重复消费同一完成信号。
@@ -2734,8 +2740,11 @@ function exposeServicesOnMessagePort(
  * SQLite 或模型上下文。未启用时 registry 不签发、不挂监听、不出现任何 ticket 字段，
  * 既有路径 bit-exact。
  *
- * 仍缺（不在本 lane，如实登记）：CLI 执行端对 `capabilityTicketId` 的 admission 消费与
- * 凭据注入（spec §2.5 C2）未接线；ticketId 目前只是协议 additive 句柄，不构成执行授权。
+ * 执行端 admission 已接线：带 `capabilityTicketId` 的命令在宿主入口经 broker 校验后，
+ * 公开授权域（scope/binding/expiry/票据自身 epoch，无 secret）随可信 carrier 下发，CLI
+ * 工具准入只收紧。仍缺：凭据注入（spec §2.5 C2）未接线；turn 运行中 CLI 无宿主控制面
+ * 通道，吊销只在下一条命令 admission 生效；renderer 命令信封尚未携带 ticketId，
+ * 当前生产 UI 命令不被票据 gate（见启动告警）。
  * 平台覆盖：只有 desktop-continuous 的直连 renderer port 能投递控制帧；web/mobile 的
  * web-remote-replayable relay 只转发 Uint8Array，登记为 secret delivery 未实现，不签发并记
  * typed skip（见 windowHostAttachmentRegistry 的传输形态登记表）。
@@ -2767,10 +2776,14 @@ const hostCapabilityTickets: WindowHostCapabilityTickets<Electron.MessagePortMai
     : undefined;
 
 if (p6CapabilityTicketsEnabled) {
-  // 运行时事实而非注释承诺：本批只签发/兑换票据，CLI 执行端尚未消费 capabilityTicketId，
-  // 开启该 flag 不会让设备级执行授权生效。运维必须以此日志为准，不得按“执行已被 gate”宣传。
+  // 运行时事实而非注释承诺。现已接线：带 capabilityTicketId 的命令在宿主入口经 broker
+  // 校验（绑定/TTL/吊销/角色 scope），授权域随可信 carrier 下发，CLI 工具准入按它收紧。
+  // 已知限制必须写进告警，不能让人按“票据已 gate 所有执行”宣传：
+  //   - renderer/命令信封尚未携带 capabilityTicketId，生产 UI 命令实际不触发票据校验；
+  //   - 吊销只在下一条命令 admission 生效（CLI turn 内无宿主复核通道）；
+  //   - C2 短时凭据注入未实现（broker 在 Desktop main、执行在 CLI 进程，无控制面通道）。
   logger.warn(
-    "capability tickets enabled (issue-only): CLI execution admission does not consume capabilityTicketId; execution is not gated by tickets",
+    "capability tickets enabled: only commands that carry capabilityTicketId are admission-gated; renderer command envelopes do not attach it yet, revocation takes effect at the next command admission (not mid-turn), and credential injection (C2) is unimplemented (credential-class tools stay denied)",
   );
 }
 
@@ -2836,6 +2849,30 @@ const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
               ),
           })
         : undefined;
+    // P6：带 capabilityTicketId 的命令在宿主入口经真实 broker 校验。绑定取 registry 签发
+    // 时的权威快照（不接受客户端自报），角色每次现取（角色变更/吊销在下一命令生效）。
+    // 校验失败由 services facade 抛 typed 拒绝，绝不静默退回无票据路径。
+    const authoritativeTicketBinding = params.capabilityTicketBinding;
+    const capabilityTicketAuthority: ZCodeAgentCapabilityTicketAuthority | undefined =
+      tickets && authoritativeTicketBinding !== undefined
+        ? {
+            admit: ({ ticketId, connectionId }) => {
+              const role = resolveAttachmentRegistryRole?.(params.attachmentId);
+              const result = tickets.broker.admit({
+                ticketId,
+                binding: authoritativeTicketBinding,
+                ...(role !== undefined ? { role } : {}),
+              });
+              if (!result.ok) {
+                // 只记公开事实；ticketId 来自客户端入参，可能含任意字符，不进日志。
+                logger.warn(
+                  `capability ticket command denied attachmentId=${params.attachmentId} connectionId=${connectionId} code=${result.code}`,
+                );
+              }
+              return result;
+            },
+          }
+        : undefined;
     try {
       const handle = exposeServicesOnMessagePort(
         port,
@@ -2853,6 +2890,7 @@ const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
               resolveRole: () => resolveAttachmentRegistryRole?.(params.attachmentId),
             }
           : undefined,
+        capabilityTicketAuthority,
       );
       if (!redeemChannel) return handle;
       // 兑换监听绑定这条 attachment 的 port 与宿主权威 binding：secret 泄漏到别的

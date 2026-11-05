@@ -7,7 +7,7 @@
  * run 拒绝启动，绝不静默回退到 env 代理。
  *
  * 每个平台只允许一个“主围栏实现”（spec §3.3）：
- *   linux  = unshare --net + nftables 默认拒绝
+ *   linux  = netns+veth+nftables 脚手架（特权子进程可逃逸，未降权前按 unimplemented fail-closed）
  *   darwin = sandbox-exec profile（Apple 已标记 deprecated，探测失败即关闭）
  *   win32  = 尚未实现，typed unsupported（不得静默降级）
  */
@@ -29,6 +29,18 @@ export type FenceErrorCode =
  */
 export type FenceEgressScope = "allowlist" | "zero-egress-only";
 
+/**
+ * 围栏内子进程实际可见的 broker 端点。
+ * darwin：与宿主 egress 代理同址（localhost:<port>）；
+ * linux：宿主 broker 在初始 netns 的 loopback，新 netns 不可达，因此围栏在
+ * veth 宿主端启动 relay（hostAddress:<relayPort>），子进程 env 指向该端点。
+ * dispatcher 必须按 childBroker 重写 HTTP_PROXY/network，不能沿用宿主 loopback。
+ */
+export interface FenceChildBroker {
+  host: string;
+  port: number;
+}
+
 /** 平台矩阵：未实现平台必须显式登记为 unimplemented，不允许“能跑就降级”。 */
 export interface FencePlatformMatrixEntry {
   platform: NodeJS.Platform;
@@ -44,11 +56,10 @@ export interface FencePlatformMatrixEntry {
 export const SPEC_FENCE_PLATFORM_MATRIX: readonly FencePlatformMatrixEntry[] = [
   {
     platform: "linux",
-    mechanism: "linux-netns-nftables",
-    status: "implemented",
-    egressScope: "zero-egress-only",
+    mechanism: "unsupported",
+    status: "unimplemented",
     notes:
-      "unshare --net --map-root-user + nftables 默认拒绝，只放行新 netns 内 loopback 到 broker 端口；探测（user namespace / CAP_NET_ADMIN / ip / nft）失败即拒绝启动。当前 lane 未接 veth/命名空间内 broker，宿主 127.0.0.1 上的 egress 代理在新 netns 中不可达：只支持零 egress 硬隔离（规则集仍保留放行端口，为将来围栏内 broker 铺路）。allowHosts 非空时 prepare 直接 typed 拒绝（fence.unsupported_platform），绝不“先启动再中途 connection refused”。",
+      "netns+veth+nftables 命令脚手架已存在，但当前语义不成立：建网需要 init user namespace 的 CAP_SYS_ADMIN/CAP_NET_ADMIN（通常 = root），被围栏子进程与父进程同 UID/同 capabilities，可执行 `nft flush ruleset` 或 `nsenter -t 1 -n` 进入宿主 netns 出网，E1/E3 无法成立。在子进程降权隔离（专用无 CAP 用户或 user namespace + drop capabilities）与逃逸负向验证落地前，按能力缺席 fail-closed：启用围栏时 Linux spec run 拒绝启动，不宣称内核级 egress 围栏。",
   },
   {
     platform: "darwin",
@@ -120,9 +131,10 @@ export interface PrepareFenceRequest {
    */
   broker: { host: string; port: number };
   /**
-   * 本次 run 生效的 egress 白名单（已归一化，空数组 = 零 egress）。
-   * 机器可读的能力门：不支持 allowlist 转发机制的围栏（当前 Linux netns，
-   * 宿主 broker 跨 netns 不可达）在非空时必须 typed 拒绝启动，不得静默运行。
+   * 本次 run 生效的 egress 白名单（已归一化，空数组 = 零 egress）；转发由宿主
+   * egress 代理负责，围栏只放行 childBroker 端点。当前 Linux netns 实现登记为
+   * unimplemented（见平台矩阵，同 UID 子进程可逃逸），启用围栏时按能力缺席拒绝启动；
+   * darwin 支持非空 allowlist。
    */
   allowHosts?: readonly string[];
 }
@@ -131,7 +143,10 @@ export interface PrepareFenceRequest {
 export interface FenceRunStatus {
   runId: string;
   mechanism: FenceMechanism;
+  /** 宿主侧 egress 代理端点（请求入参）。 */
   broker: { host: string; port: number };
+  /** 围栏内子进程实际使用的 broker 端点（linux = veth relay；darwin = broker 本身）。 */
+  childBroker: FenceChildBroker;
   pid: number;
   startedAt: Date;
 }
@@ -145,6 +160,8 @@ export interface SpecFenceHandle {
   readonly runId: string;
   readonly mechanism: FenceMechanism;
   readonly broker: { host: string; port: number };
+  /** 围栏内子进程必须使用的 broker 端点（dispatcher 据此重写代理 env/network）。 */
+  readonly childBroker: FenceChildBroker;
   /** 包装一次执行请求；不改 env（env 代理保留为纵深防御的协作层）。 */
   wrapExecutionRequest(request: ExecutionRequest): ExecutionRequest;
   /** 幂等清理；失败原样上浮，不静默吞掉。 */

@@ -12,6 +12,7 @@ import type {
   PromptTriggerSource,
 } from "@zcode/shared/zcode-protocol-v4";
 import type { SendInputOptions, SendInputResult } from "../../app/types.js";
+import type { CapabilityTicketAuthorization } from "../capability-ticket-admission.js";
 import { runWithSessionResidencyFinalization } from "../../session-execution/index.js";
 import type { V4CommandCoreHost, V4SessionRecordView } from "./types.js";
 
@@ -41,9 +42,25 @@ export interface StartPromptTurnParamsBase {
    * 不能复用排队 payload 里登记过的旧角色（提升边界要按当前连接重新复核）。
    */
   attachment?: HostAttachmentAdmissionFacts;
+  /**
+   * P6：本次命令的票据授权域（宿主 broker 已验证）。带票据的命令必须真正起轮：
+   * 排队会让授权域脱离本 turn（提升时不重新 admission），因此带票据时强制 requireIdle，
+   * 忙时拒绝而不是落队列（fail-closed，绝不执行无票据的 turn）。
+   */
+  capabilityTicket?: CapabilityTicketAuthorization;
 }
 
 export type StartPromptTurnParams = StartPromptTurnParamsBase & TurnBackgroundAttribution;
+
+/** 带票据的命令不能排队：授权域是一次命令级准入，不能挂在未来提升的 turn 上。 */
+export class V4CapabilityTicketQueueingUnsupportedError extends Error {
+  readonly reasonCode = "fault.command.capabilityTicketQueueingUnsupported";
+
+  constructor() {
+    super("capability ticket commands cannot enter the deferred queue");
+    this.name = "V4CapabilityTicketQueueingUnsupportedError";
+  }
+}
 
 export interface PromptTurnStartResult {
   /** Core admission 已完成；不等待 TurnStarted 或 projection commit。 */
@@ -186,6 +203,13 @@ async function startPromptTurnAfterPreflight(
 ): Promise<PromptTurnStartResult> {
   if (record.persistence === "deferred") record.persistence = "immediate";
 
+  // P6：票据授权域只属于本次命令 admission；排队会在提升时丢掉授权域并执行无票据 turn。
+  // 因此带票据的命令要么真正起轮（requireIdle），要么拒绝，绝不静默排队。
+  if (params.capabilityTicket !== undefined && params.requireQueue === true) {
+    throw new V4CapabilityTicketQueueingUnsupportedError();
+  }
+  const requireIdleByTicket = params.capabilityTicket !== undefined;
+
   const previousAutomationId = record.activeAutomationId;
   const previousOffPeakTaskId = record.activeOffPeakTaskId;
   const previousBotDeliveryTarget = record.activeBotDeliveryTarget;
@@ -233,11 +257,14 @@ async function startPromptTurnAfterPreflight(
         ...(params.sharedContextRefs ? { sharedContextRefs: params.sharedContextRefs } : {}),
         ...(turnToolDisallowlist ? { toolDisallowlist: turnToolDisallowlist } : {}),
         ...(params.requireQueue ? { requireQueue: true } : {}),
-        ...(params.requireIdle ? { requireIdle: true } : {}),
+        ...(params.requireIdle || requireIdleByTicket ? { requireIdle: true } : {}),
         ...(params.triggerSource ? { triggerSource: params.triggerSource } : {}),
         // P6：附件事实随 sendInput options 进入 Core admission；SendInputOptions 目前
         // 没有类型化字段，但 spread 会原样透传到 `runtime.admitPrompt`。
         ...(params.attachment ? { attachment: params.attachment } : {}),
+        // P6：授权域随 sendInput options 进入 Core admission（Object spread 原样透传到
+        // `runtime.admitPrompt`，与 attachment 同一路径）。
+        ...(params.capabilityTicket ? { capabilityTicket: params.capabilityTicket } : {}),
         queryId: params.inputId as SendInputOptions["queryId"],
       },
     );

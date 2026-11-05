@@ -135,6 +135,11 @@ import {
   v4ConversationSubscribeParamsSchema,
   v4ConversationUnsubscribeParamsSchema,
 } from "@zcode/shared/zcode-protocol-v4";
+import {
+  readDeclaredCapabilityTicketId,
+  readHostCapabilityTicketAuthorization,
+  V4CapabilityTicketAuthorizationError,
+} from "./capability-ticket-admission.js";
 import { AttachmentUploadRegistry } from "./attachment-upload-registry.js";
 import {
   ColdSessionResumeCoordinator,
@@ -2585,6 +2590,29 @@ export class ConversationV4Gateway {
     // P6：Host 写入的附件权威事实随每条命令到达。读在 inbox 之前，因为它只属于本次
     // admission；排队输入提升时由新的命令重新携带，天然满足「每次 admission 复核」。
     const attachmentAdmission = readHostAttachmentAdmissionFacts(rawParams);
+    // P6 能力票据：宿主 broker 已在命令入口校验，授权域经可信 carrier 到达。命令声明
+    // ticketId 而 carrier 无授权域 = 宿主接线错误，必须拒绝整条命令（fail-closed），
+    // 绝不静默退回无票据路径。无 ticketId = 旧路径，字节兼容。
+    const capabilityTicketAdmission = readHostCapabilityTicketAuthorization(rawParams);
+    const declaredCapabilityTicketId = readDeclaredCapabilityTicketId(rawParams);
+    if (declaredCapabilityTicketId !== undefined) {
+      if (capabilityTicketAdmission === undefined) {
+        // 不把客户端 commandId 拼进错误文本（可能是任意字符，避免日志注入）。
+        throw new V4CapabilityTicketAuthorizationError(
+          "command declared capabilityTicketId but the trusted carrier has no authorization domain",
+        );
+      }
+      if (capabilityTicketAdmission.ticketId !== declaredCapabilityTicketId) {
+        throw new V4CapabilityTicketAuthorizationError(
+          "trusted capability ticket authorization does not match the command's declared capabilityTicketId",
+        );
+      }
+    } else if (capabilityTicketAdmission !== undefined) {
+      // carrier 有授权域但命令未声明 ticketId = 宿主接线错误；不能把授权静默挂到别的命令。
+      throw new V4CapabilityTicketAuthorizationError(
+        "trusted carrier carried a capability ticket authorization for a command that declared no capabilityTicketId",
+      );
+    }
     let ttftCapacityRejected = false;
     const ttftCommand =
       typeof rawParams === "object" && rawParams !== null && "ttft" in rawParams
@@ -2665,6 +2693,9 @@ export class ConversationV4Gateway {
         admittedAt: outcome.admittedAt,
         queueItemId: outcome.queueItemId,
         ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
+        ...(capabilityTicketAdmission
+          ? { capabilityTicket: capabilityTicketAdmission }
+          : {}),
       };
       const admissionPublisher =
         outcome.envelope.type === "createSession"

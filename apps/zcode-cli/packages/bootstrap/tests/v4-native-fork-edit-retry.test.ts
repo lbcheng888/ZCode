@@ -149,6 +149,28 @@ function makeHost(
   return host;
 }
 
+const TICKET_AUTHORIZATION = {
+  ticketId: "ticket-edit",
+  binding: {
+    workspaceIdentity: "remote:ssh:dev:/w",
+    attachmentId: "remote-1",
+    surfaceKind: "desktop" as const,
+    subject: { kind: "session" as const, id: "s1" },
+  },
+  scope: { toolClasses: ["read" as const] },
+  expiresAt: Date.now() + 60_000,
+  revocationEpoch: 0,
+};
+
+function ticketAdmission() {
+  return {
+    admissionSeq: 1,
+    admittedAt: 1,
+    queueItemId: "queue-cmd-1",
+    capabilityTicket: TICKET_AUTHORIZATION,
+  };
+}
+
 function envelope(type: string, payload: unknown): CommandEnvelope {
   return {
     type,
@@ -283,6 +305,27 @@ describe("v4 原生 editUserQuery", () => {
     )?.[1];
     expect(editLogFields).not.toHaveProperty("newText");
     expect(editLogFields).not.toHaveProperty("text");
+  });
+
+  it("带票据的编辑在会话忙时于 branch cut 前拒绝，不截断历史也不丢输入", async () => {
+    const app = makeApp({
+      runtime: { getActiveTurnInfo: vi.fn(() => ({ turnId: "turn-active" })) },
+    });
+    const record = makeRecord({ app });
+    const host = makeHost(record, { getTurnRewindAnchor: () => "msg-a" });
+
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("editUserQuery", {
+          target: { rowId: 7, entityId: "entity-7" },
+          newText: "改过的问题",
+        }),
+        ticketAdmission(),
+      ),
+    ).rejects.toThrow(/capability ticket commands must start a new idle turn/);
+    expect(app.runtime.getActiveTurnInfo).toHaveBeenCalled();
+    expect(app.runtime.rewindConversationToMessage).not.toHaveBeenCalled();
+    expect(app.sendInput).not.toHaveBeenCalled();
   });
 
   it("编辑重发会应用本次新准备的 Highspeed Selection 与执行材料", async () => {
@@ -941,6 +984,25 @@ describe("v4 原生 editUserQuery", () => {
 });
 
 describe("v4 原生 retryTurn", () => {
+  it("带票据的 retry 在会话忙时于 branch cut 前拒绝", async () => {
+    const app = makeApp({
+      runtime: { getActiveTurnInfo: vi.fn(() => ({ turnId: "turn-active" })) },
+    });
+    const record = makeRecord({ app });
+    const host = makeHost(record, { getMessageIdForRow: () => "msg-assistant" });
+
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("retryTurn", {
+          target: { rowId: 5, entityId: "msg-assistant" },
+        }),
+        ticketAdmission(),
+      ),
+    ).rejects.toThrow(/capability ticket commands must start a new idle turn/);
+    expect(app.runtime.rewindConversationToMessage).not.toHaveBeenCalled();
+    expect(app.sendInput).not.toHaveBeenCalled();
+  });
+
   it("Task3：从 canonical cause 以新 commandId 重建完整 intent 与 provenance", async () => {
     const app = makeApp();
     const record = makeRecord({ app });

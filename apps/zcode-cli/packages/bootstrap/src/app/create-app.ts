@@ -82,6 +82,7 @@ import {
   type SuperAgentControlPlane,
 } from "./super-agent-control-plane.js";
 import {
+  createSpecFence,
   createSpecRunDispatcher,
   createSpecRunSubagentLaunchPort,
   createSuperAgentSpecLane,
@@ -202,6 +203,16 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   ) {
     throw new Error(
       "features.mandateGate=true 依赖 features.eventRouter=true（mandate 门只在事件路由控制面内生效，spec §5.4）",
+    );
+  }
+  // P6 围栏只在 spec run（eventRouter 控制面）内生效；单独开启会让运维误以为
+  // 硬围栏已生效。启动期显式拒绝该组合（与 mandateGate 同款 fail-loud）。
+  if (
+    configResult.config.features.specEgressFence === true &&
+    configResult.config.features.eventRouter !== true
+  ) {
+    throw new Error(
+      "features.specEgressFence=true 依赖 features.eventRouter=true（围栏只在 spec run 内生效，P6 §3.6）",
     );
   }
   const loggerFactory = options.loggerFactory ?? createNodeLoggerFactory({ env: options.env });
@@ -1105,6 +1116,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       // M5 spec run 生产装配（spec-lane §6-1 / §6-3）：egress 代理 → buildSpecRunEnv →
       // restricted profile → 既有 subagent 端口。resolveAllowHosts 未接：repo config
       // schema（specEgress.allowHosts）归 config lane，当前缺省 = 零 egress。
+      // P6（§3.6）：features.specEgressFence=true 时注入硬围栏；探测/建立失败由
+      // fence.prepare 抛 typed FenceStartupError，spec run 拒绝启动（不回退 env 代理）。
+      const specEgressFence = configResult.config.features.specEgressFence === true;
       const specRunDispatcher = createSpecRunDispatcher({
         egress: createSuperAgentSpecLane(),
         buildProcessEnv: (plan) =>
@@ -1135,6 +1149,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             }),
           signal: superAgentAbort.signal,
         }),
+        ...(specEgressFence ? { fence: (options.specFenceFactory ?? createSpecFence)() } : {}),
       });
       superAgentControlPlane = await createSuperAgentControlPlane({
         workspaceIdentity: superAgentWorkspaceIdentity,

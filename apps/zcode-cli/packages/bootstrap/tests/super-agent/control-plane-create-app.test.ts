@@ -11,6 +11,7 @@ import type { CommandAck, CommandEnvelope } from "@zcode/shared/zcode-protocol-v
 import { CommandInbox } from "../../src/zcode-protocol-v4/command-inbox.js";
 import type { SuperAgentCommandHandle } from "../../src/app/super-agent-control-plane.js";
 import type { ZCodeApp } from "../../src/app/types.js";
+import type { SpecFenceContract } from "../../src/super-agent/spec-lane/index.js";
 import { buildSessionSnapshot } from "../../src/zcode-protocol/session-mapper.js";
 import { createRegistryBackedTestApp as createZCodeApp } from "../helpers/registry-backed-test-app.js";
 
@@ -49,14 +50,20 @@ function makeInboxHandle(): {
 
 async function createApp(options: {
   eventRouter: boolean;
+  specEgressFence?: boolean;
+  specFenceFactory?: () => SpecFenceContract;
 }): Promise<{ app: ZCodeApp; root: string; handleCommand: SuperAgentCommandHandle }> {
   const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-"));
   roots.push(root);
   const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
   const { handleCommand } = makeInboxHandle();
   const userConfigPath = join(root, "config.json");
-  if (options.eventRouter) {
-    await writeFile(userConfigPath, JSON.stringify({ features: { eventRouter: true } }));
+  const features = {
+    ...(options.eventRouter ? { eventRouter: true } : {}),
+    ...(options.specEgressFence ? { specEgressFence: true } : {}),
+  };
+  if (Object.keys(features).length > 0) {
+    await writeFile(userConfigPath, JSON.stringify({ features }));
   }
   const app = await createZCodeApp({
     env: {},
@@ -72,6 +79,7 @@ async function createApp(options: {
           },
         }
       : {}),
+    ...(options.specFenceFactory ? { specFenceFactory: options.specFenceFactory } : {}),
   });
   apps.push(app);
   return { app, root, handleCommand };
@@ -137,6 +145,58 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
       on.app.superAgentControlPlane!.listPendingWouldAccept(),
     );
     expect(onSnapshot.pendingWouldAccept).toEqual([]);
+  });
+
+  it("features.specEgressFence=true 依赖 eventRouter=true：单独开启启动期拒绝", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-fence-"));
+    roots.push(root);
+    const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const userConfigPath = join(root, "config.json");
+    await writeFile(userConfigPath, JSON.stringify({ features: { specEgressFence: true } }));
+    await expect(
+      createZCodeApp({
+        env: {},
+        runtimeConfig: { workingDirectory: root },
+        sessionStore,
+        userConfigPath,
+      }),
+    ).rejects.toThrow(/features\.specEgressFence=true/);
+    sessionStore.close();
+  });
+
+  it("features.specEgressFence=true 经 create-app 构造 fence 并交给 dispatcher；flag 关不构造", async () => {
+    let factoryCalls = 0;
+    const fenceFactory = (): SpecFenceContract => {
+      factoryCalls += 1;
+      return {
+        probeCapability: async () => ({
+          available: false,
+          platform: "darwin",
+          mechanism: "unsupported",
+          code: "fence.unsupported_platform",
+          detail: "test-fence",
+        }),
+        prepare: async () => {
+          throw new Error("test fence 不参与本用例");
+        },
+      };
+    };
+    // flag on：工厂仅在装配 dispatcher 的 fence dep 时调用（删掉接线行 => 断言失败）。
+    const on = await createApp({
+      eventRouter: true,
+      specEgressFence: true,
+      specFenceFactory: fenceFactory,
+    });
+    expect(on.app.superAgentControlPlane).toBeDefined();
+    expect(factoryCalls).toBe(1);
+    // flag off：dispatcher 不构造围栏，工厂零调用（flag-off 字节兼容）。
+    const off = await createApp({
+      eventRouter: true,
+      specEgressFence: false,
+      specFenceFactory: fenceFactory,
+    });
+    expect(off.app.superAgentControlPlane).toBeDefined();
+    expect(factoryCalls).toBe(1);
   });
 
   it("flag 开但宿主未注入 superAgent：启动期响亮失败（不静默降级 legacy）", async () => {

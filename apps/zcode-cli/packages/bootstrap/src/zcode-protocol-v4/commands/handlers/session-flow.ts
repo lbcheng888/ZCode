@@ -17,7 +17,7 @@ import {
   resolveSubmittedExecutionState,
   V4InputAdmissionRejectedError,
 } from "../input-admission.js";
-import { commandAttachmentOf } from "../executor.js";
+import { commandAttachmentOf, commandCapabilityTicketOf } from "../executor.js";
 import { inputIntentMetadata } from "../input-intent.js";
 import {
   resolveTurnAutomationId,
@@ -61,6 +61,8 @@ async function sendText(
   }
   // P6：本命令的宿主附件事实；排队提升时同样按当前连接重新取，不复用旧 payload。
   const attachmentAdmission = commandAttachmentOf(envelope);
+  // P6：本命令的票据授权域（带票据命令会被 prompt-turn 强制起轮，不落队列）。
+  const capabilityTicketAdmission = commandCapabilityTicketOf(envelope);
   const activeAutomationId = resolveTurnAutomationId({
     automationId: rawPayload.automationId,
     inputId: envelope.commandId,
@@ -153,6 +155,9 @@ async function sendText(
         toolDisallowlist: payload.toolDisallowlist,
         triggerSource: promptTriggerSourceOf(envelope),
         ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
+        ...(capabilityTicketAdmission
+          ? { capabilityTicket: capabilityTicketAdmission }
+          : {}),
       });
       if (queued.admission.kind !== "queued") {
         throw new V4InputAdmissionRejectedError(
@@ -268,8 +273,9 @@ async function sendText(
       ...(forceStartNow ? { requireIdle: true } : {}),
       // M4：信封带 triggerId = 事件回合；来源随 sendInput 进入 Core，facts 缺席即响亮失败。
       triggerSource: promptTriggerSourceOf(envelope),
-      // P6：每次 admission 按当前连接复核附件角色；排队提升边界同样走这里。
+      // P6：每次 admission 按当前连接复核附件角色与票据授权域。
       ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
+      ...(capabilityTicketAdmission ? { capabilityTicket: capabilityTicketAdmission } : {}),
     });
   } catch (error) {
     if (

@@ -2,11 +2,11 @@
  * M5 spec run dispatcher（spec-lane spec §6-1：mandate/触发 lane 拥有）。
  * 触发档位为 speculative/auto 且 verdict accept 后，由程序按固定顺序启动受限 run：
  *   1. prepareSpecRunEgress → plan（无代理则拒绝启动）；
- *   2. buildProcessEnv({ proxyUrl: plan.proxyUrl }) → 无凭据子进程 env（生产 =
- *      adapters buildSpecRunEnv；接线缝见 spec §6-4，由组合根注入）；
- *   3. buildSpecRestrictedProfile() → 受限 profile（工具面/权限模式结构固定）；
- *   4. fence.prepare → per-run OS egress 围栏（可选；启用时失败即拒绝启动，
+ *   2. buildSpecRestrictedProfile() → 受限 profile（工具面/权限模式结构固定）；
+ *   3. fence.prepare → per-run OS egress 围栏（可选；启用时失败即拒绝启动，
  *      spec §3.4 顺序：代理之后、命令执行之前）；
+ *   4. 以 fence.childBroker 改写代理端点（Linux = veth relay）→ buildProcessEnv →
+ *      无凭据子进程 env（生产 = adapters buildSpecRunEnv；接线缝见 spec §6-4）；
  *   5. launch → **subagent run**（Phase 3 唯一合法形态；workflow 形态在 profile /
  *      processEnv 接线前禁止启动，本端口不提供 workflow 形态）；
  *   6. run 终态后 teardown 围栏、stopSpecRunEgress。
@@ -153,14 +153,6 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
         // 无代理 = 拒绝启动（spec §0：任何路径都不回退直连）。
         throw new Error("spec run 拒绝启动：egress plan 缺 proxyUrl");
       }
-      const processEnv = deps.buildProcessEnv(plan);
-      const proxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
-      if (proxy !== plan.proxyUrl) {
-        // env 未携带代理 = 无凭据/egress 三件套没有绑死，拒绝启动。
-        throw new Error(
-          "spec run 拒绝启动：processEnv 未携带 egress 代理（HTTP_PROXY 与 plan.proxyUrl 不一致）",
-        );
-      }
       const profile = buildSpecRestrictedProfile();
       if (profile.name !== SPEC_RESTRICTED_PROFILE_NAME) {
         throw new Error(
@@ -175,17 +167,35 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
           runId: input.triggerId,
           workspaceRoot,
           broker,
-          // 能力范围必须与本次 egress plan 一致：Linux netns 无法到达宿主 broker，
-          // 非空白名单在 fence.prepare 内 typed 拒绝（不先启动再中途失败）。
+          // Linux 的 broker relay 仍由代理 allowlist 裁决，白名单原样传入。
           allowHosts: plan.allowHosts,
         });
+      }
+      // Linux 围栏内子进程必须改用 veth relay 端点（宿主 loopback broker 跨 netns
+      // 不可达）；darwin 的 childBroker 与宿主 broker 同址。env 与 network 必须
+      // 同源指向最终端点，否则 launch 会拒绝启动。
+      const effectiveProxyUrl = fenceHandle
+        ? `http://${fenceHandle.childBroker.host}:${fenceHandle.childBroker.port}`
+        : plan.proxyUrl;
+      const effectivePlan: SpecRunEgressPlan = {
+        ...plan,
+        proxyUrl: effectiveProxyUrl,
+        networkPolicy: { httpProxy: effectiveProxyUrl, noProxy: "" },
+      };
+      const processEnv = deps.buildProcessEnv(effectivePlan);
+      const proxy = processEnv.HTTP_PROXY ?? processEnv.http_proxy;
+      if (proxy !== effectiveProxyUrl) {
+        // env 未携带代理 = 无凭据/egress 三件套没有绑死，拒绝启动。
+        throw new Error(
+          "spec run 拒绝启动：processEnv 未携带 egress 代理（HTTP_PROXY 与 effective proxyUrl 不一致）",
+        );
       }
       await deps.launch.launch({
         workspaceRoot,
         form: "subagent",
         profile,
         processEnv,
-        network: plan.networkPolicy,
+        network: effectivePlan.networkPolicy,
         ...(fenceHandle ? { fence: fenceHandle } : {}),
         prompt: buildSpecRunPrompt(input),
         trigger: input,
