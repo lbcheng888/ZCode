@@ -31,6 +31,14 @@
 - C mandate 执行档 + spec-trigger + M6 出站门 + 心跳 ✅（378 测试过，修复链接手实施）
 - 中央收口 ✅：architecture 0 违规（模块依赖配对+契约瘦身 298 行+例外登记）、typecheck/lint 双 scope 0 errors、io-boundary 边界修正、全量回归 7385 测试 0 失败
 
+## 灰度接缝批次（2026-11-05）✅
+- mandateFacts admission 生产者接通（事件回合 → TriggerId → Core admission → PermissionContext）✅
+- TUI 宿主 options.superAgent 注入 + commandId 幂等 ✅
+- would-accept 收件箱挂载（v4 状态面板）+ promote RPC + delta 生产者 ✅
+- BotConfig.eventRouterEnabled 逐 bot 灰度读点 ✅
+- automation/offpeak 心跳与 TriggerSink 生产注入：跨进程结构不可达，按设计归里程碑 B（入站宿主下沉），拒绝假接线 ✅（spec §8 登记）
+- 验证：双 scope typecheck/lint 绿、architecture 0、定向 240 测试绿；累计 16 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
