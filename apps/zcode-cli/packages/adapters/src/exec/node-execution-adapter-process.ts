@@ -76,7 +76,12 @@ export class NodeExecutionAdapterProcess extends NodeExecutionAdapterResults {
     const snapshotEnv = resolvedCommand.envOverlay
       ? { ...env, ...resolvedCommand.envOverlay }
       : env;
+    // 围栏下禁止任何围栏外辅助执行：snapshot 会 execFile 一个 `bash -lc` 并在
+    // 围栏外 source 用户 ~/.bashrc/.zshrc；login shell（-l）同样会在围栏外 source。
+    // 两者都可能执行用户 rc 里的网络命令，等于绕过硬围栏（P6 §3.2）。
+    const fenced = request.internalFence !== undefined;
     const shellInitSnapshot =
+      !fenced &&
       request.command.mode === "shell" &&
       request.command.shellProfile === "posix-bash" &&
       resolvedCommand.shell === false &&
@@ -90,26 +95,35 @@ export class NodeExecutionAdapterProcess extends NodeExecutionAdapterResults {
             }),
           )
         : undefined;
-    const useLoginShell = shellInitSnapshot ? false : true;
+    const useLoginShell = fenced ? false : shellInitSnapshot ? false : true;
     const resolvedShell = setResolvedShellLoginMode(resolvedCommand, useLoginShell);
-    const requestWithSources = applyBashSourcesToExecutionRequest(request, {
-      leadingSources: shellInitSnapshot
-        ? [
-            {
-              optional: true,
-              path: shellInitSnapshot.path,
-              shellPath: shellInitSnapshot.shellPath,
-            },
-          ]
-        : [],
-      rootDir,
-      sessionId,
-      shellDialect: resolvedCommand.cwdDialect,
-    });
-    const capturePlan = createCwdCapturePlan(requestWithSources, {
-      dialect: resolvedCommand.cwdDialect,
-      platform: this.platform,
-    });
+    // 围栏下显式禁用 bash prelude：prelude 会被拼到外层 shell 文本，而原始命令在
+    // 围栏内的内层 shell 执行，内层看不到外层定义的函数（静默失效）；且外层执行
+    // 本身就在围栏外。显式不做，避免“看起来有、实际没有”的功能退化。
+    const requestWithSources = fenced
+      ? request
+      : applyBashSourcesToExecutionRequest(request, {
+          leadingSources: shellInitSnapshot
+            ? [
+                {
+                  optional: true,
+                  path: shellInitSnapshot.path,
+                  shellPath: shellInitSnapshot.shellPath,
+                },
+              ]
+            : [],
+          rootDir,
+          sessionId,
+          shellDialect: resolvedCommand.cwdDialect,
+        });
+    // 围栏下 cwd 捕获不可靠：原始命令在围栏内层 shell 执行，其 `cd` 不会回到外层
+    // shell，后置 `pwd -P` 只会记录外层 cwd。显式关闭，避免把错误 cwd 写回会话。
+    const capturePlan = fenced
+      ? { command: requestWithSources.command }
+      : createCwdCapturePlan(requestWithSources, {
+          dialect: resolvedCommand.cwdDialect,
+          platform: this.platform,
+        });
     const command =
       capturePlan.command === requestWithSources.command
         ? requestWithSources.command.mode === "shell"

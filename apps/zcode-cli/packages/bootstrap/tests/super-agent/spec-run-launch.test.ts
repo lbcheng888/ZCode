@@ -12,11 +12,18 @@ import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
 import {
   createRootTraceContext,
   createSessionId,
+  type ExecutionPort,
+  type ExecutionRequest,
+  type ExecutionResult,
   type ModelRequest,
   type SubagentLaunchOptions,
   type SubagentLaunchRequest,
 } from "@zcode/contracts";
-import { SPEC_RESTRICTED_PROFILE_NAME, filterSpecRestrictedToolNames } from "@zcode/core";
+import {
+  SPEC_RESTRICTED_PROFILE_NAME,
+  buildSpecRestrictedProfile,
+  filterSpecRestrictedToolNames,
+} from "@zcode/core";
 
 import { buildSpecRunEnv } from "../../../adapters/src/network/subprocess-env.js";
 import {
@@ -30,6 +37,7 @@ import {
   createSpecRunDispatcher,
   createSpecRunSubagentLaunchPort,
   createSuperAgentSpecLane,
+  type SpecFenceHandle,
   type SpecRunExecutionPortInput,
 } from "../../src/super-agent/spec-lane/index.js";
 import { applyVerdicts } from "../../src/super-agent/trigger/verdict-interpret.js";
@@ -304,5 +312,92 @@ describe("M5 spec run 生产 launch 适配器（flag 开 → speculative accept 
       .prepare("select adjudication_status from trigger_events where id = ?")
       .get(TRIGGER_ID) as { adjudication_status: string };
     expect(accepted.adjudication_status).toBe("accepted");
+  });
+});
+
+describe("M5 launch 适配器的围栏接线（request.fence → 执行端口改写）", () => {
+  const PARENT = createSessionId("spec-launch-fence-parent");
+  const PROXY = "http://127.0.0.1:1";
+
+  it("fence 在场时每条执行请求都经围栏改写；缺席时原样委托", async () => {
+    const runRequests: ExecutionRequest[] = [];
+    const result = {
+      status: "completed",
+      stdout: { text: "", bytes: 0, truncated: false },
+    } as ExecutionResult;
+    const basePort: ExecutionPort = {
+      run: async (request) => {
+        runRequests.push(request);
+        return result;
+      },
+    };
+
+    const wrappedRequests: ExecutionRequest[] = [];
+    const handle: SpecFenceHandle = {
+      runId: "r-fence",
+      mechanism: "darwin-sandbox-exec",
+      broker: { host: "127.0.0.1", port: 1 },
+      wrapExecutionRequest: (request) => {
+        wrappedRequests.push(request);
+        return { ...request, command: { mode: "argv", file: "fenced-bin" } };
+      },
+      teardown: async () => undefined,
+    };
+
+    let capturedPort: ExecutionPort | undefined;
+    const launchPort = createSpecRunSubagentLaunchPort({
+      parentSessionId: PARENT,
+      traceContext: createRootTraceContext({ sessionId: PARENT }),
+      launchSubagent: async (_request, options) => {
+        capturedPort = options?.executionPort;
+        return { agentId: "agent-fence" } as never;
+      },
+      createExecutionPort: () => basePort,
+    });
+    await launchPort.launch({
+      workspaceRoot: "/tmp/ws-launch-fence",
+      form: "subagent",
+      profile: buildSpecRestrictedProfile(),
+      processEnv: { HTTP_PROXY: PROXY, http_proxy: PROXY },
+      network: { httpProxy: PROXY, noProxy: "" },
+      fence: handle,
+      prompt: "p",
+      trigger: {
+        triggerId: "t-launch-fence",
+        workspaceIdentity: "ws",
+        threadKey: "bot:bot-1:u1:t1",
+        source: "im",
+        tier: "speculative",
+      },
+    });
+
+    expect(capturedPort).toBeDefined();
+    await capturedPort!.run({ command: { mode: "argv", file: "orig" } });
+    // 这三行接线被删掉时，这里会收到 orig 而不是 fenced-bin。
+    expect(wrappedRequests).toHaveLength(1);
+    expect(runRequests[0]?.command).toEqual({ mode: "argv", file: "fenced-bin" });
+
+    // fence 缺席：执行端口保持内层实例，命令不被改写。
+    wrappedRequests.length = 0;
+    capturedPort = undefined;
+    await launchPort.launch({
+      workspaceRoot: "/tmp/ws-launch-nofence",
+      form: "subagent",
+      profile: buildSpecRestrictedProfile(),
+      processEnv: { HTTP_PROXY: PROXY, http_proxy: PROXY },
+      network: { httpProxy: PROXY, noProxy: "" },
+      prompt: "p",
+      trigger: {
+        triggerId: "t-launch-nofence",
+        workspaceIdentity: "ws",
+        threadKey: "bot:bot-1:u1:t1",
+        source: "im",
+        tier: "speculative",
+      },
+    });
+    expect(capturedPort).toBe(basePort);
+    await capturedPort!.run({ command: { mode: "argv", file: "orig" } });
+    expect(wrappedRequests).toHaveLength(0);
+    expect(runRequests[1]?.command).toEqual({ mode: "argv", file: "orig" });
   });
 });

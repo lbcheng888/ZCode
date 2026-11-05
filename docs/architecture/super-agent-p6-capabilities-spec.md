@@ -218,6 +218,8 @@ state          issued | active | consumed | expired | revoked
 - 与 §1 联动：read_mostly 不得申请凭据类票据；interactive 只能申请宿主预批 scope。
 - 分阶段：C1 表+broker 签发/兑换（无凭据注入先打通）→ C2 注入接线（CUA/执行适配器）→ C3 吊销传播 → C4 设备维度批量吊销。
 
+**2026-11-05 落地状态（如实登记，不夸大）**：宿主内存 broker + attachment MessagePort 受控通道已实现；`ZCODE_P6_CAPABILITY_TICKETS=1` 时 `desktop-continuous` 的 remote attachment 签发/投递/兑换/吊销生效。仍未接线：CLI 执行端 admission 消费 `capabilityTicketId` 与凭据注入（C2）、SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程。因此开启该 flag 是 **issue-only（execution not gated）**，宿主启动会输出一条明确告警，运维不得按“设备级执行授权已生效”宣传。平台覆盖：web/mobile 的 `web-remote-replayable` relay 只转发 `Uint8Array` RPC 帧，secret 控制帧不可达，登记为 **secret delivery 未实现**——该形态不签发、不投递，并记录 typed `transport-unimplemented`。epoch 校验按票据自身快照判定，避免同一 broker 下其他 attachment 的吊销误伤未受影响的票据。
+
 ## 3. OS 级 egress 围栏
 
 ### 3.1 现状与残留（必须先读清的边界）

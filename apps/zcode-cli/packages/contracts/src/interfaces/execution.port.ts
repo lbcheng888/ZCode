@@ -151,6 +151,14 @@ export interface ExecutionRequest {
   timeoutMs?: number;
   outputLimit?: ExecutionOutputLimit;
   sandbox?: ExecutionSandboxPolicy;
+  /**
+   * Internal: 该命令已由 OS 级 egress 围栏包装（super-agent P6 §3）。
+   * 执行适配器据此禁止在围栏外启动辅助进程（login-shell snapshot / bash prelude），
+   * 否则用户 rc 文件会在围栏外被 source（等于绕过围栏）。不可由外部调用方注入。
+   */
+  internalFence?: {
+    mechanism: "linux-netns-nftables" | "darwin-sandbox-exec";
+  };
   trace?: TraceContext;
 }
 
