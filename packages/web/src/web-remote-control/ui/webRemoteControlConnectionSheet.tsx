@@ -17,14 +17,14 @@ import type { WebRemoteControlScreenLocale } from "#src/web-remote-control/domai
 const copyByLocale = {
   "zh-CN": {
     unnamed: "未命名设备",
-    sheetDescription: (count: number) => `这台电脑上有 ${count} 个 ZCode 在线，选择要连接的一个`,
+    sheetDescription: (count: number) => `这台电脑上有 ${count} 个 ChengCode 在线，选择要连接的一个`,
     startedAgo: (relative: string) => `${relative}启动`,
     cancel: "取消",
   },
   "en-US": {
     unnamed: "Unnamed device",
     sheetDescription: (count: number) =>
-      `${count} ZCode instances are online on this computer. Choose one.`,
+      `${count} ChengCode instances are online on this computer. Choose one.`,
     startedAgo: (relative: string) => `started ${relative}`,
     cancel: "Cancel",
   },
@@ -123,8 +123,8 @@ export function WebRemoteControlConnectionList({
           >
             <span className="block truncate text-ui-base font-medium">
               {connection.meta.version?.trim()
-                ? `ZCode ${connection.meta.version.trim()}`
-                : "ZCode"}
+                ? `ChengCode ${connection.meta.version.trim()}`
+                : "ChengCode"}
             </span>
             <span className="mt-0.5 block truncate text-ui-sm text-foreground-subtle">
               {copy.startedAgo(formatRelativeTime(connection.created_at, locale, now))}
@@ -137,7 +137,7 @@ export function WebRemoteControlConnectionList({
   );
 }
 
-/** 同一台电脑多个在线 ZCode 时的底部选择层；选择沿用与单连接相同的 admission。 */
+/** 同一台电脑多个在线 ChengCode 时的底部选择层；选择沿用与单连接相同的 admission。 */
 export function WebRemoteControlConnectionSheet({
   device,
   locale,

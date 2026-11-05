@@ -142,7 +142,7 @@ try {
           const onboarding = page.getByTestId("onboarding-page");
           await onboarding.waitFor();
           await onboarding.getByRole("button", { name: /退出引导|Exit onboarding/ }).click();
-          const welcome = page.getByRole("dialog", { name: /欢迎使用 ZCode|Welcome to ZCode/ });
+          const welcome = page.getByRole("dialog", { name: /欢迎使用 ChengCode|Welcome to ChengCode/ });
           await welcome.waitFor();
           await welcome.getByRole("button", { name: /^(Close|关闭)$/ }).click();
           await welcome.waitFor({ state: "detached" });

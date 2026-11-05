@@ -302,7 +302,7 @@ function isWebOAuthCallback(params: URLSearchParams): boolean {
 }
 
 function renderWebAuthCallbackPage(): void {
-  document.title = "ZCode - Web Remote Control Sign In";
+  document.title = "ChengCode - Web Remote Control Sign In";
   const callbackState = parseOAuthState(
     new URLSearchParams(window.location.search).get("state") ?? "",
   );
@@ -327,7 +327,7 @@ async function renderConversationSharePage(): Promise<void> {
   document.documentElement.lang = routeLocale;
   // 分享页必须设置 title：否则浏览器标签只显示 index.html 的通用标题。
   // 会话标题要等 preview 加载完，先给一个语言正确的兜底。
-  document.title = routeLocale === "zh-CN" ? "ZCode 会话分享" : "ZCode Conversation Share";
+  document.title = routeLocale === "zh-CN" ? "ChengCode 会话分享" : "ChengCode Conversation Share";
   const shareCode = resolveConversationShareCodeFromPath(window.location.pathname);
   if (!shareCode) {
     root.render(
@@ -394,7 +394,7 @@ async function renderConversationSharePage(): Promise<void> {
 }
 
 function renderWebLoginPage(): void {
-  document.title = "ZCode - Web Remote Control Sign In";
+  document.title = "ChengCode - Web Remote Control Sign In";
   root.render(<WebLoginPage onLogin={(provider) => remoteEntry.startLogin(provider)} />);
 }
 
@@ -427,7 +427,7 @@ const remoteEntry = new WebRemoteControlEntry({
     if (view.kind === "callback") renderWebAuthCallbackPage();
     else if (view.kind === "login") renderWebLoginPage();
     else if (view.kind === "devices") {
-      document.title = "ZCode - Web Remote Control";
+      document.title = "ChengCode - Web Remote Control";
       root.render(
         <WebRemoteControlDeviceListPage
           view={view}
@@ -907,7 +907,7 @@ export function createHomeOnlyWebRemoteControlServices(): RootServices {
       initialize: async (params: { workspacePath: string; workspaceIdentity?: string }) => ({
         available: false,
         workspaceKey: params.workspaceIdentity?.trim() || params.workspacePath,
-        reason: "ZCode agent service is not available before workspace bridge is connected.",
+        reason: "ChengCode agent service is not available before workspace bridge is connected.",
       }),
       disposeAll: () => {},
     }),
@@ -918,7 +918,7 @@ export function createHomeOnlyWebRemoteControlServices(): RootServices {
       }) => ({
         available: false,
         workspaceKey: params.workspaceIdentity?.trim() || params.workspacePath,
-        reason: "ZCode session service is not available before workspace bridge is connected.",
+        reason: "ChengCode session service is not available before workspace bridge is connected.",
       }),
     }),
     // 分享发布首期只属于 desktop local host；Web 首页和 /remote 不建立独立发布权威。
@@ -1052,7 +1052,7 @@ function renderWebRemoteControlLoading(
   state: WebRemoteControlTerminalTransportState,
   device: WebRemoteControlConnectingDevice,
 ): void {
-  document.title = "ZCode - Web Remote Control";
+  document.title = "ChengCode - Web Remote Control";
   root.render(
     <WebRemoteControlLoadingScreen
       state={state}
@@ -1763,7 +1763,7 @@ async function bootstrapExternalRelayWebRemoteControl(
   ) => {
     if (terminated || versionGuard.isBlocked()) return;
     ready = true;
-    document.title = "ZCode - Web Remote Control";
+    document.title = "ChengCode - Web Remote Control";
     root.render(
       <AppErrorBoundary key={bridge.bridgeSessionId}>
         <ZCodeIntlProvider
@@ -1887,7 +1887,7 @@ async function bootstrapExternalRelayWebRemoteControl(
     currentWorkspaceKey = workspaceKey;
     currentTaskId = taskId;
     await updateMobileViewState(workspaceKey, taskId);
-    document.title = "ZCode - Web Remote Control";
+    document.title = "ChengCode - Web Remote Control";
     if (terminated || versionGuard.isBlocked()) return;
     // Bug 原因：staging 合并 a861a83cbc 丢了这里的 ready 标记，home-only 挂载后每次配对状态抖动
     // 都会被 onStateChange 当成首屏重渲染加载页，配对恢复后再整页重挂，引导与本地状态全部丢失。
@@ -2068,7 +2068,7 @@ async function bootstrapWebApp() {
       onClose: () => {},
     });
     const platform = createWebPlatform();
-    document.title = "ZCode - Web + Server";
+    document.title = "ChengCode - Web + Server";
 
     root.render(
       <AppErrorBoundary>

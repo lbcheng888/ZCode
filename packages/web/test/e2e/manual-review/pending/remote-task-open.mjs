@@ -258,7 +258,7 @@ try {
         const local = page.locator('[data-project-name="E2E_MRO01_LOCAL"]');
         const remote = page.locator('[data-project-name="E2E_MRO01_REMOTE"]');
         const onboarding = page.getByTestId("onboarding-page");
-        const welcome = page.getByRole("dialog", { name: /欢迎使用 ZCode|Welcome to ZCode/ });
+        const welcome = page.getByRole("dialog", { name: /欢迎使用 ChengCode|Welcome to ChengCode/ });
         await local.or(onboarding).or(welcome).first().waitFor();
         if (await onboarding.isVisible())
           await onboarding.getByRole("button", { name: /退出引导|Exit onboarding/ }).click();

@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { BIGMODEL_PROVIDER_ID, ZAI_PROVIDER_ID } from "@zcode/shared";
-import { ZCodeAppLogo } from "@zcode/ui/app-logo";
 import { renderOAuthProviderIcon } from "@zcode/ui/oauth-provider-icon";
-import type { WebOAuthProviderId } from "./browserOAuthCredentialRepo.js";
+import { ZCodeAppLogo } from "@zcode/ui/app-logo";
 import { Button } from "@zcode/ui";
+import type { WebOAuthProviderId } from "./browserOAuthCredentialRepo.js";
 import { getWebAuthCopy } from "./webAuthLocale.js";
 
 interface WebLoginPageProps {

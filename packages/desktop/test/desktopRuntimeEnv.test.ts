@@ -977,13 +977,33 @@ describe("desktopRuntimeEnv runtime identity", () => {
     process.env["ZCODE_DESKTOP_USER_DATA_DIR"] = "/tmp/zcode-e2e/user-data";
     process.env["ZCODE_DESKTOP_SESSION_DATA_DIR"] = "/tmp/zcode-e2e/session-data";
 
-    const { runtimeApplicationName, runtimeHomePath, runtimeSessionDataPath, runtimeUserDataPath } =
-      await import("../src/main/desktopRuntimeEnv.js");
+    const {
+      runtimeApplicationDisplayName,
+      runtimeApplicationName,
+      runtimeHomePath,
+      runtimeSessionDataPath,
+      runtimeUserDataPath,
+    } = await import("../src/main/desktopRuntimeEnv.js");
 
     expect(runtimeApplicationName).toBe("ZCode E2E");
+    expect(runtimeApplicationDisplayName).toBe("ZCode E2E");
     expect(runtimeHomePath).toBe("/tmp/zcode-e2e/home");
     expect(runtimeUserDataPath).toBe("/tmp/zcode-e2e/user-data");
     expect(runtimeSessionDataPath).toBe("/tmp/zcode-e2e/session-data");
+  });
+
+  it("开发态使用 ChengCode Dev 展示名，但 Electron 数据目录仍复用旧 ZCode Dev", async () => {
+    const {
+      runtimeApplicationDisplayName,
+      runtimeApplicationName,
+      runtimeSessionDataPath,
+      runtimeUserDataPath,
+    } = await import("../src/main/desktopRuntimeEnv.js");
+
+    expect(runtimeApplicationName).toBe("ZCode Dev");
+    expect(runtimeApplicationDisplayName).toBe("ChengCode Dev");
+    expect(runtimeUserDataPath).toBe(join("/mock/appData", "ZCode Dev"));
+    expect(runtimeSessionDataPath).toBe(join("/mock/appData", "ZCode Dev", "session"));
   });
 
   it("打包测试环境使用 Preview 应用名和独立 Electron 数据目录", async () => {
@@ -991,6 +1011,7 @@ describe("desktopRuntimeEnv runtime identity", () => {
 
     const {
       isPreviewPackagedRuntime,
+      runtimeApplicationDisplayName,
       runtimeApplicationName,
       runtimeSessionDataPath,
       runtimeUserDataPath,
@@ -998,6 +1019,7 @@ describe("desktopRuntimeEnv runtime identity", () => {
 
     expect(isPreviewPackagedRuntime).toBe(true);
     expect(runtimeApplicationName).toBe("ZCode Preview");
+    expect(runtimeApplicationDisplayName).toBe("ChengCode Preview");
     // Bugfix：这两条路径由实现用宿主 path.join 从 app.getPath("appData") 拼出，
     // Windows 上是 `\mock\appData\ZCode Preview`，写死 POSIX 字面量必然失败。
     // 用例要断言的是「Preview 单独占一个 Electron 数据目录」的目录结构，与分隔符无关，

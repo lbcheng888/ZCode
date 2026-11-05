@@ -130,7 +130,7 @@ export async function main() {
         ),
         (error) =>
           error.stdout === "" &&
-          error.stderr.includes("Captured ZCode CUA broker credentials may only launch") &&
+          error.stderr.includes("Captured ChengCode CUA broker credentials may only launch") &&
           !error.stderr.includes("UNAUTHORIZED_PLUGIN_IMPORTED"),
       );
 

@@ -35,6 +35,7 @@ describe("desktop Linux deep link registration helpers", () => {
 
     expect(command.executablePath).toBe("/home/alice/Downloads/ZCode-2.8.0-linux-x64.AppImage");
     expect(entry).toContain('Exec="/home/alice/Downloads/ZCode-2.8.0-linux-x64.AppImage" %U');
+    expect(entry).toContain("Comment=ChengCode Desktop App");
     expect(entry).toContain("MimeType=x-scheme-handler/zcode;");
   });
 
@@ -104,11 +105,11 @@ describe("desktop Linux deep link registration helpers", () => {
 
     const entry = createLinuxDeepLinkDesktopEntry({
       executablePath: "/opt/ZCode Preview/zcode-preview",
-      productName: "ZCode Preview",
+      productName: "ChengCode Preview",
     });
 
-    expect(entry).toContain("Name=ZCode Preview");
-    expect(entry).toContain("StartupWMClass=ZCode Preview");
+    expect(entry).toContain("Name=ChengCode Preview");
+    expect(entry).toContain("StartupWMClass=ChengCode Preview");
     expect(entry).toContain('Exec="/opt/ZCode Preview/zcode-preview" %U');
     expect(entry).toContain("MimeType=x-scheme-handler/zcode;");
   });
@@ -575,6 +576,59 @@ describe("desktop Linux deep link registration helpers", () => {
 
       registerLinuxDeepLinkProtocol({
         executablePath: "/opt/ZCode/zcode",
+        homeDir,
+        env: {},
+        systemApplicationDirs: [systemApplicationsDir],
+        logger: {
+          info: (...args: unknown[]) => infos.push(args),
+          warn: () => undefined,
+        },
+        runCommand: () => ({ status: 0, stderr: "" }),
+      });
+
+      expect(existsSync(desktopFilePath)).toBe(false);
+      expect(
+        infos.some(
+          ([message]) => message === "[deep-link] 已清理遗留的用户级 zcode.desktop，恢复系统级条目",
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("recognizes the current ChengCode ownership marker", async () => {
+    const { registerLinuxDeepLinkProtocol } =
+      await import("../src/main/desktopLinuxDeepLinkRegistration.js");
+    const tempRoot = mkdtempSync(join(tmpdir(), "zcode-linux-chengcode-marker-"));
+    const homeDir = join(tempRoot, "home");
+    const systemApplicationsDir = join(tempRoot, "system", "applications");
+    const desktopFilePath = join(homeDir, ".local", "share", "applications", "zcode.desktop");
+    const infos: unknown[][] = [];
+
+    try {
+      mkdirSync(systemApplicationsDir, { recursive: true });
+      writeFileSync(
+        join(systemApplicationsDir, "zcode.desktop"),
+        "[Desktop Entry]\nName=ChengCode\nExec=/opt/zcode/zcode %U\n",
+        "utf8",
+      );
+      mkdirSync(dirname(desktopFilePath), { recursive: true });
+      writeFileSync(
+        desktopFilePath,
+        [
+          "[Desktop Entry]",
+          "Name=ChengCode",
+          "Comment=ChengCode Desktop App",
+          'Exec="/home/alice/Downloads/ChengCode.AppImage" %U',
+          "MimeType=x-scheme-handler/zcode;",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      registerLinuxDeepLinkProtocol({
+        executablePath: "/opt/zcode/zcode",
         homeDir,
         env: {},
         systemApplicationDirs: [systemApplicationsDir],

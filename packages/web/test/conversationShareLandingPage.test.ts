@@ -82,7 +82,7 @@ describe("ConversationShareLandingPage", () => {
     expect(html).toContain('data-share-header-ready="false"');
     expect(html).toContain('data-share-continue-visible="true"');
     expect(html).toContain("请生成一个文件");
-    expect(html).toContain("去 ZCode 继续");
+    expect(html).toContain("去 ChengCode 继续");
     expect(html).toContain('data-share-theme-toggle="true"');
     expect(html).toContain("切换到深色主题");
     expect(html.match(/href="zcode:\/\/share\/import\?code=share-1"/g)?.length).toBe(2);
@@ -231,8 +231,8 @@ describe("ConversationShareLandingPage", () => {
       }),
     );
     expect(html).not.toContain("zcode://share/import");
-    expect(html).not.toContain("Open in ZCode");
-    expect(html).not.toContain("去 ZCode 继续");
+    expect(html).not.toContain("Open in ChengCode");
+    expect(html).not.toContain("去 ChengCode 继续");
     expect(html).toContain('data-share-theme-toggle="true"');
     expect(html).not.toContain('data-share-continue-footer="true"');
     expect(html).toContain('data-share-continue-visible="false"');

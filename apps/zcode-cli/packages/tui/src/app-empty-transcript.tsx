@@ -9,12 +9,11 @@ const h = React.createElement as (
 ) => React.ReactElement;
 
 export const ZCODE_LOGO_LINES = [
-  "███████╗ ██████╗ ██████╗ ██████╗ ███████╗",
-  "   ███╔╝██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-  "  ███╔╝ ██║     ██║   ██║██║  ██║█████╗  ",
-  " ███╔╝  ██║     ██║   ██║██║  ██║██╔══╝  ",
-  "███████╗╚██████╗╚██████╔╝██████╔╝███████╗",
-  "╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+  "████ █  █ ████ █  █ ████ ████ ████ ███  ████",
+  "█    █  █ █    ██ █ █    █    █  █ █  █ █   ",
+  "█    ████ ███  █ ██ █ ██ █    █  █ █  █ ███ ",
+  "█    █  █ █    █  █ █  █ █    █  █ █  █ █   ",
+  "████ █  █ ████ █  █ ████ ████ ████ ███  ████",
 ] as const;
 
 const EMPTY_TRANSCRIPT_LOGO_MIN_HEIGHT = ZCODE_LOGO_LINES.length;
@@ -53,7 +52,7 @@ function renderLogoContent(input: { animated: boolean; frameMs?: number }): Reac
         animated: input.animated,
         baseColor: palette.accent,
         frameMs: input.frameMs,
-        key: `zcode-logo-${index}`,
+        key: `chengcode-logo-${index}`,
         text: line,
       }),
     ),

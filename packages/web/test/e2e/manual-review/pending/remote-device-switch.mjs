@@ -130,7 +130,7 @@ try {
           const waitForHome = async (name) => {
             const button = page.getByRole("button", { name: buttonName(), exact: true });
             const onboarding = page.getByTestId("onboarding-page");
-            const welcome = page.getByRole("dialog", { name: /欢迎使用 ZCode|Welcome to ZCode/ });
+            const welcome = page.getByRole("dialog", { name: /欢迎使用 ChengCode|Welcome to ChengCode/ });
             // home-only 空设置必定触发职业引导；等待其异步判定落定，避免测试中途覆盖菜单。
             if (mode === "home-only") await onboarding.waitFor();
             else await button.or(onboarding).or(welcome).first().waitFor();

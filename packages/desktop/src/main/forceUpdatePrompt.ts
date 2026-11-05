@@ -29,27 +29,33 @@ function escapeHtml(value: string): string {
 }
 
 function readForceUpdatePromptIcon(): string | null {
-  try {
-    const iconPath = resolve(process.cwd(), "build/icon.png");
-    const icon = readFileSync(iconPath).toString("base64");
-    return `data:image/png;base64,${icon}`;
-  } catch {
-    return null;
+  const iconPaths = [
+    process.resourcesPath ? resolve(process.resourcesPath, "icon.png") : null,
+    resolve(process.cwd(), "build/icon.png"),
+  ];
+  for (const iconPath of iconPaths) {
+    if (!iconPath) continue;
+    try {
+      return `data:image/png;base64,${readFileSync(iconPath).toString("base64")}`;
+    } catch {
+      // 打包态优先 resources/icon.png；开发态回退仓库 build/icon.png。
+    }
   }
+  return null;
 }
 
 function buildForceUpdatePromptMessages(locale: Locale) {
   if (locale === "zh-CN") {
     return {
       checkingTitle: "正在检查更新",
-      checkingMessage: "请保持此窗口打开，ZCode 正在查找可用更新。",
+      checkingMessage: "请保持此窗口打开，ChengCode 正在查找可用更新。",
       downloadingTitle: "正在下载更新",
       downloadingVersionTitle: "正在下载更新 v{version}",
       downloadingMessage: "下载完成后会自动安装，请勿关闭应用。",
       readyTitle: "更新已下载",
-      readyMessage: "ZCode 正在准备重启并安装更新。",
+      readyMessage: "ChengCode 正在准备重启并安装更新。",
       installingTitle: "正在安装更新",
-      installingMessage: "ZCode 即将重启完成安装。",
+      installingMessage: "ChengCode 即将重启完成安装。",
       errorTitle: "自动升级失败",
       errorMessage: "你可以重试自动升级，或改用手动升级。",
       devSkippedTitle: "调试环境无法自动升级",
@@ -67,14 +73,14 @@ function buildForceUpdatePromptMessages(locale: Locale) {
 
   return {
     checkingTitle: "Checking for updates",
-    checkingMessage: "Keep this window open while ZCode checks for updates.",
+    checkingMessage: "Keep this window open while ChengCode checks for updates.",
     downloadingTitle: "Downloading update",
     downloadingVersionTitle: "Downloading update v{version}",
-    downloadingMessage: "ZCode will install the update automatically after download.",
+    downloadingMessage: "ChengCode will install the update automatically after download.",
     readyTitle: "Update downloaded",
-    readyMessage: "ZCode is preparing to restart and install the update.",
+    readyMessage: "ChengCode is preparing to restart and install the update.",
     installingTitle: "Installing update",
-    installingMessage: "ZCode will restart to finish installing the update.",
+    installingMessage: "ChengCode will restart to finish installing the update.",
     errorTitle: "Auto update failed",
     errorMessage: "You can retry auto update or use manual update.",
     devSkippedTitle: "Auto update unavailable in development",
@@ -171,6 +177,7 @@ function renderForceUpdatePromptHtml(text: ForceUpdateDialogText, locale: Locale
       font-weight: 600;
     }
     .brand-icon img { width: 100%; height: 100%; border-radius: 6px; }
+    .brand-icon svg { width: 100%; height: 100%; }
     .brand-title { font-size: 13px; font-weight: 500; color: #0d0d0d; }
     .close {
       position: absolute;
@@ -303,8 +310,8 @@ function renderForceUpdatePromptHtml(text: ForceUpdateDialogText, locale: Locale
     <main class="panel" role="dialog" aria-modal="true" aria-labelledby="title">
       <header class="titlebar">
         <div class="brand">
-          <div class="brand-icon">${icon ? `<img src="${icon}" alt="" />` : "Z"}</div>
-          <div class="brand-title">ZCode</div>
+          <div class="brand-icon">${icon ? `<img src="${icon}" alt="" />` : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-hidden="true" focusable="false"><rect width="100" height="100" rx="21" fill="#B59AFF" /><path fill="#211A2D" fill-rule="evenodd" d="M83 28 69 14H61L51 4H42L48 15C26 15 10 32 10 53 10 76 28 94 51 94 69 94 84 84 91 69L73 61C69 70 61 75 52 75 39 75 30 65 30 52 30 40 39 31 51 31H57L64 38H72L75 44 81 38Q88 38 88 33 88 30 83 28ZM65 21 73 25 65 29Z" /></svg>`}</div>
+          <div class="brand-title">ChengCode</div>
         </div>
         <button class="close" type="button" data-action="quit" aria-label="${escapeHtml(text.quitButton)}">×</button>
       </header>

@@ -47,7 +47,7 @@ test("starts without a runtime readiness system message", async () => {
     const frame = view.captureCharFrame();
     const rows = frame.split("\n");
     const firstLogoRow = rows.findIndex((row) => row.includes(ZCODE_LOGO_LINES[0]));
-    const lastLogoRow = rows.findIndex((row) => row.includes(ZCODE_LOGO_LINES.at(-1) ?? ""));
+    const lastLogoRow = rows.findLastIndex((row) => row.includes(ZCODE_LOGO_LINES.at(-1) ?? ""));
     const composerTopRow = rows.findIndex((row) => row.includes("╭─ Build"));
     const logoCenterRow = Math.floor((firstLogoRow + lastLogoRow) / 2);
     const transcriptCenterRow = Math.floor((composerTopRow - 1) / 2);

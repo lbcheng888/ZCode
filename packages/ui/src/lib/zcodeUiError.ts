@@ -21,7 +21,10 @@ const GENERIC_ZCODE_UI_ERROR_MESSAGES = new Set([
   "Turn execution failed",
   "Compact failed",
   "Rewind failed",
+  // 后端（zcodeTaskServiceAdapter）仍产出旧品牌哨兵；UI 自己生成的兜底文案是新品牌。
+  // 两者都必须命中集合，否则泛化壳会盖住真正的根因。
   "ZCode session failed",
+  "ChengCode session failed",
 ]);
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

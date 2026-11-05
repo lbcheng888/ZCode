@@ -37,6 +37,23 @@ describe("normalizeZCodeUiError", () => {
     });
   });
 
+  it.each(["ZCode session failed", "ChengCode session failed"])(
+    "泛化 session 失败壳（%s）不遮蔽 detail 中的根因",
+    (genericMessage) => {
+      // 后端仍是旧品牌哨兵，UI 兜底文案是新品牌；两者都要被识别为泛化壳。
+      const normalized = normalizeZCodeUiError({
+        message: genericMessage,
+        detail: "Provider quota exceeded",
+      });
+
+      expect(normalized).toMatchObject({
+        code: "UNKNOWN",
+        message: "Provider quota exceeded",
+        detail: undefined,
+      });
+    },
+  );
+
   it("message 缺失时会回退到 data.reason", () => {
     const normalized = normalizeZCodeUiError({
       data: {

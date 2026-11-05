@@ -55,7 +55,7 @@ test("normalizes prompt input for the shell", () => {
   );
 });
 
-test("renders a ZCODE logo placeholder for an empty transcript", () => {
+test("renders a ChengCode logo placeholder for an empty transcript", () => {
   const [child] = reactElementChildren(
     ContentPane({ copy: EN_COPY, focused: false, messages: [] }),
   );
@@ -290,7 +290,7 @@ test("renders the product version header and workspace directory footer", () => 
   assert.ok(workspaceLine);
   assert.equal(workspaceLine.length, SIDEBAR_CONTENT_WIDTH);
   assert.match(workspaceLine, /\.\.\.$/);
-  assert.ok(lines.includes("ZCode"));
+  assert.ok(lines.includes("ChengCode"));
   assert.ok(lines.includes(" 0.0.0"));
 });
 

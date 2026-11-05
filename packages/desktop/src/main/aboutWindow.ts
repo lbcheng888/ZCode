@@ -94,16 +94,13 @@ export function createCustomAboutDialogHtml(input: CustomAboutDialogHtmlInput): 
         display: flex;
         align-items: center;
         justify-content: center;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        background: linear-gradient(180deg, #000000 0%, #151718 100%);
-        color: #ffffff;
+        border-radius: 21%;
         box-shadow: 0 10px 13px -3px rgb(0 0 0 / 0.2), 0 4px 5px -3px rgb(0 0 0 / 0.2);
       }
 
       .app-logo {
-        width: 30px;
-        height: auto;
+        width: 100%;
+        height: 100%;
         display: block;
       }
 
@@ -173,21 +170,17 @@ export function createCustomAboutDialogHtml(input: CustomAboutDialogHtmlInput): 
           <div class="app-icon" aria-hidden="true">
             <svg
               xmlns="http://www.w3.org/2000/svg"
-              width="118"
+              width="100"
               height="100"
-              fill="none"
-              viewBox="0 0 256 218"
+              viewBox="0 0 100 100"
               class="app-logo"
               focusable="false"
             >
+              <rect width="100" height="100" rx="21" fill="#B59AFF" />
               <path
-                fill="currentColor"
-                d="M134.4 0.130152L116.48 25.6022C113.665 29.5699 109.054 32.0019 104.064 32.0019H6.3999V0C6.3999 0.130149 134.4 0.130152 134.4 0.130152Z"
-              />
-              <path fill="currentColor" d="M256 0.130127L102.401 217.732H0L153.599 0.130127H256Z" />
-              <path
-                fill="currentColor"
-                d="M121.601 217.732L139.65 192.134C142.465 188.166 147.076 185.734 152.067 185.734H249.604V217.736H121.601V217.732Z"
+                fill="#211A2D"
+                fill-rule="evenodd"
+                d="M83 28 69 14H61L51 4H42L48 15C26 15 10 32 10 53 10 76 28 94 51 94 69 94 84 84 91 69L73 61C69 70 61 75 52 75 39 75 30 65 30 52 30 40 39 31 51 31H57L64 38H72L75 44 81 38Q88 38 88 33 88 30 83 28ZM65 21 73 25 65 29Z"
               />
             </svg>
           </div>

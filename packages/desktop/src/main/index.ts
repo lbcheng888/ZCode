@@ -176,7 +176,7 @@ import {
   resolveRemoteAssetDirs,
   resolveZCodeEndpointEnvBaseOrigin,
   desktopRuntimeEnv,
-  runtimeApplicationName,
+  runtimeApplicationDisplayName,
   runtimeHomePath,
   runtimeSessionDataPath,
   runtimeUserDataPath,
@@ -291,7 +291,7 @@ if (!app.isPackaged && process.env.ZCODE_DISABLE_FIXED_REMOTE_DEBUGGING_PORT !==
   app.commandLine.appendSwitch("remote-debugging-port", "9229");
 }
 
-app.setName(runtimeApplicationName);
+app.setName(runtimeApplicationDisplayName);
 if (runtimeHomePath) {
   app.setPath("home", runtimeHomePath);
 }
@@ -304,7 +304,7 @@ if (!shouldUseElectronDefaultUserDataPath) {
   app.setPath("userData", runtimeUserDataPath);
   app.setPath("sessionData", runtimeSessionDataPath);
 }
-process.title = runtimeApplicationName;
+process.title = runtimeApplicationDisplayName;
 
 process.on("unhandledRejection", (reason) => {
   logger.error("unhandledRejection:", reason);
@@ -1507,7 +1507,7 @@ function confirmAppQuit(originWindow?: BrowserWindow | null) {
     defaultId: 1,
     cancelId: 1,
     title: isZh ? "退出确认" : "Confirm Quit",
-    message: isZh ? "确认退出 Z Code?" : "Quit Z Code?",
+    message: isZh ? "确认退出 ChengCode?" : "Quit ChengCode?",
     detail: detailLines.join("\n"),
     icon: nativeImage.createFromPath(iconPath),
   };

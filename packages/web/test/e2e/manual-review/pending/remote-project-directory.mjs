@@ -230,7 +230,7 @@ try {
         new URL("/remote/v4?app_version=3.15.1&sid=e2e-device&mid=e2e-mid", origin).href,
       );
       const onboarding = page.getByTestId("onboarding-page");
-      const welcome = page.getByRole("dialog", { name: /欢迎使用 ZCode|Welcome to ZCode/ });
+      const welcome = page.getByRole("dialog", { name: /欢迎使用 ChengCode|Welcome to ChengCode/ });
       await local().or(onboarding).or(welcome).first().waitFor();
       if (await onboarding.isVisible())
         await onboarding.getByRole("button", { name: /退出引导|Exit onboarding/ }).click();

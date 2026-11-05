@@ -134,7 +134,7 @@ describe("Side Pane Tab responsive interactions", () => {
       const logoButton = await $('[data-testid="desktop-top-logo-sidebar-toggle"]');
       expect(await logoButton.getSize("width")).toBe(28);
       expect(await logoButton.$("[data-desktop-logo-badge]").getSize("width")).toBe(20);
-      expect(await logoButton.$("[data-desktop-logo-badge] svg").getSize("width")).toBe(13);
+      expect(await logoButton.$("[data-desktop-logo-badge] svg").getSize("width")).toBe(20);
       expect(await logoButton.$("animate").isExisting()).toBe(false);
       await logoButton.moveTo();
       await browser.waitUntil(
@@ -402,7 +402,7 @@ describe("Side Pane Tab responsive interactions", () => {
       expect(colors[0]).toBe(colors[2]);
       expect(colors[0]).not.toBe("rgba(0, 0, 0, 0)");
       if (process.platform === "win32" || process.platform === "linux") {
-        expect(await $("[data-desktop-logo-badge] svg").getSize("width")).toBe(13);
+        expect(await $("[data-desktop-logo-badge] svg").getSize("width")).toBe(20);
       }
       const terminalTabStyle = await browser.execute(() => {
         const tab = document.querySelector('#terminal [role="tab"][data-active]')!;

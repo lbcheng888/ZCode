@@ -1,7 +1,7 @@
-# ZCode
+# ChengCode
 
 <div align="center">
-  <img src="public/logo/icons/1024x1024.png" alt="ZCode" width="128" height="128" />
+  <img src="public/logo/icons/1024x1024.png" alt="ChengCode" width="128" height="128" />
 </div>
 <p align="center">
   <a href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=47ag983c-8fcb-4d6d-814b-5395193a712c&amp;qr_code=true">Feishu community</a> ·
@@ -11,14 +11,14 @@
   <a href="README.md">简体中文</a> | English
 </p>
 
-ZCode is an AI coding workspace with desktop, browser, and terminal interfaces. This repository contains the clients, backend services, shared UI, and Agent CLI and runtime source code.
+ChengCode is an AI coding workspace with desktop, browser, and terminal interfaces. This repository contains the clients, backend services, shared UI, and Agent CLI and runtime source code.
 
 ## Updates
 
-- **2026-10-19**: Updated to ZCode v3.16.2.
-- **2026-10-16**: Updated to ZCode v3.16.1.
-- 2026-10-10: Updated to ZCode v3.15.1.
-- 2026-9-23: Updated to ZCode v3.14.3.
+- **2026-10-19**: Updated to ChengCode v3.16.2.
+- **2026-10-16**: Updated to ChengCode v3.16.1.
+- 2026-10-10: Updated to ChengCode v3.15.1.
+- 2026-9-23: Updated to ChengCode v3.14.3.
 
 ## Setup
 
@@ -76,9 +76,9 @@ ZCODE_SERVER_WORKSPACE=/path/to/project pnpm dev:web
 
 This starts both the Web development server (default: `http://localhost:5173`) and the backend (default: `http://localhost:3030`). Open the Web development server in your browser. `/ws` and general `/api` requests are proxied to the local backend; `/api/v1/oauth/token` is proxied separately to the configured product service.
 
-After changing Agent source code, run `pnpm --filter @zcode/cli... build` and restart the service. To validate the complete distribution, extract and run it as described under Packaging → ZCode CLI distribution below.
+After changing Agent source code, run `pnpm --filter @zcode/cli... build` and restart the service. To validate the complete distribution, extract and run it as described under Packaging → ChengCode CLI distribution below.
 
-### ZCode CLI distribution
+### ChengCode CLI distribution
 
 The command-line distribution includes the TUI, Web client, and Agent behind one `zcode` command. With no arguments it starts the TUI; a leading `--web` starts Web mode; all other arguments go to the existing Agent CLI. Both modes run locally without Electron.
 
@@ -156,7 +156,7 @@ pnpm bundle:desktop -- --help
 
 The default target is macOS arm64, and the default output directory is `packages/desktop/dist/`. `--os` accepts `mac`, `win`, or `linux`; `--arch` accepts `x64` or `arm64`. Packaging and signing require the tools and configuration for the target platform.
 
-### ZCode CLI distribution
+### ChengCode CLI distribution
 
 Run `pnpm build:zcode` to build the CLI/TUI, backend, and Web client, collect the TUI native libraries, workers, and runtime dependencies, then assemble the distribution. Running the distribution still requires Node.js; use the version specified in `mise.toml`.
 

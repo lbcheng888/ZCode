@@ -134,8 +134,10 @@
 
 .highspeed-sidebar-share-card__wordmark {
   display: block;
-  width: 52px;
+  width: max-content;
   height: auto;
+  font-size: 11px;
+  line-height: 1;
   opacity: 0.6;
 }
 

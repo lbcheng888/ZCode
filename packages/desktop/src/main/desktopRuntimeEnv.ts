@@ -65,6 +65,15 @@ function isTruthyRuntimeEnvOverride(name: string): boolean {
 export const runtimeApplicationName =
   readRuntimeEnvOverride("ZCODE_DESKTOP_APPLICATION_NAME") ??
   (isLocalDevelopmentRuntime ? "ZCode Dev" : isPreviewPackagedRuntime ? "ZCode Preview" : "ZCode");
+// 展示名只影响 app.setName()/process.title 等用户可见身份；Electron 的 userData/sessionData
+// 仍按 runtimeApplicationName 的旧 ZCode 目录复用，改名不能迁移或丢失已有用户数据。
+export const runtimeApplicationDisplayName =
+  readRuntimeEnvOverride("ZCODE_DESKTOP_APPLICATION_NAME") ??
+  (isLocalDevelopmentRuntime
+    ? "ChengCode Dev"
+    : isPreviewPackagedRuntime
+      ? "ChengCode Preview"
+      : "ChengCode");
 // Electron 的 app.getPath("home") 不一定跟随测试进程里的 HOME 覆盖。
 // e2e 默认工作区依赖 home 路径，因此提供显式覆盖，避免测试写到开发者真实 ~/ZCodeProject。
 export const runtimeHomePath = readRuntimeEnvOverride("ZCODE_DESKTOP_HOME_DIR");

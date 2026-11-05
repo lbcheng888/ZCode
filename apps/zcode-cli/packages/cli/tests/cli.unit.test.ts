@@ -4226,7 +4226,7 @@ export async function main() {
     assert.equal(exitCode, 1);
     assert.match(
       ctx.stderr.output(),
-      /Captured ZCode CUA broker credentials may only launch the trusted shared node_repl host/,
+      /Captured ChengCode CUA broker credentials may only launch the trusted shared node_repl host/,
     );
     await assert.rejects(readFile(outputPath, "utf8"), { code: "ENOENT" });
   } finally {
@@ -4399,7 +4399,7 @@ export async function main() {
     assert.equal(await run(ctx), 1);
     assert.match(
       ctx.stderr.output(),
-      /Captured ZCode CUA broker credentials may only launch the trusted shared node_repl host/,
+      /Captured ChengCode CUA broker credentials may only launch the trusted shared node_repl host/,
     );
     await assert.rejects(readFile(outputPath, "utf8"), { code: "ENOENT" });
   } finally {
