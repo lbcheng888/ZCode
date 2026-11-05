@@ -363,6 +363,7 @@ export {
 export * from "./conversationSelection.js";
 export * from "./attachment-source.js";
 export * from "./attachment-role.js";
+export * from "./capability-ticket.js";
 
 export * from "./channel-mention.js";
 

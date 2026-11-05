@@ -1,3 +1,10 @@
+export {
+  createCapabilityTicketClient,
+  type CapabilityTicketClient,
+  type CapabilityTicketRedeemTransport,
+  type CapabilityTicketSecretBundle,
+  type CreateCapabilityTicketClientOptions,
+} from "./capabilityTicketClient.js";
 export { RemoteServiceAccess } from "./remoteServiceAccess.js";
 export { connectViaProtocol, connectViaWebSocket } from "./websocket.js";
 export type { WebSocketConnectionCloseEvent } from "./websocket.js";

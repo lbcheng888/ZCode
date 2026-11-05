@@ -94,6 +94,9 @@ export const conversationInputIntentSchema = z
       .strict()
       .optional(),
     source: conversationInputSourceSchema.optional(),
+    // P6 能力票据句柄（spec §2.3 规则 7，additive-optional）。只允许公开 ticketId；
+    // ticketSecret 永不进输入意图、snapshot、日志或模型上下文。
+    capabilityTicketId: z.string().min(1).optional(),
   })
   .strict();
 

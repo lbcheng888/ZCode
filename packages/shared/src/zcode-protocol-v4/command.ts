@@ -378,6 +378,9 @@ export const commandEnvelopeSchema = z.object({
   triggerId: z.string().trim().min(1).optional(),
   // taint 信封（M2/§5）：supervisor 铸造、随 trigger_events.taint 透传，永不构成指令权威。
   taint: z.boolean().optional(),
+  // P6 能力票据句柄（spec §2.3 规则 7，additive-optional）。这里只允许公开 ticketId：
+  // ticketSecret 永不进协议帧、日志、模型上下文；执行端兑换走 broker 受控通道。
+  capabilityTicketId: z.string().min(1).optional(),
 });
 export type CommandEnvelope = z.infer<typeof commandEnvelopeSchema>;
 

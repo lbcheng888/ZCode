@@ -182,17 +182,19 @@ export function ruleAppliesToAttachment(
   return true;
 }
 
-/** 工具族（spec §1.3 矩阵的行）。 */
-export type AttachmentToolClass =
-  | "read"
-  | "workspace_write"
-  | "command_exec"
-  | "network"
-  | "channel"
-  | "credential"
-  | "permission_management"
-  | "goal_control"
-  | "unknown";
+/** 工具族（spec §1.3 矩阵的行）。能力票据 scope 复用同一枚举，避免两份字面量漂移。 */
+export const attachmentToolClassSchema = z.enum([
+  "read",
+  "workspace_write",
+  "command_exec",
+  "network",
+  "channel",
+  "credential",
+  "permission_management",
+  "goal_control",
+  "unknown",
+]);
+export type AttachmentToolClass = z.infer<typeof attachmentToolClassSchema>;
 
 const READ_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Read",
