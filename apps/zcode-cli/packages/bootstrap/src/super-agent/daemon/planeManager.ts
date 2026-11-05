@@ -10,6 +10,7 @@
  * 尚未存在的 Core 侧方法不在 child 伪造——host.client 直接请求，Core 回
  * methodNotSupported/unimplemented 时错误原样上浮。
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -54,7 +55,7 @@ import {
 import { getSuperAgentDatabasePath } from "../../app/paths.js";
 import type { AdjudicationModelSessionPort } from "../adjudication/index.js";
 import type { AutoReplyGuardPort, SubscriptionBackfillSeed, TriggerEnvelope } from "../intake/index.js";
-import type { TriggerWorkerPort } from "../trigger/index.js";
+import { triggerDeliveryCommandId, type TriggerWorkerPort } from "../trigger/index.js";
 import { ControlPlaneRpcCallError as RpcError } from "./rpcServer.js";
 import type { ControlPlanePeerChannel } from "./rpcServer.js";
 
@@ -75,6 +76,10 @@ export interface DaemonPlaneManagerOptions {
   adjudicationSession: AdjudicationModelSessionPort;
   /** `features.mandateGate` 的启动方投影（缺省 false = P2 兼容）。 */
   mandateGate: boolean;
+  /** 派发桥周期（push/sweep）轮询间隔；缺省取控制面常量（测试可缩短）。 */
+  dispatchIntervalMs?: number;
+  /** in_window 行宽限；缺省取控制面常量（测试可缩短）。 */
+  dispatchGraceMs?: number;
   now?: () => number;
   onPlaneError: (workspaceIdentity: string | undefined, error: unknown, context: string) => void;
   lastErrorFor?: (workspaceIdentity: string) => string | undefined;
@@ -83,6 +88,13 @@ export interface DaemonPlaneManagerOptions {
    * 不是普通 RPC error。
    */
   onFatal?: (message: string) => void;
+  /**
+   * 当前任一未关闭的 Core 数据面通道（RPC server 活跃集合）。§3.5：派发桥可达性
+   * 不得只看该 plane 最近一次 ensure/ingest 的通道——Core 重连后若首个请求是
+   * `lease.list` / `schedule.audit`，旧通道已关闭会让桥停推并把 pending 行误结算
+   * skipped(no_dispatcher)。任一经认证的活跃通道都应视为可达。
+   */
+  activeHostChannel?: () => ControlPlanePeerChannel | undefined;
 }
 
 interface PlaneRecord {
@@ -92,15 +104,24 @@ interface PlaneRecord {
   plane: SuperAgentControlPlane;
   /** host.command 回调的目标通道：最近一次发出 ensure/ingest 的 Core 连接。 */
   coreChannel?: ControlPlanePeerChannel;
-  /**
-   * 当前父请求的剩余预算（epoch ms）。反向 host.* 回调发生在 ingest/ensure 内，
-   * 必须受该请求 deadline 约束；每次请求更新。
-   */
-  deadlineRef: { current: number | undefined };
 }
+
+/**
+ * 当前 RPC 父请求的剩余预算（§3.1 嵌套反向请求约束）。
+ *
+ * 必须按请求调用栈作用域：`AsyncLocalStorage` 的 store 随 await 传播，因此并发
+ * ingest 各自看到自己的 deadline，不会互相覆盖。派发桥的后台 push 不在任何父请求
+ * 栈内，必须经独立端口显式不传 deadline——绝不继承入站请求早已过期的预算
+ * （旧实现把 deadline 存进 plane 且从不清空，ensure 10s 后所有后台 push 都抛
+ * `parent request deadline already elapsed`）。
+ */
+const requestDeadline = new AsyncLocalStorage<{ deadlineAt: number | undefined }>();
 
 /** 结构镜像 intake autoReplyGuard 的适用面：非 IM 恒 true，不消耗 Core 守卫占额。 */
 const AUTO_REPLY_GUARD_IM_SOURCE = "im";
+
+/** 与 super-agent-host-ports 的 SUPER_AGENT_CLIENT_ID 同值（跨进程 wire 面）。 */
+const CONTROL_PLANE_TRIGGER_CLIENT_ID = "super-agent-trigger";
 
 function readPayloadString(payload: Record<string, unknown>, key: string): string | undefined {
   const value = payload[key];
@@ -250,6 +271,19 @@ export class DaemonPlaneManager {
     channel: ControlPlanePeerChannel,
     deadlineAt?: number,
   ): Promise<unknown> {
+    // 父请求预算只在本请求的异步调用栈内可见（嵌套 host.* 回调取它）；后台派发桥
+    // push 不在该栈内，走 hostPorts.dispatchHandleCommand 显式不传 deadline。
+    return await requestDeadline.run({ deadlineAt }, () =>
+      this.dispatchRequest(method, rawParams, channel, deadlineAt),
+    );
+  }
+
+  private async dispatchRequest(
+    method: string,
+    rawParams: unknown,
+    channel: ControlPlanePeerChannel,
+    deadlineAt?: number,
+  ): Promise<unknown> {
     switch (method as ControlPlaneRpcMethod) {
       case "workspace.ensure": {
         const next = this.ensureQueue.then(() =>
@@ -259,7 +293,7 @@ export class DaemonPlaneManager {
         return await next;
       }
       case "trigger.ingest":
-        return await this.ingest(rawParams, channel, deadlineAt);
+        return await this.ingest(rawParams, channel);
       case "schedule.audit":
         return this.scheduleAudit(rawParams);
       case "lease.list":
@@ -344,7 +378,6 @@ export class DaemonPlaneManager {
         );
       }
       existing.coreChannel = channel;
-      existing.deadlineRef.current = deadlineAt;
       return this.ensureResult(existing);
     }
     if (this.stopped) {
@@ -361,22 +394,26 @@ export class DaemonPlaneManager {
     // 取不到（Core 未实现/超时）记 workspace 错误但不阻断 ensure：域库中已有订阅仍可用。
     const seeds = await this.loadBackfillSeeds(workspaceIdentity, channel, deadlineAt);
     const ownerId = controlPlaneOwnerId(this.options.serverRoot, workspaceIdentity);
-    const deadlineRef: { current: number | undefined } = { current: deadlineAt };
     const plane = await createSuperAgentControlPlane({
       workspaceIdentity,
       ownerId,
       onError: (error, context) => this.options.onPlaneError(workspaceIdentity, error, context),
-      hostPorts: this.hostPorts(workspaceIdentity, channel, tasksIndexReady, seeds, deadlineRef),
+      hostPorts: this.hostPorts(workspaceIdentity, channel, tasksIndexReady, seeds),
       adjudicationSession: this.options.adjudicationSession,
       now: this.now,
       mandateGate: this.options.mandateGate,
+      ...(this.options.dispatchIntervalMs !== undefined
+        ? { dispatchIntervalMs: this.options.dispatchIntervalMs }
+        : {}),
+      ...(this.options.dispatchGraceMs !== undefined
+        ? { dispatchGraceMs: this.options.dispatchGraceMs }
+        : {}),
     });
     const record: PlaneRecord = {
       workspaceIdentity,
       tasksIndexReady,
       plane,
       coreChannel: channel,
-      deadlineRef,
       ...(params.workspacePath ? { workspacePath: params.workspacePath } : {}),
     };
     this.planes.set(workspaceIdentity, record);
@@ -434,7 +471,6 @@ export class DaemonPlaneManager {
   private async ingest(
     rawParams: unknown,
     channel: ControlPlanePeerChannel,
-    deadlineAt?: number,
   ): Promise<z.infer<typeof controlPlaneTriggerIngestResultSchema>> {
     const envelope = controlPlaneTriggerEnvelopeSchema.parse(rawParams) as TriggerEnvelope;
     const record = this.planes.get(envelope.workspaceIdentity);
@@ -445,7 +481,6 @@ export class DaemonPlaneManager {
       return { handled: false };
     }
     record.coreChannel = channel;
-    record.deadlineRef.current = deadlineAt;
     let outcome;
     try {
       outcome = await record.plane.triggerSink.ingest(envelope);
@@ -637,12 +672,26 @@ export class DaemonPlaneManager {
     initialChannel: ControlPlanePeerChannel,
     tasksIndexReady: boolean,
     backfillSeeds: readonly SubscriptionBackfillSeed[],
-    deadlineRef: { current: number | undefined },
   ) {
+    const currentDeadlineAt = (): number | undefined => requestDeadline.getStore()?.deadlineAt;
+    // worker 端口是对象字面量，不能依赖 this 绑定到 manager；时钟先捕获。
+    const nowFn = this.now;
+
+    /**
+     * 目标 Core 通道：优先本 plane 最近一次 ensure/ingest 的连接；它已关闭时退回
+     * RPC server 的任一活跃通道（Core 重连后的新连接）。§3.5 可达性必须看活跃通道
+     * 集合，不能只看旧连接——否则 Core 重连后首个请求是 lease.list/schedule.audit
+     * 时桥会误判不可达并让 pending 行按 no_dispatcher 结算。
+     */
+    const resolveChannel = (): ControlPlanePeerChannel | undefined => {
+      const own = this.planes.get(workspaceIdentity)?.coreChannel ?? initialChannel;
+      if (!own.closed) return own;
+      return this.options.activeHostChannel?.();
+    };
+
     const channelOf = (): ControlPlanePeerChannel => {
-      const record = this.planes.get(workspaceIdentity);
-      const channel = record?.coreChannel ?? initialChannel;
-      if (channel.closed) {
+      const channel = resolveChannel();
+      if (!channel || channel.closed) {
         throw new RpcError(
           CONTROL_PLANE_RPC_ERROR_CODES.hostUnreachable,
           `Core host channel closed（workspace=${workspaceIdentity}）`,
@@ -652,7 +701,10 @@ export class DaemonPlaneManager {
       return channel;
     };
 
-    const hostCommand = async (rawParams: unknown): Promise<CommandAck> => {
+    const hostCommandWithDeadline = async (
+      rawParams: unknown,
+      deadlineAt: number | undefined,
+    ): Promise<CommandAck> => {
       const envelope = commandEnvelopeSchema.parse(rawParams);
       const sessionId = envelope.sessionId;
       if (sessionId === null) {
@@ -675,7 +727,7 @@ export class DaemonPlaneManager {
         "host.command",
         params,
         CONTROL_PLANE_RPC_TIMEOUTS_MS["host.command"],
-        deadlineRef.current,
+        deadlineAt,
       );
       return commandAckSchema.parse(result);
     };
@@ -686,7 +738,7 @@ export class DaemonPlaneManager {
           "host.worker.find",
           { workspaceIdentity, threadKey: input.threadKey },
           CONTROL_PLANE_RPC_TIMEOUTS_MS["host.worker.find"],
-          deadlineRef.current,
+          currentDeadlineAt(),
         );
         const parsed = hostResumableWorkerSchema.parse(raw);
         return parsed ?? undefined;
@@ -696,9 +748,33 @@ export class DaemonPlaneManager {
           "host.worker.resume",
           { workspaceIdentity, sessionId: input.sessionId, triggerId: input.triggerId },
           CONTROL_PLANE_RPC_TIMEOUTS_MS["host.worker.resume"],
-          deadlineRef.current,
+          currentDeadlineAt(),
         );
-        return hostWorkerResumeResultSchema.parse(raw);
+        const parsed = hostWorkerResumeResultSchema.parse(raw);
+        // §3.3 wire params 不含唤醒文本：resume 只打开会话。若就此返回成功，
+        // dispatchHumanExplicit 会把「resumed」当成已投递，而用户正文从未进入 agent
+        // （B-A3 主路径的伪回执）。因此必须再经唯一 admission 投递唤醒输入；幂等键 =
+        // triggerId+sessionId（与 owned 直通同一键），重投由 CommandInbox 吸收。
+        const envelope = commandEnvelopeSchema.parse({
+          commandId: triggerDeliveryCommandId(input.triggerId, parsed.sessionId),
+          clientId: CONTROL_PLANE_TRIGGER_CLIENT_ID,
+          sessionId: parsed.sessionId,
+          type: "sendText",
+          payload: { text: input.text },
+          issuedAt: nowFn(),
+          triggerId: input.triggerId,
+          taint: true,
+        });
+        const ack = await hostCommandWithDeadline(envelope, currentDeadlineAt());
+        if (ack.status !== "accepted" && ack.status !== "duplicate") {
+          // 投递被拒不是「已送达」：原样抛错，事件保持未决并由 provider 重投。
+          throw new RpcError(
+            CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+            `host.worker.resume 唤醒投递被拒: ${ack.reasonCode ?? ack.status}（triggerId=${input.triggerId}）`,
+            true,
+          );
+        }
+        return parsed;
       },
       async createTask(input) {
         const raw = await channelOf().request(
@@ -711,7 +787,7 @@ export class DaemonPlaneManager {
             ...(input.context ? { context: input.context } : {}),
           },
           CONTROL_PLANE_RPC_TIMEOUTS_MS["host.worker.createTask"],
-          deadlineRef.current,
+          currentDeadlineAt(),
         );
         return hostWorkerCreateTaskResultSchema.parse(raw);
       },
@@ -739,14 +815,27 @@ export class DaemonPlaneManager {
           "host.autoReplyGuard",
           { workspaceIdentity, botId, threadKey, actorId },
           CONTROL_PLANE_RPC_TIMEOUTS_MS["host.autoReplyGuard"],
-          deadlineRef.current,
+          currentDeadlineAt(),
         );
         return hostAutoReplyGuardResultSchema.parse(raw).admitted;
       },
     };
 
+    // 派发桥可达性：任一未关闭的 Core 通道即可达；断开期间 pending 行留给宽限 sweep。
+    // 不能复用 channelOf（它在关闭时抛错，会把可达性探测本身变成异常）。
+    const hostReachable = (): boolean => {
+      const channel = resolveChannel();
+      return channel !== undefined && !channel.closed;
+    };
+
     return {
-      handleCommand: hostCommand,
+      handleCommand: (rawParams: unknown) =>
+        hostCommandWithDeadline(rawParams, currentDeadlineAt()),
+      // 后台派发桥 push 不属于任何 RPC 父请求：显式不传 deadlineAt，只用方法自身预算。
+      // 继承入站请求的 deadline 会在请求结束后永久过期（旧实现的实际故障）。
+      dispatchHandleCommand: (rawParams: unknown) =>
+        hostCommandWithDeadline(rawParams, undefined),
+      isHostReachable: hostReachable,
       autoReplyGuard,
       worker,
       backfillSeeds,

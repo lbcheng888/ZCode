@@ -242,4 +242,23 @@ describe("super-agent-trigger dispatchBridge（§1.6 / §3.2 M7② exactly-once�
     await expect(bridge.pushDispatch(claim2.requestId)).rejects.toThrow("host offline");
     expect(JSON.parse(statusOf(db, "run-7"))).toMatchObject({ status: "pushed", attempts: 1 });
   });
+
+  it("resumePendingAfterBoot：host rejected 回执计入 failures，不静默当已推送", async () => {
+    db = openTasksIndexLikeDb();
+    const scripted = createScriptedPush();
+    const bridge = createDispatchBridge({ db, push: scripted.port, now: () => NOW });
+    const claim = bridge.claimDue({ runId: "run-rej", workspaceIdentity: "ws", now: NOW });
+
+    scripted.outcomes.push({ status: "rejected", reasonCode: "dispatch.sessionRequired" });
+    const result = await bridge.resumePendingAfterBoot({ workspaceIdentity: "ws" });
+
+    // 确定性拒绝不是 ACK：不得计入 pushed（否则循环把它当成功且无人告警）。
+    expect(result.pushed).toEqual([]);
+    expect(result.failures).toEqual([
+      { requestId: claim.requestId, message: "host rejected admission: dispatch.sessionRequired" },
+    ]);
+    expect(result.pending).toEqual([claim.requestId]);
+    // §1.6 无 failed 终态：行保持 pushed，不能自行造终态。
+    expect(JSON.parse(statusOf(db, "run-rej"))).toMatchObject({ status: "pushed", attempts: 1 });
+  });
 });

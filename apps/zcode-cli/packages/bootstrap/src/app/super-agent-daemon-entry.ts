@@ -169,6 +169,10 @@ export interface StartControlPlaneDaemonOptions {
   now?: () => number;
   /** 测试可缩短 health 心跳；生产缺省 {@link CONTROL_PLANE_HEALTH_INTERVAL_MS}。 */
   healthIntervalMs?: number;
+  /** 测试可缩短派发桥周期；生产缺省控制面常量（20s）。 */
+  dispatchIntervalMs?: number;
+  /** 测试可缩短 in_window 宽限；生产缺省控制面常量（5 分钟）。 */
+  dispatchGraceMs?: number;
   /** 测试可在临时目录绑定端点；缺省按 serverRoot 推导。 */
   endpoint?: string;
   platform?: NodeJS.Platform;
@@ -343,10 +347,18 @@ export async function startControlPlaneDaemon(
       database,
       adjudicationSession: adjudication.session,
       mandateGate: options.config.mandateGate,
+      ...(options.dispatchIntervalMs !== undefined
+        ? { dispatchIntervalMs: options.dispatchIntervalMs }
+        : {}),
+      ...(options.dispatchGraceMs !== undefined
+        ? { dispatchGraceMs: options.dispatchGraceMs }
+        : {}),
       now,
       onPlaneError: (workspaceIdentity, error, context) =>
         recordError(workspaceIdentity, error, context),
       lastErrorFor: (workspaceIdentity) => lastErrors.get(workspaceIdentity),
+      // §3.5：可达性 = RPC server 任一未关闭的已认证 Core 通道，而非某 plane 的旧连接。
+      activeHostChannel: () => rpc?.channels().find((channel) => !channel.closed),
       onFatal: (message) => {
         void failFatal(message);
       },

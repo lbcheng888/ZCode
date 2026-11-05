@@ -27,7 +27,6 @@ import type {
 } from "@zcode/core";
 import type {
   CommandAck,
-  CommandEnvelope,
   PendingWouldAcceptCard,
 } from "@zcode/shared/zcode-protocol-v4";
 import {
@@ -66,14 +65,11 @@ import {
 import {
   CONTROL_PLANE_HEARTBEAT_INTERVAL_MS,
   createDispatchBridge,
+  createDispatchLoop,
   createTriggerSubsystem,
-  createTriggerSubscriptions,
   extractPayloadText,
-  triggerDeliveryCommandId,
   TRIGGER_DISPATCH_TEXT_MAX_CHARS,
-  type DispatchPushCommand,
-  type DispatchPushOutcome,
-  type DispatchPushPort,
+  type DispatchLoop,
   type RouteOwnedOutcome,
   type SuperAgentDispatchBridgeContract,
   type SuperAgentTriggerContract,
@@ -82,10 +78,22 @@ import {
   type TriggerWorkerPort,
 } from "../super-agent/trigger/index.js";
 import {
+  createCommandInboxDispatchPush,
+  createCommandInboxTriggerDelivery,
+  createInProcessTriggerWorkerPort,
+} from "./super-agent-host-ports.js";
+import {
   createAdjudicationDriver,
   type AdjudicationDeliveryPort, type AdjudicationModelSessionRequest,
   type AdjudicationModelSessionPort, type SuperAgentAdjudicationContract,
 } from "../super-agent/adjudication/index.js";
+
+// 宿主端口适配器拆到 super-agent-host-ports.ts（职责分离）；保持既有 import 面。
+export {
+  createCommandInboxDispatchPush,
+  createCommandInboxTriggerDelivery,
+  createInProcessTriggerWorkerPort,
+} from "./super-agent-host-ports.js";
 
 /** CommandInbox 在线投递面（= 协议宿主 ConversationV4Gateway.handleCommand 的形状）。 */
 export type SuperAgentCommandHandle = (rawParams: unknown) => Promise<CommandAck>;
@@ -108,10 +116,21 @@ export interface SuperAgentHostPorts {
    * resume/createTask 全部经它走唯一 admission（M1 禁旁路）。
    */
   handleCommand: SuperAgentCommandHandle;
+  /**
+   * 后台派发桥专用投递面（可选）：不属于任何 RPC 父请求，调用方必须显式不继承父请求
+   * deadline（B-SPEC §3.5）。缺省回退 `handleCommand`（进程内宿主无 deadline 语义）。
+   */
+  dispatchHandleCommand?: SuperAgentCommandHandle;
   /** bots 互答守卫（admitAutoReplyTurn 包装，spec §3.1 Fast Path 第四项）。 */
   autoReplyGuard: AutoReplyGuardPort;
   /** 多会话宿主注入完整 worker 装配面；缺省 = 本会话单 worker 实现。 */
   worker?: TriggerWorkerPort;
+  /**
+   * 宿主（Core）连接是否可达（daemon child = 反向 RPC 通道未关闭）。派发桥据此决定
+   * pending 行「推」还是「留待宽限结算」：不可达时不得对着断开的通道刷 push，
+   * in_window 行由 sweepSkipped 收敛 skipped（B-SPEC §3.5 / T3①）。
+   */
+  isHostReachable?: () => boolean;
   /** tasks-index 库路径（宿主经 services getTasksIndexDatabasePath 解析后传入）；注入才建派发桥。 */
   tasksIndexDatabasePath?: string;
   /**
@@ -169,6 +188,10 @@ export interface CreateSuperAgentControlPlaneOptions {
    * 档位解析为 speculative/auto 时必需；缺席 = applyVerdicts 事务前响亮抛错。
    */
   specRun?: TriggerSpecRunPort;
+  /** 派发桥周期（push/sweep）轮询间隔；缺省 20s（与 Core scheduler poll 同值）。 */
+  dispatchIntervalMs?: number;
+  /** in_window 行宽限（超过即 skipped(no_dispatcher)）；缺省 5 分钟。 */
+  dispatchGraceMs?: number;
 }
 
 export interface SuperAgentControlPlaneContracts {
@@ -226,202 +249,11 @@ export interface SuperAgentControlPlane {
   stop(): void;
 }
 
-const SUPER_AGENT_CLIENT_ID = "super-agent-trigger";
-const DISPATCH_CLIENT_ID = "super-agent-dispatch";
-
 /** trigger_events.fast_path 三态之一（spec §1.2）；human-explicit 免 Mandate（design M2:118）。 */
 const HUMAN_EXPLICIT_FAST_PATH = "human_explicit";
 
 /** would-accept 卡片摘要上限：与投递文本同预算（常量单点，payload-text 同源）。 */
 const WOULD_ACCEPT_SUMMARY_MAX_CHARS = TRIGGER_DISPATCH_TEXT_MAX_CHARS;
-
-function buildSendTextEnvelope(input: {
-  commandId: string;
-  sessionId: string;
-  text: string;
-  requestedDelivery?: "startNow" | "queue" | "guide";
-  clientId: string;
-  triggerId?: string;
-  taint?: boolean;
-  now: number;
-}): CommandEnvelope {
-  return {
-    commandId: input.commandId,
-    clientId: input.clientId,
-    sessionId: input.sessionId,
-    type: "sendText",
-    payload: {
-      text: input.text,
-      ...(input.requestedDelivery ? { requestedDelivery: input.requestedDelivery } : {}),
-    },
-    issuedAt: input.now,
-    ...(input.triggerId ? { triggerId: input.triggerId } : {}),
-    ...(input.taint !== undefined ? { taint: input.taint } : {}),
-  };
-}
-
-function receiptFromAck(ack: CommandAck): DispatchPushOutcome {
-  if (ack.status === "accepted") return { status: "admitted" };
-  if (ack.status === "duplicate") return { status: "duplicate" };
-  return {
-    status: "rejected",
-    ...(ack.reasonCode !== undefined ? { reasonCode: ack.reasonCode } : {}),
-  };
-}
-
-/**
- * EventRouter / human-explicit 分派器的投递面（spec §2.1 TriggerHostDeliveryPort）：
- * TriggerDeliveryInput → sendText 信封 → CommandInbox 唯一 admission，回执映射
- * admitted|duplicate|rejected。lane 映射按 M1 车道表（wire 面只有 startNow/queue/guide）：
- * followup→queue（idle 起轮 / busy 入队待 autoDrain）、guide→guide（步边界行内）、
- * inject→拒绝（wire schema 无 inject 面，P2 生产订阅只产 followup；见 spec 实施偏差）。
- */
-export function createCommandInboxTriggerDelivery(options: {
-  handleCommand: SuperAgentCommandHandle;
-  now?: () => number;
-}): TriggerHostDeliveryPort {
-  const now = options.now ?? Date.now;
-  return {
-    async deliver(input) {
-      if (input.lane === "inject") {
-        // 响亮拒绝而非静默改车道：inject≠queue 是 M1 语义（不唤醒），错投会唤醒。
-        return {
-          status: "rejected",
-          reasonCode: "proto.deliveryLaneUnsupported",
-        };
-      }
-      const requestedDelivery: "queue" | "guide" = input.lane === "guide" ? "guide" : "queue";
-      const ack = await options.handleCommand(
-        buildSendTextEnvelope({
-          commandId: input.commandId,
-          sessionId: input.sessionId,
-          text: input.text,
-          requestedDelivery,
-          clientId: SUPER_AGENT_CLIENT_ID,
-          triggerId: input.triggerId,
-          taint: input.taint,
-          now: now(),
-        }),
-      );
-      return receiptFromAck(ack);
-    },
-  };
-}
-
-/**
- * 派发桥 push 端（spec §1.6 / M7②，dispatchBridgePort 注释：milestone A 的 push =
- * host 进程内 CommandInbox 直推生产适配器）。admission 回执即 ACK：admitted/duplicate
- * 转发 onHostAck settle dispatched；rejected 不 ACK（行保持 pushed，按崩溃重投续推）。
- */
-export function createCommandInboxDispatchPush(options: {
-  handleCommand: SuperAgentCommandHandle;
-  /** 结构 = SuperAgentDispatchBridgeContract.onHostAck；组合根接同一桥实例。 */
-  onHostAck?: (commandId: string, outcome: "admitted" | "duplicate") => void;
-  now?: () => number;
-}): DispatchPushPort {
-  const now = options.now ?? Date.now;
-  return {
-    async push(command: DispatchPushCommand): Promise<DispatchPushOutcome> {
-      if (command.sessionId === null) {
-        // 无目标会话无法构成 sendText admission；响亮拒绝，不向空会话刷推送。
-        return { status: "rejected", reasonCode: "dispatch.sessionRequired" };
-      }
-      if (command.payload === null || command.payload.length === 0) {
-        return { status: "rejected", reasonCode: "dispatch.payloadMissing" };
-      }
-      const ack = await options.handleCommand(
-        buildSendTextEnvelope({
-          commandId: command.commandId,
-          sessionId: command.sessionId,
-          text: command.payload,
-          clientId: DISPATCH_CLIENT_ID,
-          now: now(),
-        }),
-      );
-      const receipt = receiptFromAck(ack);
-      if (receipt.status === "admitted" || receipt.status === "duplicate") {
-        options.onHostAck?.(command.commandId, receipt.status);
-      }
-      return receipt;
-    },
-  };
-}
-
-/**
- * 单会话宿主的默认 worker 装配面（spec §2.1 TriggerWorkerPort；M2 分派器只做决策，
- * 会话面经此注入）。查订阅定 worker，resume/createTask 一律经 CommandInbox 投递——
- * 触发输入不旁路唯一 admission（M1）。
- *
- * - 订阅命中本会话 → terminal = face.isIdle()；stoppedByHuman 恒 false：本组合根没有
- *   「人为停止」事实面（cancel 史在 runtime 控制面未暴露），且单会话下 resume 与
- *   createTask 同为「向本会话提交唤醒输入」，语义差仅在多会话宿主（其注入完整 worker）。
- * - 订阅只命中外部会话 → terminal 恒 false（跨组合根不可观测终态）：走 M1 busy 行内
- *   投递，由目标会话 admission 裁决，不冒充 resume、不建平行会话。
- * - 不供 `context`（M2 上下文装配缺口，spec §8-5 登记）：同会话唤醒时目标摘要与历史
- *   已在会话内，再拼一份属冗余投喂；装配随宿主注入完整 worker 批启用，本缺省面不拼装。
- */
-export function createInProcessTriggerWorkerPort(options: {
-  database: DatabaseSync;
-  face: SuperAgentSessionFace;
-  handleCommand: SuperAgentCommandHandle;
-  now?: () => number;
-}): TriggerWorkerPort {
-  const now = options.now ?? Date.now;
-  const subscriptions = createTriggerSubscriptions(options.database);
-
-  const submitWake = async (sessionId: string, triggerId: string, text: string): Promise<void> => {
-    const ack = await options.handleCommand(
-      buildSendTextEnvelope({
-        // 幂等键 = triggerId+sessionId（§1.3 fan-out）：同一触发对一会话至多一条输入。
-        commandId: triggerDeliveryCommandId(triggerId, sessionId),
-        sessionId,
-        text,
-        requestedDelivery: "queue",
-        clientId: SUPER_AGENT_CLIENT_ID,
-        triggerId,
-        // 触发事件恒 taint=1（§1.2；intake 对非 true 直接抛错），唤醒文本源自 trigger payload。
-        taint: true,
-        now: now(),
-      }),
-    );
-    if (ack.status !== "accepted" && ack.status !== "duplicate") {
-      throw new Error(
-        `super-agent worker 唤醒投递被拒: ${ack.reasonCode ?? ack.status}（triggerId=${triggerId}）`,
-      );
-    }
-  };
-
-  return {
-    findWorkerByThreadKey(input): ReturnType<TriggerWorkerPort["findWorkerByThreadKey"]> {
-      const active = subscriptions.listActive(input.workspaceIdentity, input.threadKey, now());
-      const own = active.find((row) => row.sessionId === options.face.sessionId);
-      const bound = own ?? active[0];
-      if (!bound) return undefined;
-      if (bound.sessionId !== options.face.sessionId) {
-        return { sessionId: bound.sessionId, terminal: false, stoppedByHuman: false };
-      }
-      return {
-        sessionId: bound.sessionId,
-        terminal: options.face.isIdle(),
-        stoppedByHuman: false,
-      };
-    },
-    async resume(input) {
-      if (input.sessionId !== options.face.sessionId) {
-        // 只可能发生在宿主注入的 worker 与默认实现混用时：响亮失败，不静默改投。
-        throw new Error(
-          `super-agent worker.resume 越出本组合根会话: ${input.sessionId}（需宿主注入完整 worker port）`,
-        );
-      }
-      await submitWake(input.sessionId, input.triggerId, input.text);
-      return { sessionId: input.sessionId };
-    },
-    async createTask(input) {
-      await submitWake(options.face.sessionId, input.triggerId, input.text);
-      return { sessionId: options.face.sessionId };
-    },
-  };
-}
 
 interface WouldAcceptRow {
   card_id: string;
@@ -567,6 +399,7 @@ export async function createSuperAgentControlPlane(
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let tasksIndexDb: DatabaseSync | undefined;
   let bridge: SuperAgentDispatchBridgeContract | undefined;
+  let dispatchLoop: DispatchLoop | undefined;
 
   const decisionLog = createDecisionLog(db);
   const writeLeases = createWriteLeases(db);
@@ -681,7 +514,9 @@ export async function createSuperAgentControlPlane(
       // push 收到 admission 回执即回填 onHostAck settle（M7② ACK 即 settled；同库 CAS
       // 幂等，网关侧 onAdmissionReceipt 若日后也接桥，重复 ACK 收敛 noop）。
       const push = createCommandInboxDispatchPush({
-        handleCommand: hostPorts.handleCommand,
+        // 派发桥是后台循环，不属于任何 RPC 父请求；有独立端口时不得继承请求 deadline。
+        handleCommand: hostPorts.dispatchHandleCommand ?? hostPorts.handleCommand,
+        ...(hostPorts.isHostReachable ? { isHostReachable: hostPorts.isHostReachable } : {}),
         onHostAck: (commandId, outcome) => {
           try {
             bridge?.onHostAck(commandId, outcome);
@@ -692,6 +527,16 @@ export async function createSuperAgentControlPlane(
         now,
       });
       bridge = createDispatchBridge({ db: tasksIndexDb, push, now });
+      dispatchLoop = createDispatchLoop({
+        bridge,
+        workspaceIdentity,
+        now,
+        onError: options.onError,
+        ...(options.dispatchIntervalMs !== undefined
+          ? { intervalMs: options.dispatchIntervalMs }
+          : {}),
+        ...(options.dispatchGraceMs !== undefined ? { graceMs: options.dispatchGraceMs } : {}),
+      });
     } catch (error) {
       // 装配中途失败：对称关闭已打开句柄不泄漏；原始错误原样上浮（不吞不包装）。
       try {
@@ -727,11 +572,8 @@ export async function createSuperAgentControlPlane(
       // 回填失败不阻断控制面（幂等任务，下一次接管重跑）；按 A10 告警缝暴露。
       options.onError(error, "super_agent.subscription_backfill");
     }
-    if (bridge) {
-      void bridge.resumePendingAfterBoot().catch((error: unknown) => {
-        options.onError(error, "super_agent.dispatch.resumePendingAfterBoot");
-      });
-    }
+    // 接管即启动派发桥循环（首轮同步触发 push/sweep；follower 不启动）。
+    dispatchLoop?.start();
   };
 
   const tickLeadership = (): void => {
@@ -742,6 +584,7 @@ export async function createSuperAgentControlPlane(
           // 连续失联：主动降级 follower 并停控制面循环（spec §3.3）。
           leader = false;
           adjudication.stop();
+          dispatchLoop?.stop();
           options.onError(
             new Error(`super-agent leader 租约丢失: ${workspaceIdentity}`),
             "super_agent.leadership.lost",
@@ -1029,6 +872,7 @@ export async function createSuperAgentControlPlane(
       if (closed) return;
       closed = true;
       started = false;
+      dispatchLoop?.stop();
       if (heartbeatTimer !== undefined) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;

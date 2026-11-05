@@ -17,6 +17,8 @@ const rejectAll = process.env.TEST_REJECT_PEER === "1";
 const authTokenFile = process.env.TEST_AUTH_TOKEN_FILE;
 const noAuth = process.env.TEST_NO_AUTH === "1";
 const healthIntervalMs = Number(process.env.TEST_HEALTH_INTERVAL_MS) || undefined;
+const dispatchIntervalMs = Number(process.env.TEST_DISPATCH_INTERVAL_MS) || undefined;
+const dispatchGraceMs = Number(process.env.TEST_DISPATCH_GRACE_MS) || undefined;
 
 const resolver: PeerIdentityResolver = {
   async resolve(): Promise<PeerIdentity> {
@@ -37,6 +39,8 @@ void (async () => {
   const daemon = await startControlPlaneDaemon({
     config,
     ...(healthIntervalMs ? { healthIntervalMs } : {}),
+    ...(dispatchIntervalMs ? { dispatchIntervalMs } : {}),
+    ...(dispatchGraceMs ? { dispatchGraceMs } : {}),
     // §3.8 生产路径：凭据文件认证；只有未提供凭据的用例才退到测试 peer 门。
     // TEST_NO_AUTH 用于断言「既无凭据又无 peer 门 → 拒绝绑定」的 fail-closed 路径。
     ...(authTokenFile

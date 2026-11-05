@@ -142,7 +142,11 @@ interface RpcClient {
   close(): void;
 }
 
-async function connectRpc(endpoint: string, authToken?: string): Promise<RpcClient> {
+async function connectRpc(
+  endpoint: string,
+  authToken?: string,
+  hostResult: (method: string, params: unknown) => unknown = cannedHostResult,
+): Promise<RpcClient> {
   const socket = await new Promise<Socket>((resolve, reject) => {
     const client = new Socket();
     client.once("connect", () => resolve(client));
@@ -180,7 +184,7 @@ async function connectRpc(endpoint: string, authToken?: string): Promise<RpcClie
       }
       // child 反向请求（host.* / backfill.seeds）：测试作为 Core 侧回执。
       if (typeof frame.id === "string" && typeof frame.method === "string") {
-        const result = cannedHostResult(frame.method, frame.params);
+        const result = hostResult(frame.method, frame.params);
         socket.write(`${JSON.stringify({ v: CONTROL_PLANE_RPC_VERSION, id: frame.id, ok: true, result })}\n`);
       }
     }
@@ -642,6 +646,91 @@ describe("super-agent control-plane child", () => {
       const exit = await ipc.exited;
       expect(exit.code).toBe(1);
       expect(ipc.messages.some((m) => m.type === "ready")).toBe(false);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "human-explicit resume：唤醒文本必须经 host.command 投递，不能只打开会话就回成功",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "zcode-cp-resume-"));
+      roots.push(root);
+      const dataBaseDir = join(root, "data");
+      const serverRoot = join(root, "server");
+      await mkdir(serverRoot, { recursive: true });
+      const endpoint = resolveControlPlaneSocketPath(serverRoot);
+      const { child, ipc } = await spawnDaemon({
+        dataBaseDir,
+        serverRoot,
+        trustedPid: process.pid,
+      });
+      await waitForMessage(ipc, (m) => m.type === "ready");
+
+      const calls: Array<{ method: string; params: unknown }> = [];
+      const hostResult = (method: string, params: unknown): unknown => {
+        calls.push({ method, params });
+        switch (method) {
+          case "backfill.seeds":
+            return { seeds: [] };
+          case "host.worker.find":
+            // 终态且非人为停止 → human-explicit 走 resume 分支。
+            return { sessionId: "session-terminal", terminal: true, stoppedByHuman: false };
+          case "host.worker.resume":
+            return { sessionId: "session-terminal" };
+          case "host.autoReplyGuard":
+            return { admitted: true };
+          case "host.command": {
+            const commandId = (params as { commandId?: string }).commandId;
+            return { commandId, status: "accepted", revisionAtDecision: 1 };
+          }
+          default:
+            throw new Error(`unexpected child→Core method: ${method}`);
+        }
+      };
+      const client = await connectRpc(endpoint, undefined, hostResult);
+      try {
+        const ensure = (await client.request("workspace.ensure", {
+          workspaceIdentity: "ws-resume",
+          tasksIndexReady: false,
+        })) as { state: string };
+        expect(ensure.state).toBe("leader");
+
+        const result = (await client.request("trigger.ingest", {
+          workspaceIdentity: "ws-resume",
+          source: "im",
+          provider: "test-provider",
+          providerMessageId: "m-resume",
+          threadKeyHint: "bot:bot-1+user-1",
+          actor: { kind: "human", id: "user-1" },
+          payload: { botId: "bot-1", chatType: "private", chatId: "user-1", text: "hello m-resume" },
+          taint: true,
+        })) as { handled: boolean; triggerId: string; route: string; delivery?: string };
+        expect(result).toMatchObject({
+          handled: true,
+          route: "human_explicit",
+          delivery: "routed",
+        });
+
+        const resume = calls.find((call) => call.method === "host.worker.resume");
+        expect(resume).toBeDefined();
+        const command = calls.find((call) => call.method === "host.command");
+        expect(command).toBeDefined();
+        // OLD 实现只 resume 会话、丢弃文本；这里断言唤醒输入真正进入 CommandInbox，
+        // 幂等键 = triggerId+sessionId（与 owned 直通同键）。
+        expect(command!.params).toMatchObject({
+          workspaceIdentity: "ws-resume",
+          commandId: `${result.triggerId}:session-terminal`,
+          sessionId: "session-terminal",
+          lane: "followup",
+          envelope: {
+            triggerId: result.triggerId,
+            payload: { text: "hello m-resume" },
+          },
+        });
+      } finally {
+        client.close();
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
     },
     TEST_TIMEOUT_MS,
   );

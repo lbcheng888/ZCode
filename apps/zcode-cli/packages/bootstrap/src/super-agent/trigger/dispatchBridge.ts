@@ -59,6 +59,7 @@ const SELECT_BY_ID_SQL = `select ${COLUMNS} from dispatch_requests where id = ?`
 const SELECT_BY_RUN_ID_SQL = `select ${COLUMNS} from dispatch_requests where run_id = ?`;
 const SELECT_BY_COMMAND_ID_SQL = `select ${COLUMNS} from dispatch_requests where command_id = ?`;
 const SELECT_BY_STATUS_SQL = `select ${COLUMNS} from dispatch_requests where status = ? order by updated_at`;
+const SELECT_BY_STATUS_WORKSPACE_SQL = `select ${COLUMNS} from dispatch_requests where status = ? and workspace_identity = ? order by updated_at`;
 
 /** pending→pushed CAS：attempts+1、记 pushed_at。 */
 const CAS_PENDING_TO_PUSHED_SQL = `
@@ -88,11 +89,26 @@ const CAS_SWEEP_IN_WINDOW_SQL = `
   where status = 'pending_dispatch' and dispatch_policy = 'in_window' and updated_at <= ?
 `;
 
+/** 宽限跳过（本 plane 范围）：单 child 多 plane 共用 tasks-index 时按 workspace CAS。 */
+const CAS_SWEEP_IN_WINDOW_WORKSPACE_SQL = `
+  update dispatch_requests
+  set status = 'skipped', skip_reason = 'no_dispatcher', settled_at = ?, updated_at = ?
+  where status = 'pending_dispatch' and dispatch_policy = 'in_window'
+    and workspace_identity = ? and updated_at <= ?
+`;
+
 /** durable-wait 最大陈旧期（T3④）：超龄才结算，跳过原因 stale。 */
 const CAS_SWEEP_DURABLE_STALE_SQL = `
   update dispatch_requests
   set status = 'skipped', skip_reason = 'stale', settled_at = ?, updated_at = ?
   where status = 'pending_dispatch' and dispatch_policy = 'durable_wait' and updated_at <= ?
+`;
+
+const CAS_SWEEP_DURABLE_STALE_WORKSPACE_SQL = `
+  update dispatch_requests
+  set status = 'skipped', skip_reason = 'stale', settled_at = ?, updated_at = ?
+  where status = 'pending_dispatch' and dispatch_policy = 'durable_wait'
+    and workspace_identity = ? and updated_at <= ?
 `;
 
 function toRecord(row: Record<string, unknown>): DispatchRequestRecord {
@@ -153,12 +169,15 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): SuperAgentDispat
   const selectByRunId = db.prepare(SELECT_BY_RUN_ID_SQL);
   const selectByCommandId = db.prepare(SELECT_BY_COMMAND_ID_SQL);
   const selectByStatus = db.prepare(SELECT_BY_STATUS_SQL);
+  const selectByStatusWorkspace = db.prepare(SELECT_BY_STATUS_WORKSPACE_SQL);
   const insertClaim = db.prepare(INSERT_CLAIM_SQL);
   const casPendingToPushed = db.prepare(CAS_PENDING_TO_PUSHED_SQL);
   const casPushedRetry = db.prepare(CAS_PUSHED_RETRY_SQL);
   const casPushedToDispatched = db.prepare(CAS_PUSHED_TO_DISPATCHED_SQL);
   const sweepInWindow = db.prepare(CAS_SWEEP_IN_WINDOW_SQL);
+  const sweepInWindowWorkspace = db.prepare(CAS_SWEEP_IN_WINDOW_WORKSPACE_SQL);
   const sweepDurableStale = db.prepare(CAS_SWEEP_DURABLE_STALE_SQL);
+  const sweepDurableStaleWorkspace = db.prepare(CAS_SWEEP_DURABLE_STALE_WORKSPACE_SQL);
 
   function readById(id: string): DispatchRequestRecord | undefined {
     const row = selectById.get(id) as Record<string, unknown> | undefined;
@@ -239,10 +258,12 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): SuperAgentDispat
   ): Promise<ResumePendingAfterBootResult> {
     const result: ResumePendingAfterBootResult = { pushed: [], pending: [], failures: [] };
     const hostAvailable = options?.hostAvailable ?? push.isHostReachable?.() ?? true;
-    const stalled = [
-      ...(selectByStatus.all("pushed") as Record<string, unknown>[]),
-      ...(selectByStatus.all("pending_dispatch") as Record<string, unknown>[]),
-    ].map(toRecord);
+    const workspaceIdentity = options?.workspaceIdentity;
+    const rowsOf = (status: "pushed" | "pending_dispatch"): Record<string, unknown>[] =>
+      workspaceIdentity === undefined
+        ? (selectByStatus.all(status) as Record<string, unknown>[])
+        : (selectByStatusWorkspace.all(status, workspaceIdentity) as Record<string, unknown>[]);
+    const stalled = [...rowsOf("pushed"), ...rowsOf("pending_dispatch")].map(toRecord);
     if (!hostAvailable) {
       // 宿主不可达：不推任何行（T3①/④——in-window 由随后的 sweep 按宽限结算，
       // durable-wait 留待回连）。重推也必须等回连，避免对着空宿主刷 attempts。
@@ -255,7 +276,18 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): SuperAgentDispat
         // 停滞 pushed 行重推同 commandId（T3②）。
         const outcome = await pushDispatch(record.id);
         if (outcome.kind === "pushed") {
-          result.pushed.push({ requestId: record.id, commandId: outcome.commandId });
+          if (outcome.receipt.status === "rejected") {
+            // 确定性拒绝（如 dispatch.sessionRequired/payloadMissing）不是 ACK：行停在
+            // pushed。§1.6 无 failed 终态、skipped 只允许宽限触发，这里不能自行造终态；
+            // 但**不得静默**——计入 failures 由循环 onError 告警（调停收敛待 spec 裁决）。
+            result.failures.push({
+              requestId: record.id,
+              message: `host rejected admission: ${outcome.receipt.reasonCode ?? "unknown"}`,
+            });
+            result.pending.push(record.id);
+          } else {
+            result.pushed.push({ requestId: record.id, commandId: outcome.commandId });
+          }
         } else if (outcome.kind === "not_found") {
           // 行在扫描与推送之间被并发删除（TTL 清理）：不重试，不报失败。
           continue;
@@ -337,11 +369,20 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): SuperAgentDispat
 
     sweepSkipped(sweepNow: number, graceMs: number, options?: SweepSkippedOptions): number {
       const cutoff = sweepNow - graceMs;
-      let changed = Number(sweepInWindow.run(sweepNow, sweepNow, cutoff).changes);
+      const workspaceIdentity = options?.workspaceIdentity;
+      let changed =
+        workspaceIdentity === undefined
+          ? Number(sweepInWindow.run(sweepNow, sweepNow, cutoff).changes)
+          : Number(sweepInWindowWorkspace.run(sweepNow, sweepNow, workspaceIdentity, cutoff).changes);
       if (options?.durableMaxStaleMs !== undefined) {
-        changed += Number(
-          sweepDurableStale.run(sweepNow, sweepNow, sweepNow - options.durableMaxStaleMs).changes,
-        );
+        const staleCutoff = sweepNow - options.durableMaxStaleMs;
+        changed +=
+          workspaceIdentity === undefined
+            ? Number(sweepDurableStale.run(sweepNow, sweepNow, staleCutoff).changes)
+            : Number(
+                sweepDurableStaleWorkspace.run(sweepNow, sweepNow, workspaceIdentity, staleCutoff)
+                  .changes,
+              );
       }
       return changed;
     },

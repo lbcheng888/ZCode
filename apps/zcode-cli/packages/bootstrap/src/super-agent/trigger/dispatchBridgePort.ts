@@ -121,14 +121,22 @@ export interface ResumePendingAfterBootResult {
   failures: { requestId: string; message: string }[];
 }
 
-/** 宽限跳过选项：durable-wait 行只在超过最大陈旧期时 settle skipped(stale)（T3④）。 */
+/**
+ * 宽限跳过选项：durable-wait 行只在超过最大陈旧期时 settle skipped(stale)（T3④）。
+ * `workspaceIdentity`：单 child 多 plane 时把扫描收窄到本 plane 的 workspace——
+ * 同一 tasks-index 由多个 plane 桥共用，不收窄会让每个 plane 各自扫描/推送他 plane 的行
+ * （CAS 虽能去重终态，但会产生并发重复 push）。
+ */
 export interface SweepSkippedOptions {
   durableMaxStaleMs?: number;
+  workspaceIdentity?: string;
 }
 
 export interface ResumePendingAfterBootOptions {
   /** 落时间；缺省 Date.now()。 */
   now?: number;
+  /** 只扫描本 plane 的 workspace（单 child 多 plane 时避免跨 plane 重复 push）。 */
+  workspaceIdentity?: string;
   /**
    * 宿主是否在线；缺省取 push.isHostReachable?.() ?? true。
    * 不在线：不推任何行（重推/新推都留待回连），由调用方随后 sweepSkipped(grace)

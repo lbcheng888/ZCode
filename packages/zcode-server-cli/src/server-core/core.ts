@@ -6,8 +6,9 @@ import {
   getAppConfigDir,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
   createTopicResourcePeers,
+  createServiceLogger,
 } from "@zcode/services/node";
-import { IZCodeAgentService } from "@zcode/services";
+import { IZCodeAgentService, IZCodeTaskService } from "@zcode/services";
 import { ZCODE_VERSION } from "@zcode/shared";
 import { getTasksIndexDatabasePath } from "@zcode/services/storage-startup";
 import { CONTROL_PLANE_CORE_ENABLED_ENV } from "../contracts.js";
@@ -21,12 +22,19 @@ import { installParentDisconnectHandler } from "./parentDisconnect.js";
 import { resolveCoreServerId } from "./serverIdentity.js";
 import {
   createSuperAgentControlPlaneCorePort,
-  handleSuperAgentControlPlaneInboundRequest,
   SuperAgentControlPlaneGenerationGate,
   type SuperAgentControlPlaneCorePort,
 } from "./superAgentControlPlanePort.js";
+import {
+  createSuperAgentControlPlaneInboundHandler,
+  type SuperAgentHostDispatchSettlement,
+  type SuperAgentHostServiceAccess,
+} from "./superAgentHostHandlers.js";
+import { createCoreDaemonScheduler, type DaemonScheduler } from "./scheduler/index.js";
 import { createTaskActivityTracker } from "./taskActivityTracker.js";
 import { resolveServerLayout } from "../runtime/paths.js";
+
+const log = createServiceLogger("server-core");
 
 declare const __ZCODE_BUILTIN_PROVIDER_CONFIG_JSON__: string | undefined;
 
@@ -44,6 +52,19 @@ export async function runServerCore(generation: number): Promise<void> {
   const controlPlaneEnabled = process.env[CONTROL_PLANE_CORE_ENABLED_ENV] === "1";
   let controlPlaneClient: ControlPlaneClient | undefined;
   let controlPlaneCorePort: SuperAgentControlPlaneCorePort | undefined;
+  /**
+   * child→Core 回调的服务投影（host.command/worker）：client 早于
+   * `createServerHostServices` 构造，处理器按调用时取服务，不在装配期捕获。
+   */
+  let hostServices: SuperAgentHostServiceAccess | undefined;
+  /**
+   * 派发结算面：scheduler 在 services 就绪后构造，inbound handler 早于它注册，
+   * 因此按调用时取；未装配时 host.command 只转发回执（不伪造台账结算）。
+   */
+  let dispatchSettlement: SuperAgentHostDispatchSettlement | undefined;
+  /** worker 终态订阅（键 = sessionId + inputId）；run 终态/关停时释放。 */
+  const terminalSubscriptions = new Map<string, { dispose(): void }>();
+  let daemonScheduler: DaemonScheduler | undefined;
   if (controlPlaneEnabled) {
     const gate = new SuperAgentControlPlaneGenerationGate();
     // Supervisor 是唯一代际事实来源；消息可能早于 services 初始化到达，所以监听器先注册。
@@ -59,7 +80,10 @@ export async function runServerCore(generation: number): Promise<void> {
     });
     const client = createControlPlaneClient({
       serverRoot: layout.serverRoot,
-      onInboundRequest: handleSuperAgentControlPlaneInboundRequest,
+      onInboundRequest: createSuperAgentControlPlaneInboundHandler({
+        getServices: () => hostServices,
+        getDispatchSettlement: () => dispatchSettlement,
+      }),
     });
     controlPlaneClient = client;
     controlPlaneCorePort = createSuperAgentControlPlaneCorePort({
@@ -100,12 +124,85 @@ export async function runServerCore(generation: number): Promise<void> {
         ? { superAgentControlPlaneRpcPort: controlPlaneCorePort.port }
         : {}),
     });
-  // B3 daemon scheduler 延后启动（B-SPEC §4.4.3 原子切换门禁）：scheduler 的 push/sweep
-  // 循环与 Core 侧 `host.command` 尚未生产接线（§3.3 实现缺口）。此时启动 scheduler 会
-  // claim + 审计 + 写 pending_dispatch，却无消费者 push/settle；Desktop Main fork 又因
-  // per-workspace 租约让位释放认领（manual/off-peak 同样让位），定时任务立即静默停摆、
-  // pending 行无 TTL 无限增长。故桥循环接线批之前不构造/不启动 scheduler，保持 Desktop
-  // 全权直派（与 trigger-subsystem-spec §5.2 ws7「桥行延后」裁定同款）。
+  // child→Core 回调服务面就绪：此后 host.command/worker.find/resume 方可转发到 agent。
+  if (controlPlaneEnabled) hostServices = services;
+  /**
+   * B3 原子切换（B-SPEC §4.4.3）：部署门禁打开即构造并启动 daemon scheduler。
+   * pending 行写面与 child 派发桥 push/sweep 在同一批运行；host.command 回执在此回灌
+   * run 台账（ACK=dispatched，rejected=失败退避），worker 终态按 inputAccepted.inputId
+   * 精确回写 outcome。启动失败（tasks-index 未迁移等）原样上浮 → Core 启动级失败，
+   * 不进入「门禁开但 scheduler 不在跑」的半状态（那会让 child 租约挡住 Desktop 回退）。
+   *
+   * 已知边界（诚实登记，不伪接线）：daemon 内 off-peak 仍只 claim + 审计 + 顺延
+   * （spec §7-5 裁决 off-peak 不进桥；执行面仍归 host）。
+   */
+  if (controlPlaneEnabled && controlPlaneCorePort) {
+    const scheduler = createCoreDaemonScheduler({
+      controlPlane: controlPlaneCorePort,
+      tasksIndexDatabasePath: getTasksIndexDatabasePath(),
+      serverRoot: layout.serverRoot,
+    });
+    daemonScheduler = scheduler;
+    await scheduler.start();
+    dispatchSettlement = {
+      isDeliverable: (commandId) => scheduler.isHostCommandDeliverable(commandId),
+      settle: async (commandId, ack, sessionId) => {
+        const settled = await scheduler.settleHostCommand({
+          commandId,
+          status: ack.status,
+          sessionId,
+          ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
+        });
+        // 非桥命令（owned/human-explicit 直通命令的 commandId 不在 dispatch_requests）。
+        if (!settled) return;
+        if (ack.status !== "accepted" && ack.status !== "duplicate") return;
+        const inputId =
+          ack.result && ack.result.type === "inputAccepted" ? ack.result.inputId : undefined;
+        if (!inputId) {
+          // inputAccepted.inputId 是把 worker 终态精确归属到本 run 的唯一键。缺它是
+          // runtime/协议缺口，不得用该会话的任意终态冒充本 run 收口。
+          log.error("dispatch ACK missing inputAccepted.inputId; terminal not tracked", {
+            commandId,
+            runId: settled.runId,
+            sessionId,
+          });
+          return;
+        }
+        const key = `${sessionId}\u0000${inputId}`;
+        if (terminalSubscriptions.has(key)) return;
+        const taskService = services.getOptional(IZCodeTaskService);
+        if (!taskService) {
+          log.error("IZCodeTaskService unavailable; terminal outcome cannot be observed", {
+            commandId,
+            runId: settled.runId,
+            sessionId,
+          });
+          return;
+        }
+        let subscription: { dispose(): void } | undefined;
+        subscription = taskService.onDynamicTaskTerminalOutcome(sessionId)((terminal) => {
+          // 同一 task 可能同时承载用户输入；只认本次派发的 inputId。
+          if (terminal.inputId !== inputId) return;
+          terminalSubscriptions.delete(key);
+          subscription?.dispose();
+          void scheduler
+            .settleRunTerminal({
+              runId: settled.runId,
+              outcome: terminal.outcome,
+              ...(terminal.error ? { error: terminal.error } : {}),
+            })
+            .catch((error: unknown) => {
+              log.warn("worker terminal settlement failed", {
+                runId: settled.runId,
+                sessionId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        });
+        terminalSubscriptions.set(key, subscription);
+      },
+    };
+  }
   const taskActivityTracker = createTaskActivityTracker(services.getOptional(IZCodeAgentService));
   const ingressToken = await createIngressToken(layout);
   const http = await createCoreHttpServer(services, {
@@ -189,6 +286,12 @@ export async function runServerCore(generation: number): Promise<void> {
     clearInterval(heartbeat);
     activitySubscription.dispose();
     taskActivityTracker.dispose();
+    // 先摘派发结算面/worker 终态订阅（依赖 task service），再停 scheduler（关
+    // tasks-index 句柄），避免关库后仍有 host.command 回执写入。
+    dispatchSettlement = undefined;
+    for (const subscription of terminalSubscriptions.values()) subscription.dispose();
+    terminalSubscriptions.clear();
+    await daemonScheduler?.stop().catch(() => undefined);
     await http.close().catch(() => undefined);
     await disposeServiceResourcesAndWait(services).catch(() => undefined);
     // services 已停止后再关 RPC，避免 sink 在收口过程中拿到半关闭连接以外的行为。

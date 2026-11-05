@@ -66,3 +66,9 @@ export {
   dispatchCommandIdForRun,
 } from "./dispatchBridge.js";
 export type { DispatchBridgeDeps } from "./dispatchBridge.js";
+export {
+  createDispatchLoop,
+  DISPATCH_GRACE_MS,
+  DISPATCH_LOOP_INTERVAL_MS,
+} from "./dispatchLoop.js";
+export type { DispatchLoop, DispatchLoopOptions } from "./dispatchLoop.js";
