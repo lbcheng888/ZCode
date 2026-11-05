@@ -78,6 +78,12 @@
 - 修复致命评审：actorId 猜机器人 → senderType 事实透传；吊销角色 undefined 直接拒绝 ✅
 - 测试：服务 288 / host 70 / shared+desktop 31；双 scope typecheck、architecture 0、lint 0 errors；累计 38 提交
 
+## P6 强制生效 + 能力票据批次（2026-11-05）✅
+- attachment 角色进生产权限准入：registry→可信 carrier→gateway→回合事实→checkPermission 只收紧叠加（早返回不漏、吊销即拒、远端缺失 fail-closed）✅
+- 能力票据：公开 ticketId/私有 secret 分离、绑定/scope/TTL/吊销 epoch、一次性兑换、重放防护、模型上下文零 secret ✅
+- 修复：CLI 内部自动回合（auto-drain/goal）不携带附件事实的 fail-open 已登记；票据生产 secret 交付通道待接 ✅
+- 验证：双 scope typecheck、architecture 0、lint 0 errors、定向 65+354+116 测试绿；累计 42 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
