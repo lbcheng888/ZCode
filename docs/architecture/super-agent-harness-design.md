@@ -1,19 +1,19 @@
 # 编程 Harness 最佳方案：Super-agent 设计定稿（确定性路由 + Mandate 授权自治 + 进程外看门狗）
 
-状态：Phase 0–5 已实现；Phase 6 设备凭据已实现票据/角色/围栏骨架，仍有明确残留（见 §0.1）。本文是「编程 harness 最佳方案」的定稿，融合两条来源：
+状态：Phase 0–5 已实现；Phase 6 能力票据/OS 围栏/原生 peer credential 加固项已实现，仍有明确残留（见 §0.1）。本文是「编程 harness 最佳方案」的定稿，融合两条来源：
 DeepSeek Harness 团队《Super-agent 设计探索：迈向更自主的 Agent 系统》（https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg ，下称「文章」）的五模块架构，与本仓已实现的 dsh / kimi-code / zcode 三家融合底座（goal 层三方融合、输入三车道契约、dynamic-workflow、单一 CommandInbox、边缘 daemon 等，见 `docs/architecture/long-horizon-goal-redesign-plan.md`）。设计过程：10 个子系统现状图 → 4 视角独立方案评审团 → 综合 → 4 视角对抗性审校（6 致命 / 28 重大问题已全部修复合入，见 §7 审校修复记录）。
 
 ## 0.1 落地状态（2026-11-05，如实登记）
 
 **已落地并有测试证据**：Phase 0 安全收口；Phase 1 持久底座（终态唤醒再投喂、bot 出站死信、goal-layer 转正）；Phase 2 EventRouter/触发面/派发桥/短命裁决 + 里程碑 B daemon control-plane（生命周期、JSONL RPC、leader 租约、dispatch exactly-once、settlement）；Phase 3 Mandate 三档 + spec 静默 run + verdict 出站门；Phase 4 看门狗；Phase 5 recall/recoveryPointer/写租约；M6 五字段方案卡与两类卡流水线。总体验证见 `progress.md` 与各 spec 的落地状态节。
 
-**Phase 6（可选里程碑）部分落地**：attachmentRole/deviceScope 默认集、能力票据签发/兑换/吊销、MessagePort secret 专用通道、宿主入口票据校验 + 可信 carrier 授权域 + CLI 工具准入按 scope 只收紧已接；C2 凭据注入未接线（broker 在 Desktop、执行在 CLI，结构不可达，命中 credential 工具返回 typed `ticket.credential_injection_unimplemented` 并拒绝）；票据吊销只在下一条命令 admission 生效；renderer 生产命令信封尚未携带 `capabilityTicketId`（flag 只 gate 携带票据的命令，宿主启动告警列明）。
+**Phase 6（可选里程碑）**：attachmentRole/deviceScope 默认集、能力票据签发/兑换/吊销、MessagePort secret 专用通道、宿主入口票据校验 + 可信 carrier 授权域 + CLI 工具准入按 scope 只收紧已接；**C2 凭据注入已接线**——工具执行期间把票据公开域（无 secret）放进 CLI AsyncLocalStorage，随官方 MCP 身份头通道携带 ticketId+binding 向宿主索取，宿主在读取凭据前用同一 broker 校验 scope（远端执行宿主经已鉴权 host 连接反向频道回传 broker 现场 admit）；票据吊销只在下一条命令 admission 生效；desktop-continuous renderer 生产命令信封已自动携带 `capabilityTicketId`（web/mobile relay 形态不投递 secret、不签发票据，保留无票据旧路径）。
 
-**OS egress 围栏**：darwin sandbox-exec 真跑验证；Linux netns/veth/nftables 脚手架存在但登记 `unimplemented`——建网需宿主 CAP、同 UID 子进程可逃逸，启用即 fail-closed 拒绝启动；win32 typed unsupported。`features.specEgressFence` 已接组合根（默认 false）。
+**OS egress 围栏**：darwin sandbox-exec 真跑验证（放行端口可达、非放行端口被拒）；Linux 为 rootless user+net namespace + AF_UNIX→TCP relay——每命令独立 netns 只有 loopback、无外部路由，子进程在宿主 userns 无 CAP_SYS_ADMIN，无需 root/veth/nftables；userns 被禁用、缺少 unshare/ip 或 relay 探测失败即 typed unavailable、启用即拒绝启动。Linux 真机集成测试在 darwin 上明确 skip，不宣称已完成 Linux 真机验证；win32 typed unsupported。`features.specEgressFence` 已接组合根（默认 false）。
 
-**平台级 peer 凭据**：生产路径是首帧 authToken 显式握手（失败 fail-closed）；Linux 有 `/proc` peer 兜底。macOS `LOCAL_PEERPID` / Windows named-pipe client PID+SID 需要原生绑定，未引入原生依赖，登记为平台加固项，不阻塞当前安全模型。
+**平台级 peer 凭据**：生产路径仍是首帧 authToken 显式握手（失败 fail-closed）；`packages/native-peer-credentials` 提供 Node-API addon（macOS `LOCAL_PEERPID`+`getpeereid`、Linux `SO_PEERCRED`），macOS 已用真实 Unix socket + 真实子进程验证 peer PID；Linux 构建/测试不在本机执行，不宣称真机验证；Windows 不支持（Node 不暴露 named-pipe HANDLE，resolver fail-closed）。原生 addon 只作为显式 peer 门模式的加固路径，仅非原生 Linux 才退回 `/proc` inode 启发式。
 
-**运维项（非代码交付）**：真机灰度试点按 `super-agent-gray-pilot-runbook.md` 执行；Linux 围栏真机矩阵需先实现子进程降权隔离与逃逸负向验证，再重新评估启用。
+**运维项（非代码交付）**：真机灰度试点按 `super-agent-gray-pilot-runbook.md` 执行；Linux 围栏需在 Linux 主机跑通真实 netns 集成测试与逃逸负向验证后，才能宣称真机已验证。
 
 ## 0. 摘要
 

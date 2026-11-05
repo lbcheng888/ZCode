@@ -290,7 +290,7 @@ bot 配置实际路径取决于宿主的数据根：默认 `~/.zcode/v2/bot-conf
 9. `durableSchedulerDispatch=false`：派发桥循环未接，durable-wait 不可用。
 10. 进程重启后排队事件输入的 mandate facts 会丢，退化为 user-origin（已知接缝）。
 11. `app.close` 存在在途裁决批落在关库之后的窄竞态：onError 告警、零写入、候选留 pending（spec §8-12）。
-12. env 代理残留（`--noproxy` / undici fetch）仍可直连；P6 围栏默认关闭，Linux/Windows 未实现（启用即拒绝启动），零 egress 白名单不是硬边界，不得对外宣称物理隔离。
+12. env 代理残留（`--noproxy` / undici fetch）仍可直连；P6 围栏默认关闭。Linux 已实现 rootless user+net namespace 围栏（缺少 unprivileged userns/unshare/ip 或 relay 探测失败即 typed unavailable、拒绝启动），但本机为 darwin、未做 Linux 真机验证；Windows 未实现（启用即拒绝启动）。零 egress 白名单不是硬边界，不得对外宣称物理隔离。
 13. 协议宿主的 `autoReplyGuard` 是桩：群内 IM 被咨询即响亮抛错（`server-operations.ts:3453-3460`），botsService 状态未随入站下沉（spec §8-10②）。**群聊试点在该接缝接通前不开放**；若误开，首条群内咨询即事故，按 §7.2“控制面启动/守卫响亮失败”处置，不得用放宽守卫的方式绕过。
 
 ## 9. 每日/每波次记录模板

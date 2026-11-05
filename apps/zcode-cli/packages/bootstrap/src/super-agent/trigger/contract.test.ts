@@ -8,7 +8,7 @@ import { createTriggerSubsystem } from "./impl.js";
 describe("super-agent-trigger contract", () => {
   it("declares its module manifest", () => {
     expect(superAgentTriggerModule.id).toBe("super-agent-trigger");
-    expect(superAgentTriggerModule.requires).toEqual([]);
+    expect(superAgentTriggerModule.requires).toEqual(["shared"]);
     expect(superAgentTriggerModule.publicEntrypoints).toEqual(["index.ts", "contract.ts"]);
   });
 

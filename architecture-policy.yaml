@@ -1119,3 +1119,16 @@ exceptions:
       - packages/desktop/src/main/windowsCuaOperationIndicatorContent.ts
       - packages/ui/src/v4/officeSuggestedPrompts.ts
     reason: 这三个文件是 fork 之后上游 v3.15.1 引入的既有文件，本次仅把其中用户可见的 ZCode 品牌文案改为 ChengCode（品牌迁移，不改模块边界、不新增依赖、不移动文件）；architecture 以 merge-base 判定为 new，沿用本表逐文件准入先例。
+  - id: native-peer-credentials-unmanaged-package
+    rule: unmanaged-new-file
+    paths:
+      - packages/native-peer-credentials/
+    reason: milestone-b §3.8 原生 peer credential addon 新包，主体是 C 源码、node-gyp 描述与零运行时依赖的 mjs loader；Node-API 二进制包无法纳入 TypeScript managed 模块的分层/契约治理，故逐目录登记例外，仅覆盖本包源码路径。
+  - id: p6-final-gaps-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/core/src/tool/capability-ticket-context.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/command-admission.ts
+      - packages/desktop/src/host/capabilityTicketAdmissionChannel.ts
+      - packages/services/src/zcode-agent/capabilityTicketAdmissionRelay.ts
+    reason: P6 收口三项接线（C2 工具执行票据上下文、Desktop→远端宿主 admission relay 通道、Services relay authority）各需一个职责单一的新文件；分别落在未受管的 core tool/desktop host/services zcode-agent 目录，沿用本表逐文件准入先例，不移动既有模块边界，接管整个包不在本次范围内。

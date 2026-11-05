@@ -9,7 +9,7 @@ import { superAgentSpecLaneModule } from "./module.js";
 describe("super-agent-spec-lane contract", () => {
   it("declares its module manifest", () => {
     expect(superAgentSpecLaneModule.id).toBe("super-agent-spec-lane");
-    expect(superAgentSpecLaneModule.requires).toEqual([]);
+    expect(superAgentSpecLaneModule.requires).toEqual(["shared", "zcode-cli"]);
     expect(superAgentSpecLaneModule.provides).toContain("super-agent-spec-lane");
   });
 

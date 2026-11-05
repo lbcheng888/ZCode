@@ -89,9 +89,17 @@
 - 票据 secret 专用通道：MessagePort 控制帧（协议只见 ticketId）、宿主绑定校验、ZCODE_P6_CAPABILITY_TICKETS=1 组合根接线、真通道测试 53 例 ✅
 - 验证：根 typecheck、architecture 0、CLI lint 0 errors；累计 47 提交
 
+## P6 最终收口批次（2026-11-06）✅
+- renderer 命令信封：MessagePort 连接层按连接包装 agent service，自动合并 `capabilityTicketId`（无票据字节兼容）；宿主对“已签票据但命令缺票”按 `ticket.required` fail-closed ✅
+- C2 凭据注入：CLI 工具执行用 AsyncLocalStorage 携带票据公开域；官方 MCP 身份头请求附 ticketId+binding，宿主在读取凭据前用同一 broker 校验并强制 `credential:official-mcp` scope；远端执行宿主经已鉴权反向频道把 admission 回传 Desktop broker；CUA 走既有 broker socket；无真实通道即 typed deny ✅
+- Linux 围栏：改为 rootless user+net namespace + 0600 AF_UNIX relay（无需 root/veth/nftables），真实 netns 探测含 relay 回读；Linux 集成测试随代码提交、darwin 显式 skip，未宣称 Linux 真机验证 ✅
+- 原生 peer 凭据：Node-API addon（macOS LOCAL_PEERPID + getpeereid、Linux SO_PEERCRED），macOS 真 Unix socket + 真子进程验证；Supervisor→daemon 透传 addon 路径与 Core PID；显式 `ZCODE_CONTROL_PLANE_PEER_MODE` 才启用，缺 addon 即 fatal；Windows 明确不支持（Node 不暴露 pipe HANDLE）✅
+- 修复 executor↔handlers 运行时环：准入访问器拆到 `commands/command-admission.ts`，handler 不再反向 import executor，避免整组 handler 在不同导入顺序下静默丢失 ✅
+- 验证：双 scope typecheck、architecture 0、lint 0 errors；bootstrap 12346、services 3577、desktop 3004、server-cli 304、client+shared 1951、native addon 8 全绿（bootstrap 全量中 mcp-oauth 跨进程用例单跑通过，属并行负载 flake）✅
+
 ## 已知接缝（登记、非阻塞）
 - 能力票据吊销只在下一条命令 admission 生效（CLI turn 内无宿主控制面通道复核 epoch；`revocationEpoch` 只是签发快照）
-- 能力票据客户端信封接线（renderer 未调用 `capabilityTickets.protocolFields()`，生产 UI 命令不携带 `capabilityTicketId`；flag 仅 gate 携带票据的命令）
+- 能力票据 `web-remote-replayable` relay 形态不投递 secret（只转发 `Uint8Array`，控制帧不可达）；该形态不签发票据、保留无票据旧路径（desktop-continuous renderer 信封已自动携带 `capabilityTicketId`）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
 - PromptAdmissionOptions.mandateFacts 接缝

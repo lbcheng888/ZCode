@@ -388,7 +388,9 @@ scheduler 同理：本代际 child 曾 leader 后失效 → 该 workspace 的 cl
 
 - socket 仅本机、data-root 权限；不做 TCP 监听，不引网络鉴权。socket `0600` / 目录 `0700` 只是纵深防御，**不是**「同 data-root 进程即可信」的证明。
 - **peer 身份是认证，taint 不是**：连接建立后、首帧之前校验 peer——Linux `SO_PEERCRED`、macOS `LOCAL_PEERPID`、Windows `GetNamedPipeClientProcessId` + 客户端 SID；可信集合 = 本 data-root 的 Supervisor 与 Core（Core PID 由 Supervisor 经 child IPC / spawn env 传递）。无法取得 peer 身份或 peer 不在可信集合 → 立即断开、计数并上报 health，fail-closed。同 UID 但不是 Core 的进程因 PID 不匹配被拒；设计 §5 登记的同 UID 本机攻击面在本 RPC 上收窄为「能取得 Core PID 身份的进程」，仍不承诺。
-- **B 期落地路径（实施偏差登记）**：Node 公共 API 不暴露上述 peer credential，原生绑定尚未落地。B 期改为**显式凭据握手**：Supervisor 在 daemon 启动期用 `randomBytes` 铸造凭据并原子写入 `<serverRoot>/run/super-agent.auth`（0600，目录 0700）；Core 连接首帧提交凭据，child 在认证前不处理任何业务帧，缺失/不匹配立即断开并计错。凭据每次 daemon 启动重新铸造（Core 重启读同一文件，租约不中断）；文件缺失/为空时 child 启动级 fatal、客户端连接 fail-closed。它收窄的攻击面是「能读同 UID 0600 文件的进程」，仍属设计 §5 不承诺范围；内核级 peer credential 保留为未来加固项，不得把平台 resolver 的「恒拒绝」当作本节已实现。
+- **B 期落地路径**：Node 公共 API 不暴露内核 peer credential，生产认证仍是**显式凭据握手**：Supervisor 在 daemon 启动期用 `randomBytes` 铸造凭据并原子写入 `<serverRoot>/run/super-agent.auth`（0600，目录 0700）；Core 连接首帧提交凭据，child 在认证前不处理任何业务帧，缺失/不匹配立即断开并计错。凭据每次 daemon 启动重新铸造（Core 重启读同一文件，租约不中断）；文件缺失/为空时 child 启动级 fatal、客户端连接 fail-closed。它收窄的攻击面是「能读同 UID 0600 文件的进程」，仍属设计 §5 不承诺范围。
+- **原生 peer credential 状态（§3.8 加固项）**：`packages/native-peer-credentials` 提供 Node-API C addon（macOS `LOCAL_PEERPID` + `getpeereid`、Linux `SO_PEERCRED`；`_GNU_SOURCE` 在任何 libc 头文件之前定义，否则 glibc 不暴露 `struct ucred`），产物 `prebuilds/<platform>-<arch>/peercred.node`，由 `scripts/build-native-peer-credentials.mjs` 构建（二进制不入库）。**Windows 不支持**：Node 不把 named-pipe 连接句柄暴露为 fd，JS 侧拿不到内核 HANDLE，客户端 SID 查询未实现；Windows resolver 恒为 unavailable（fail-closed），不得声称已支持。`peerIdentity` 在原生 addon 可用时优先使用内核身份；仅非原生模式的 Linux 才退回 `/proc` inode 启发式，macOS/Windows 无原生即 unavailable。**macOS 已用真实 Unix socket + 真实子进程验证解析到的 peer PID 等于子进程 PID；Linux 构建/测试未在本机执行（本机为 darwin），不得声称 Linux 已真机验证。**
+- **显式 peer 门模式（非默认）**：`ZCODE_CONTROL_PLANE_PEER_MODE=1`（Core 与 child 共用同一 env）时 child 不读凭据文件，改用原生 resolver；可信集合 = `process.ppid`（Supervisor）+ `ZCODE_CONTROL_PLANE_TRUSTED_PIDS`。Supervisor 在每次 `launchControlPlane` 读取当前 Core PID 并经 launch params 投影为该 env。peer 模式下 `ZCODE_PEER_CREDENTIALS_NATIVE_PATH` 必须指向可加载的原生 addon：缺失/未提供即启动级 fatal，绝不回退 `/proc` 或未认证端点；Core 侧同时不再发送 auth 首帧。默认（未设置该 env）仍是 Supervisor 铸造的 0600 凭据握手，生产入口始终走 authToken，不得把原生 resolver 描述为已替代凭据。打包态由 staging 把同平台 addon 复制到 release `runtime/peercred.node` 并纳入 server-runtime 组件哈希；同平台未构建 addon 时 staging 响亮失败，跨平台 staging 不注入（构建脚本拒绝交叉编译）。
 - 帧内禁止凭据、token、完整 prompt 之外的敏感字段；payload 摘要沿用 intake 上限。
 - `taint` 只由可信出口铸造，反序列化后校验 `taint === true`，否则拒收；这是来源完整性检查，**不构成认证**，不能替代 peer 校验。
 - P6（deviceScope/能力票据）在此边界挂接：远程/多设备接入若未来复用该 RPC，必须先加 capability ticket 与吊销传播；B 不实现 P6，也不预留无鉴权的远程扩展。
@@ -629,7 +631,7 @@ B 期目标（待实现）：
 | 7 | child 内裁决模型运行时装配 | child 不 import services；需要一个 model-only 生成面 | 复用 bootstrap 短命会话面（tools=[]）；具体构造入口在 headless entry 落地时定案 |
 | 8 | flag 来源与热切换 | 此前 Server CLI 不读 CLI RuntimeConfig，门禁与 `features.eventRouter` 可能漂移；同一 flag 被多个消费者各读一份 | 已收敛为 §2.3 单一投影源：`runServe` 启动期读一次 RuntimeConfig，按消费者投影给 launcher/Core/child；门禁开而 eventRouter 非 true 在 spawn 前拒绝；B 期只读、需重启 |
 | 9 | `tasks-index` 迁移证明 | 不能以「文件存在」推断迁移 | 桥构造前 `prepare` 检查表存在；失败响亮；沿用 trigger-subsystem-spec §8-16① |
-| 10 | P6 边界 | deviceScope/能力票据未实现；RPC 目前仅本机 | B 不实现 P6；未来远程复用 RPC 必须先加 capability ticket/吊销，禁止裸复用 |
+| 10 | P6 边界 | deviceScope 未实现；能力票据已由 P6 单独交付（B 不接入）；RPC 目前仅本机 | B 不实现 P6；未来远程复用 RPC 必须先加 capability ticket/吊销，禁止裸复用 |
 | 11 | 平台可达性矩阵的裁决状态 | 设计 §9 开放问题⑥ 要求平台矩阵与 headless 派发策略由产品裁决；§6.1 的通过条件目前是实施建议，不是已定案 | 先按 §6.1 建议的判据顺序执行；产品另行裁决时只改门禁表与启动判据、不改拓扑；被否决平台保留 Desktop 回退 |
 | 12 | `host.worker.createTask` 崩溃窗口 | `createTask` 已建会话、context 尚未写 `activeTaskId` 时进程崩溃，重投会再建第二个会话；`triggerId` 绑定要等创建成功后才落。当前实现不是原子幂等 | 需 runtime 提供幂等 `createSession` 命令键，或先落可反查 intent 行并在重投时收敛；缺口关闭前不得把 createTask 标成已闭环幂等 |
 
@@ -646,7 +648,7 @@ B 期目标（待实现）：
 7. **P6**：不在本里程碑交付；§3.8 仅登记未来接入约束。
 8. **租约心跳归属收窄**：trigger-subsystem-spec §7-7 写「daemon 本体只做入站 webhook、scheduler claim、租约心跳、子进程监管」。本 spec 把 `control_plane_leases` 的 claim/heartbeat/release 唯一归属 child 内 workspace plane（域库单写者），Core 只经 `lease.list`/`lease.get` 只读门控（§4.4）。这是对 §7-7「daemon 本体」的收窄解释（daemon = Supervisor+Core+child 整体，心跳由 child 执行），避免 Core 与 child 形成两个心跳写者。
 9. **mandateFacts 跨进程通道**：trigger-subsystem-spec 的 host 通道只覆盖 v4 wire 命令；本 spec 新增 agent↔Core 内部 `admission.resolveMandate`（解析时点前移到每个 admission 边界，含排队提升/steer），并明确 facts 不进公开 wire command（§3.7）。
-10. **RPC peer 认证**：设计 §5 登记「同 UID 本机攻击面不承诺」；本 spec 在该 RPC 上额外要求 peer 身份校验（SO_PEERCRED/LOCAL_PEERPID/Windows client PID+SID，可信集合=Supervisor/Core），不可验证即拒绝（§3.8）。B 期在 Node 无原生绑定的前提下以 Supervisor 铸造的 0600 显式凭据握手落地（§3.8「B 期落地路径」），内核级 peer credential 留作未来加固。
+10. **RPC peer 认证**：设计 §5 登记「同 UID 本机攻击面不承诺」；本 spec 在该 RPC 上额外要求 peer 身份校验（SO_PEERCRED/LOCAL_PEERPID/Windows client PID+SID，可信集合=Supervisor/Core），不可验证即拒绝（§3.8）。生产握手仍是 Supervisor 铸造的 0600 显式凭据；原生 peer credential addon 覆盖 macOS/Linux（macOS 已真实 socket + 子进程验证，Linux 本机未运行），作为显式 peer 门模式的加固路径；Windows 不支持（Node 不暴露 pipe HANDLE，resolver fail-closed），见 §3.8「原生 peer credential 状态」。
 
 ---
 
