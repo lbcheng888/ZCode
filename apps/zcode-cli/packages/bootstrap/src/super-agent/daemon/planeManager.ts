@@ -811,9 +811,28 @@ export class DaemonPlaneManager {
           envelope.threadKeyHint ??
           `bot:${botId}+${readPayloadString(envelope.payload, "chatId") ?? envelope.actor.id ?? ""}`;
         const actorId = envelope.actor.id ?? botId;
+        // 把出口已规范化的发送者/寻址事实随 wire 传给 Core：Core 用它们复用
+        // admitAutoReplyTurn 的占额判定，不按 actorId 猜「是否机器人」。
+        const chatType = readPayloadString(envelope.payload, "chatType");
+        const senderType = readPayloadString(envelope.payload, "senderType");
+        const commandText = readPayloadString(envelope.payload, "commandText");
         const raw = await channelOf().request(
           "host.autoReplyGuard",
-          { workspaceIdentity, botId, threadKey, actorId },
+          {
+            workspaceIdentity,
+            botId,
+            threadKey,
+            actorId,
+            ...(chatType === "private" || chatType === "group" ? { chatType } : {}),
+            ...(senderType === "user" || senderType === "app" ? { senderType } : {}),
+            mentionedBot: envelope.payload.mentionedBot === true,
+            groupCardAction: envelope.payload.groupCardAction === true,
+            elicitation: envelope.payload.elicitation === true,
+            ...(envelope.providerMessageId
+              ? { providerMessageId: envelope.providerMessageId }
+              : {}),
+            ...(commandText ? { commandText } : {}),
+          },
           CONTROL_PLANE_RPC_TIMEOUTS_MS["host.autoReplyGuard"],
           currentDeadlineAt(),
         );
