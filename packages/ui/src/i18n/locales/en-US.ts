@@ -8131,6 +8131,12 @@ const enUS: Record<string, string> = {
   "wouldAccept.tier.recordOnly": "record only",
   "wouldAccept.tier.speculative": "speculative",
   "wouldAccept.tier.auto": "auto",
+  "wouldAccept.scheme.currentEvidence": "Current evidence",
+  "wouldAccept.scheme.candidateOptions": "Candidate options",
+  "wouldAccept.scheme.candidateOption": "{option} (cost: {cost})",
+  "wouldAccept.scheme.recommendation": "Recommendation",
+  "wouldAccept.scheme.impact": "Impact",
+  "wouldAccept.scheme.verification": "Verification",
   ...requestSecurityMessagesEnUS,
 };
 

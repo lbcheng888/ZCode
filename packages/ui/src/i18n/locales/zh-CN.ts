@@ -7716,6 +7716,12 @@ const zhCN: Record<string, string> = {
   "wouldAccept.tier.recordOnly": "仅记录",
   "wouldAccept.tier.speculative": "投机",
   "wouldAccept.tier.auto": "auto",
+  "wouldAccept.scheme.currentEvidence": "现状证据",
+  "wouldAccept.scheme.candidateOptions": "候选方案",
+  "wouldAccept.scheme.candidateOption": "{option}（代价：{cost}）",
+  "wouldAccept.scheme.recommendation": "最佳推荐",
+  "wouldAccept.scheme.impact": "影响面",
+  "wouldAccept.scheme.verification": "验证方案",
   ...requestSecurityMessagesZhCN,
 };
 

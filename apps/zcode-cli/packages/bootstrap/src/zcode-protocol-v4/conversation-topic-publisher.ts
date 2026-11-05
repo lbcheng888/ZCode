@@ -19,6 +19,7 @@ import type {
   ConversationTopicFrame,
   DeliveryProfile,
   DeliveryProfileName,
+  PendingWouldAcceptCard,
   QueueItem,
   SubscribeAck,
   ToolCallRow,
@@ -335,6 +336,31 @@ export class ConversationTopicPublisher {
   seedSubagents(seed: SessionSubagentsSeed): void {
     this.projection.seedSubagents(seed);
     this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+  }
+
+  /** would-accept 收件箱种子（spec §5.5）：投影初值来自控制面读面，不产 delta。 */
+  seedWouldAccept(cards: readonly PendingWouldAcceptCard[]): void {
+    this.projection.seedWouldAccept(cards);
+    this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+  }
+
+  /**
+   * 已订阅会话的 would-accept 权威投影更新（裁决产出卡片 / 批转成功后由宿主驱动）。
+   * 与种子不同：这里必须产 `state.updated` delta，否则已订阅客户端永远看不到新卡；
+   * 键值未变时不产帧（reject-only 批、幂等重复批转都收敛为零帧）。
+   * 不 bump seq/revision：与 setRuntimeInitialization 同纪律——投影键更新紧跟当前水位，
+   * 断线重连由订阅时 seed + snapshot 重建，live 订阅者由本 delta 收敛。
+   */
+  publishWouldAccept(cards: readonly PendingWouldAcceptCard[]): boolean {
+    const before = this.projection.getSnapshot().pendingWouldAccept;
+    this.projection.seedWouldAccept(cards);
+    const after = this.projection.getSnapshot().pendingWouldAccept;
+    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) return false;
+    this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+    this.appendDeltas(this.currentSeq, [
+      { op: "state.updated", patch: statePatchSchema.parse({ pendingWouldAccept: after }) },
+    ]);
+    return true;
   }
 
   /**

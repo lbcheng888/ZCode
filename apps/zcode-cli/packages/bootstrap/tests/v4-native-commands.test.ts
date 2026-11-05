@@ -2053,6 +2053,27 @@ describe("v4 原生 stop", () => {
   });
 });
 
+describe("v4 原生 promoteWouldAccept", () => {
+  it("把 cardId 交给 app 的控制面 promoteWouldAccept；控制面缺席时响亮拒绝", async () => {
+    const promoteWouldAccept = vi.fn(async () => undefined);
+    const app = makeApp({
+      superAgentControlPlane: { promoteWouldAccept },
+    });
+    await new V4CommandExecutor(makeHost(makeRecord({ app }))).execute(
+      envelope("promoteWouldAccept", { cardId: "card-1" }),
+    );
+    expect(promoteWouldAccept).toHaveBeenCalledWith("card-1");
+
+    // flag 关 / 宿主未注入：快照不会发布收件箱，但命令若被直接调用必须 fail-closed。
+    const withoutPlane = makeApp();
+    await expect(
+      new V4CommandExecutor(makeHost(makeRecord({ app: withoutPlane }))).execute(
+        envelope("promoteWouldAccept", { cardId: "card-1" }),
+      ),
+    ).rejects.toThrow(/control plane/);
+  });
+});
+
 describe("supports 分流", () => {
   it("协议命令全部原生（回落面清零）；未知命令不 supports", () => {
     const executor = new V4CommandExecutor(makeHost(makeRecord()));
@@ -2082,6 +2103,7 @@ describe("supports 分流", () => {
       "cancelBackgroundWork",
       "renameSession",
       "deleteSession",
+      "promoteWouldAccept",
     ] as const;
     for (const command of allCommands) {
       expect(executor.supports(command), command).toBe(true);

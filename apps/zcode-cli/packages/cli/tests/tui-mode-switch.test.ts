@@ -9,6 +9,7 @@ import { resolveExecutionState } from "@zcode/shared";
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
 import { createCliModeState, currentCliMode } from "../src/tui-command-state.js";
 import type { RunDependencies } from "../src/cli-types.js";
+import type { SendInputOptions, ZCodeAppOptions } from "@zcode/bootstrap";
 
 async function fixture(overrides: Partial<TuiOptions> = {}) {
   const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -162,6 +163,128 @@ test("runtime Plan state survives Shift+Tab responses and metadata refreshes", a
     assert.match(terminal.captureCharFrame(), / Build /);
   } finally {
     await terminal.close();
+    await handler.close!();
+  }
+});
+
+test("TUI 宿主注入 super-agent options：handleCommand 延迟绑定 sendInput，缺站响亮失败", async () => {
+  const sent: Array<{ text: string; options: SendInputOptions | undefined }> = [];
+  let captured: ZCodeAppOptions | undefined;
+  const app = {
+    sessionId: "session-1",
+    runtime: { getPlanEnabled: () => false },
+    listModels: () => [],
+    sendInput: async (text: string, options?: SendInputOptions) => {
+      sent.push({ text, options });
+      return { kind: "started_turn" as const, completion: Promise.resolve({}), turnId: "turn-1" };
+    },
+    close: async () => {},
+  };
+  const state = createCliModeState();
+  const deps = {
+    env: {},
+    cwd: () => process.cwd(),
+    skipUserConfig: true,
+    loadDotenv: () => ({ keys: [], loaded: false, path: "" }),
+    createZCodeApp: async (options?: ZCodeAppOptions) => {
+      captured = options;
+      return app as unknown as ReturnType<NonNullable<RunDependencies["createZCodeApp"]>>;
+    },
+    startProcessProviderRegistryRuntime: async () => ({
+      runtime: { registryService: {} },
+      dispose() {},
+    }),
+  } as unknown as RunDependencies;
+  const handler = createTuiSubmitPrompt(deps, state, "test");
+  try {
+    // flag-on 的启动期缺口曾被 create-app 通用门判成「缺 options.superAgent」响亮失败；
+    // 这里断言 TUI 宿主真实给出注入面（flag 关时 create-app 忽略该字段，字节兼容）。
+    await handler.getSessionMetadata!();
+    const superAgent = captured?.superAgent;
+    assert.ok(superAgent, "TUI createApp options 必须携带 superAgent 注入面");
+    assert.equal(typeof superAgent.handleCommand, "function");
+    assert.equal(typeof superAgent.autoReplyGuard.admit, "function");
+    assert.match(superAgent.superAgentDatabasePath ?? "", /super-agent\.sqlite$/);
+    // tasks-index 是可选桥：文件存在（services 已迁移）才注入；纯 CLI 环境缺席不阻止启动。
+    if (superAgent.tasksIndexDatabasePath !== undefined) {
+      assert.match(superAgent.tasksIndexDatabasePath, /tasks-index\.sqlite$/);
+    }
+
+    const envelope = {
+      commandId: "cmd-1",
+      clientId: "super-agent-trigger",
+      sessionId: "session-1",
+      type: "sendText" as const,
+      payload: { text: "nightly failed", requestedDelivery: "queue" },
+      issuedAt: Date.now(),
+    };
+    const ack = await superAgent.handleCommand(envelope);
+    assert.equal(ack.status, "accepted");
+    assert.deepEqual(sent, [
+      {
+        text: "nightly failed",
+        options: { inputId: "cmd-1", delivery: "auto", queueDelivery: "queue" },
+      },
+    ]);
+    // 同进程重投按 CommandInbox duplicate 语义吸收，不重复起轮。
+    assert.equal((await superAgent.handleCommand(envelope)).status, "duplicate");
+    assert.equal(sent.length, 1);
+
+    // TUI 只承载本会话：外部 sessionId 不伪造 admission。
+    const external = await superAgent.handleCommand({
+      ...envelope,
+      commandId: "cmd-2",
+      sessionId: "session-2",
+    });
+    assert.equal(external.status, "rejected");
+    assert.equal(external.reasonCode, "tui.sessionNotHosted");
+
+    // 事件信封：来源由 host 从 triggerId 推导，随 sendInput 交给 Core（M4 fail-closed）。
+    const triggerEnvelope = {
+      ...envelope,
+      commandId: "cmd-trigger",
+      type: "sendText" as const,
+      payload: { text: "triggered", requestedDelivery: "startNow" },
+      triggerId: "trigger-1",
+    };
+    assert.equal((await superAgent.handleCommand(triggerEnvelope)).status, "accepted");
+    assert.deepEqual(sent.at(-1), {
+      text: "triggered",
+      options: { inputId: "cmd-trigger", delivery: "start_turn", triggerSource: "trigger" },
+    });
+
+    // 群内 IM 守卫无 botsService 状态：仅守卫适用面（群内普通消息）响亮失败。
+    await assert.rejects(
+      () =>
+        superAgent.autoReplyGuard.admit({
+          source: "im",
+          payload: { chatType: "group" },
+        } as never),
+      /TUI 宿主缺 bots 互答守卫状态/,
+    );
+    // 非守卫适用面（卡片回调 / elicitation / 私聊）按 intake 合同原样放行。
+    assert.equal(
+      await superAgent.autoReplyGuard.admit({
+        source: "im",
+        payload: { chatType: "group", groupCardAction: true },
+      } as never),
+      true,
+    );
+    assert.equal(
+      await superAgent.autoReplyGuard.admit({
+        source: "im",
+        payload: { chatType: "group", elicitation: true },
+      } as never),
+      true,
+    );
+    assert.equal(
+      await superAgent.autoReplyGuard.admit({
+        source: "im",
+        payload: { chatType: "private" },
+      } as never),
+      true,
+    );
+  } finally {
     await handler.close!();
   }
 });

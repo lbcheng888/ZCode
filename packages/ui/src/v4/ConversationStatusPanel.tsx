@@ -45,11 +45,14 @@ import type {
 import type {
   BackgroundWorkSummary,
   GoalState,
+  PendingWouldAcceptCard,
   PlanState,
   ToolCallRow,
   WorkflowRunState,
+  WouldAcceptPromoteRpc,
 } from "@zcode/shared/zcode-protocol-v4";
 import { cn } from "@/components/lib/utils.js";
+import { WouldAcceptInbox } from "@/would-accept/WouldAcceptInbox.js";
 import { Button } from "@/components/ui/button.js";
 import { RUN_STATUS_DOT } from "@/components/workflow-graph/run-status-presentation.js";
 import { WorkflowRunRail } from "@/components/workflow-run-line/WorkflowRunRail.js";
@@ -113,6 +116,13 @@ export interface ConversationStatusPanelProps {
   runningSubagents?: readonly ZCodeSessionRunningSubagent[];
   /** 本会话 `snapshot.workflowRuns.runs`；与 backgroundWorks 在模型层按 workId ≡ runId 联接。 */
   workflowRuns?: readonly WorkflowRunState[];
+  /**
+   * v4 快照投影 `pendingWouldAccept`（spec §5.5）：undefined = 旧发送端未发布该键
+   * （unknown≠0，不渲染）；显式空数组 = 已发布零卡片，同样不渲染收件箱。
+   */
+  wouldAcceptCards?: readonly PendingWouldAcceptCard[] | undefined;
+  /** 批转 auto 的 RPC 实现（v4 命令面）；缺席时收件箱入口禁用并如实提示未接入。 */
+  onPromoteWouldAccept?: WouldAcceptPromoteRpc["promoteWouldAccept"];
   /**
    * 已结束的 workflow run 条数（journal 口径，`countEndedWorkflowRuns`）。
    * 面板不自己算：它手上的投影是 memory-only 的活状态，重启后为空，而这条计数恰恰要在重启后
@@ -1636,6 +1646,8 @@ function ConversationStatusPanelImpl({
   backgroundWorks = EMPTY_BACKGROUND_WORKS,
   runningSubagents = EMPTY_RUNNING_SUBAGENTS,
   workflowRuns = EMPTY_WORKFLOW_RUNS,
+  wouldAcceptCards,
+  onPromoteWouldAccept,
   endedWorkflowRunCount = 0,
   endedSubagentCount = 0,
   rootSessionId,
@@ -1727,6 +1739,14 @@ function ConversationStatusPanelImpl({
   // 已结束目录入口过去渲染在 Agent StatusSection 之后，视觉和 DOM 都被提升成
   // 并列顶层 section。Agent 的运行态和已结束目录属于同一领域，统一由 Agent 折叠分组承载。
   const canRenderAgents = model.runningSubagentWorks.length > 0 || canRenderEndedAgents;
+  // 无卡片（含键缺席/显式空数组）不渲染收件箱；有卡时即使面板模型 hasContent=false
+  // 也要让面板外壳存在，否则唯一入口会被通用空态门吞掉。
+  const canRenderWouldAccept = (wouldAcceptCards?.length ?? 0) > 0;
+  const wouldAcceptPromote = useMemo(
+    () =>
+      onPromoteWouldAccept ? { promoteWouldAccept: onPromoteWouldAccept } : undefined,
+    [onPromoteWouldAccept],
+  );
   const handlePanelModeChange = useCallback(
     (value: string) => {
       if (value === "auto") {
@@ -1750,7 +1770,7 @@ function ConversationStatusPanelImpl({
   // 会话会连整个胶囊一起消失——而那正是重启后打开一条旧对话的样子，run 目录的入口于是又没了。
   // 已结束的 run 因此单独开这道门。（Agents 的已结束行有同一个洞：`endedSubagentCount` 也
   // 没进 `hasContent`。那是既有行为，不在本轮一起翻。）
-  if (!model.hasContent && !canRenderEndedWorkflows) {
+  if (!model.hasContent && !canRenderEndedWorkflows && !canRenderWouldAccept) {
     return null;
   }
 
@@ -1861,6 +1881,12 @@ function ConversationStatusPanelImpl({
               variant === "auto" ? "hidden @min-[1280px]/conversation:flex" : "flex",
             )}
           >
+            {canRenderWouldAccept ? (
+              <WouldAcceptInbox
+                cards={wouldAcceptCards}
+                {...(wouldAcceptPromote ? { promote: wouldAcceptPromote } : {})}
+              />
+            ) : null}
             {canRenderGit ? (
               <GitStatusSection
                 model={model}

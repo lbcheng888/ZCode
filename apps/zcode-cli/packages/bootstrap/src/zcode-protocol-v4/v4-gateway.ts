@@ -47,6 +47,7 @@ import type {
   CommandsQueryResult,
   ConversationInputIntent,
   ConversationTopicFrame,
+  PendingWouldAcceptCard,
   QueueItem,
   RoutedTopicFrame,
   RoutedTopicWireFrame,
@@ -268,6 +269,11 @@ export interface V4GatewayHost {
    * 会话不在册返回 null（gateway 跳过，保持空初值）；未实现（旧宿主/测试桩）同。
    */
   getSessionConfigSeed?(sessionId: string): SessionConfigSeed | null;
+  /**
+   * would-accept 收件箱种子（spec §5.5）：控制面读面，不来自事件日志。
+   * 返回 null = 会话不在册/控制面缺席（不发布该键，unknown≠0）；[] = 已发布零卡片。
+   */
+  getSessionWouldAcceptSeed?(sessionId: string): readonly PendingWouldAcceptCard[] | null;
   /** 只读会话创建期 App 开关，不读取实时设置或推断 Memory 工具使用。 */
   getSessionMemoryEnabled?(sessionId: string): boolean | undefined;
   /**
@@ -682,6 +688,24 @@ export class ConversationV4Gateway {
   private readonly cuaPermissionNormalizer = new CuaPermissionObservationNormalizer();
   private readonly telemetryEventIds = new Set<string>();
   private disposed = false;
+
+  /**
+   * would-accept 权威投影变化（控制面裁决产出 / 批转成功）：逐 publisher 现读控制面
+   * 读面并发布 delta。已建立的 desktop/web 订阅因此直接收敛，无需 resubscribe；
+   * 控制面缺席（flag 关）返回 null = 键保持 unknown，不发帧。
+   */
+  refreshWouldAcceptPublishers(): void {
+    if (this.disposed) return;
+    for (const [sessionId, publisher] of this.publishers) {
+      const cards = this.host.getSessionWouldAcceptSeed?.(sessionId);
+      if (cards === null || cards === undefined) continue;
+      if (!publisher.publishWouldAccept(cards)) continue;
+      for (const [routeKey, state] of this.flushStates) {
+        if (state.sessionId !== sessionId) continue;
+        this.scheduleFlush(routeKey, state, publisher);
+      }
+    }
+  }
 
   /** session entry 状态变更后的轻量 metadata 更新，不重放 conversation event。 */
   updateSharedContextImport(
@@ -1561,6 +1585,10 @@ export class ConversationV4Gateway {
                 params.additionalDirectories,
               )
             : await this.hydratePublisher(sessionId);
+    // would-accept 卡片没有会话事件 delta 生产者：每次订阅前现读控制面，种子进权威
+    // projection 后再打 snapshot（不 bump seq/revision）。控制面缺席返回 null = 不发布键。
+    const wouldAcceptSeed = this.host.getSessionWouldAcceptSeed?.(sessionId);
+    if (wouldAcceptSeed) publisher.seedWouldAccept(wouldAcceptSeed);
     const cliSessionRestoreMs = !isLiveConversation
       ? Math.max(0, Math.round(performance.now() - restoreStartedAt))
       : undefined;

@@ -1,8 +1,15 @@
 import type { ToolSearchMode } from "@zcode/contracts";
+import { promptTriggerSourceOf } from "@zcode/core";
 import { getDefaultConfigPath, updateUiLocaleInFileConfig } from "@zcode/adapters/config";
 import type { SessionEvent } from "@zcode/contracts";
-import type { ZCodeAppOptions } from "@zcode/bootstrap";
+import type { SendInputOptions, ZCodeApp, ZCodeAppOptions } from "@zcode/bootstrap";
+import { getSuperAgentDatabasePath } from "@zcode/bootstrap/paths";
 import { DEFAULT_LOCALE, type SupportedLocale } from "@zcode/i18n";
+import {
+  parseCommandEnvelope,
+  type CommandAck,
+  type CommandEnvelope,
+} from "@zcode/shared/zcode-protocol-v4";
 import type { TuiRequestPermission } from "@zcode/tui";
 import type { GlobalOptions } from "@zcode/shared-types";
 import type { DynamicWorkflowMode } from "@zcode/shared";
@@ -51,6 +58,189 @@ import type {
   RunDependencies,
 } from "./cli-types.js";
 
+// ── TUI 进程内 super-agent 宿主注入面（spec §8-2/§8-14④）──
+//
+// TUI 不走协议宿主的 ConversationV4Gateway：它直接持有 create-app 返回的 ZCodeApp，
+// 单会话、进程内。因此这里提供 handleCommand 的 TUI 侧命令入口——把 super-agent
+// 控制面发出的 sendText 信封投给 `app.sendInput`，由 Core 完成唯一 prompt admission；
+// 不做第二套调度、不旁路 Core。
+//
+// 绑定时机：create-app 在返回 app 之前就会启动控制面（leader 抢占/回填/派发桥续推），
+// 此时 app 变量尚未赋值。因此 handleCommand 是「延迟绑定」闭包：投递期现读 getApp()，
+// 未就绪就响亮失败，不排队、不降级、绝不静默吞掉一次触发。
+
+// 与协议 CommandInbox 的 512/session LRU 同预算：TUI 是单会话进程内宿主，幂等事实
+// 不跨进程持久化，这里只吸收同进程内的重投/重试。
+const TUI_COMMAND_ACK_MEMORY_LIMIT = 512;
+
+type TuiSuperAgentHostApp = Pick<ZCodeApp, "sessionId" | "sendInput">;
+
+interface CreateTuiSuperAgentHostPortsOptions {
+  /** 延迟绑定：投递期现读当前 app（/new、/resume 换 app 后自动指向新实例）。 */
+  getApp: () => TuiSuperAgentHostApp | undefined;
+}
+
+class BoundedAckMemory {
+  private readonly entries = new Map<string, CommandAck>();
+
+  constructor(private readonly limit: number) {}
+
+  get(commandId: string): CommandAck | undefined {
+    return this.entries.get(commandId);
+  }
+
+  set(commandId: string, ack: CommandAck): void {
+    this.entries.delete(commandId);
+    this.entries.set(commandId, ack);
+    while (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) return;
+      this.entries.delete(oldest);
+    }
+  }
+}
+
+function rejectedAck(commandId: string, reasonCode: string, message: string): CommandAck {
+  return {
+    commandId,
+    status: "rejected",
+    reasonCode,
+    message,
+    revisionAtDecision: 0,
+  };
+}
+
+/**
+ * requestedDelivery → Core admission 参数（M1 车道表，spec §8-4）：
+ * - queue = followup：busy 时强制 FIFO 入队（`queueDelivery: "queue"` 关掉 steer 分流），
+ *   idle 时照常起轮；`auto` 只是让 Core 自行判 busy。
+ * - guide = 步边界行内：busy 且可 steer 走 guide，否则 Core 回退 queue。
+ * - startNow / 缺省（dispatch push 信封不带 requestedDelivery）：start_turn；TUI 没有
+ *   协议宿主的 foreground promotion lease，busy 时 Core 会按既有准入入队而不是抢占。
+ */
+function deliveryOptionsOf(
+  requestedDelivery: "startNow" | "queue" | "guide" | undefined,
+): SendInputOptions {
+  if (requestedDelivery === "queue") {
+    return { delivery: "auto", queueDelivery: "queue" };
+  }
+  if (requestedDelivery === "guide") {
+    return { delivery: "steer_active_turn", queueDelivery: "guide" };
+  }
+  return { delivery: "start_turn" };
+}
+
+function createTuiSuperAgentHostPorts(
+  options: CreateTuiSuperAgentHostPortsOptions,
+): NonNullable<ZCodeAppOptions["superAgent"]> {
+  const superAgentDatabasePath = getSuperAgentDatabasePath();
+  const ackMemory = new BoundedAckMemory(TUI_COMMAND_ACK_MEMORY_LIMIT);
+  const inFlight = new Map<string, Promise<CommandAck>>();
+
+  const executeSendText = async (envelope: CommandEnvelope): Promise<CommandAck> => {
+    const app = options.getApp();
+    if (!app) {
+      throw new Error(
+        "TUI super-agent handleCommand 在 app 绑定前被调用（延迟绑定未就绪；spec §8-2 禁止静默降级）",
+      );
+    }
+    if (envelope.sessionId === null || envelope.sessionId !== app.sessionId) {
+      // TUI 只承载本进程这一条会话；订阅里其他 session 的投递不能在本宿主伪造 admission。
+      return rejectedAck(
+        envelope.commandId,
+        "tui.sessionNotHosted",
+        `TUI 宿主未承载会话 ${envelope.sessionId ?? "(null)"}`,
+      );
+    }
+    const payload = envelope.payload as { text?: unknown; requestedDelivery?: unknown };
+    if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
+      return rejectedAck(
+        envelope.commandId,
+        "proto.invalidPayload",
+        "super-agent sendText 正文为空",
+      );
+    }
+    const requestedDelivery =
+      payload.requestedDelivery === "startNow" ||
+      payload.requestedDelivery === "queue" ||
+      payload.requestedDelivery === "guide"
+        ? payload.requestedDelivery
+        : undefined;
+    const result = await app.sendInput(payload.text, {
+      inputId: envelope.commandId,
+      // M4：控制面投递带 triggerId = 事件回合；来源交给 Core，facts 缺席即响亮失败。
+      ...(envelope.triggerId ? { triggerSource: promptTriggerSourceOf(envelope) } : {}),
+      ...deliveryOptionsOf(requestedDelivery),
+    });
+    if (result.kind === "rejected") {
+      return rejectedAck(envelope.commandId, result.reason, `Core 拒绝投递: ${result.reason}`);
+    }
+    return {
+      commandId: envelope.commandId,
+      status: "accepted",
+      revisionAtDecision: 0,
+    };
+  };
+
+  const handleCommand = async (rawParams: unknown): Promise<CommandAck> => {
+    const parsed = parseCommandEnvelope(rawParams);
+    if (!parsed.ok) {
+      // 校验失败是宿主接线错误（super-agent 只会造 sendText），响亮抛错而不是伪造 ACK。
+      throw new Error(`TUI super-agent 信封校验失败: ${parsed.error.message}`);
+    }
+    const envelope = parsed.envelope;
+    if (envelope.type !== "sendText") {
+      throw new Error(
+        `TUI super-agent 宿主只承载 sendText，收到 ${envelope.type}（spec §8-14④）`,
+      );
+    }
+    const duplicate = ackMemory.get(envelope.commandId);
+    if (duplicate) return { ...duplicate, status: "duplicate" };
+    const pending = inFlight.get(envelope.commandId);
+    if (pending) {
+      const settled = await pending;
+      return settled.status === "accepted" ? { ...settled, status: "duplicate" } : settled;
+    }
+
+    const execution = executeSendText(envelope);
+    inFlight.set(envelope.commandId, execution);
+    try {
+      const ack = await execution;
+      // 只缓存 accepted：rejected 的同 id 重投必须继续如实拒绝，不能把 duplicate
+      // 当成「已准入」（派发桥把 duplicate 视为 settle 成功）。
+      if (ack.status === "accepted") ackMemory.set(envelope.commandId, ack);
+      return ack;
+    } finally {
+      inFlight.delete(envelope.commandId);
+    }
+  };
+
+  return {
+    handleCommand,
+    autoReplyGuard: {
+      async admit(envelope) {
+        // 守卫适用面与 admitAutoReplyTurn 同式：只有群内 IM 且非卡片回调、非 elicitation
+        // 才消耗互答占额（intake/contract.ts AutoReplyGuardPort 合同：其余适用面原样 true）。
+        // TUI 进程不承载 botsService 状态，适用面一旦被咨询就响亮失败（不伪造占额）。
+        const isGuardScope =
+          envelope.source === "im" &&
+          envelope.payload.chatType === "group" &&
+          envelope.payload.groupCardAction !== true &&
+          envelope.payload.elicitation !== true;
+        if (!isGuardScope) return true;
+        throw new Error(
+          "TUI 宿主缺 bots 互答守卫状态（admitAutoReplyTurn 未接入，spec §8-2/§8-10②）",
+        );
+      },
+    },
+    superAgentDatabasePath,
+    // 不注入 tasksIndexDatabasePath：派发桥循环尚未接线（spec ws7 偏差：桥行延后），
+    // 生产唯一价值是构造期 prepare SQL；注入后一旦 tasks-index 文件存在但迁移未落地
+    // （旧 Desktop 遗留文件），createDispatchBridge 会在 `no such table: dispatch_requests`
+    // 上让 flag-on TUI 启动失败。「文件存在」不能当迁移证明，接线前干脆不建可选桥。
+  };
+}
+
 export function createTuiSubmitPrompt(
   deps: RunDependencies,
   modeState: CliModeState,
@@ -96,6 +286,12 @@ export function createTuiSubmitPrompt(
       return await requestPermission(request, requestOptions);
     },
   };
+
+  // super-agent 宿主注入面（spec §8-2/§8-14④）：flag 关时 create-app 完全忽略该字段，
+  // 字节兼容；flag 开时 handleCommand 延迟绑定到当前 app，避免启动期缺注入响亮失败。
+  const superAgentHost = createTuiSuperAgentHostPorts({
+    getApp: () => app as TuiSuperAgentHostApp | undefined,
+  });
 
   const closeApp = async (targetApp = app): Promise<void> => {
     if (!targetApp) return;
@@ -179,6 +375,7 @@ export function createTuiSubmitPrompt(
           workingDirectory,
         },
         permissionBroker,
+        superAgent: superAgentHost,
         sessionId,
         skipUserConfig: deps.skipUserConfig,
         uiDetectedLocale,

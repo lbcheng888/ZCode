@@ -294,6 +294,10 @@ export const commandPayloadSchemas = {
   renameSession: z.object({ title: z.string() }),
   deleteSession: z.object({}),
   discardSharedContext: z.object({ contextId: z.string().trim().min(1) }).strict(),
+  // would-accept 批转 auto（super-agent spec §5.5 / §8-14③）：卡片 id 即控制面
+  // promoteWouldAccept 的入参；控制面缺席（flag 关 / 宿主未注入）由 CLI handler
+  // 以 rejected ACK 响亮拒绝，不静默 noop。幂等由 control plane 的 convert 行保证。
+  promoteWouldAccept: z.object({ cardId: z.string().min(1) }).strict(),
 } as const;
 
 export type CommandType = keyof typeof commandPayloadSchemas;

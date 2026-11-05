@@ -30,6 +30,7 @@ import type {
   CommandResult,
   ConversationTopicFrame,
   ConversationTelemetryFact,
+  PendingWouldAcceptCard,
   RoutedTopicWireFrame,
   V4ConversationFileChangesResult,
   V4ConversationFileRewindPreviewResult,
@@ -119,6 +120,8 @@ interface HostStub {
   }>;
   /** R-19 config 种子打桩：sessionId → runtime 真值（缺省 = 钩子返回 null）。 */
   configSeeds: Map<string, SessionConfigSeed>;
+  /** would-accept 投影种子：sessionId → 控制面读面卡片（缺省 = 钩子返回 null）。 */
+  wouldAcceptSeeds: Map<string, readonly PendingWouldAcceptCard[]>;
   memorySettings?: Map<string, boolean>;
   fileChangeCalls: Array<{ sessionId: string; targetRowId: number; messageIds: string[] }>;
   fileChangesResult: V4ConversationFileChangesResult;
@@ -147,6 +150,7 @@ function makeHost(): HostStub {
     persistedEvents: new Map(),
     synthesizedSessions: new Set(),
     configSeeds: new Map(),
+    wouldAcceptSeeds: new Map(),
     fileChangeCalls: [],
     fileChangesResult: { files: 0, additions: 0, deletions: 0, items: [] },
     fileRewindPreviewCalls: [],
@@ -222,6 +226,7 @@ function makeGateway(host: HostStub): ConversationV4Gateway {
           synthesized: host.synthesizedSessions.has(sessionId),
         },
       getSessionConfigSeed: (sessionId) => host.configSeeds.get(sessionId) ?? null,
+      getSessionWouldAcceptSeed: (sessionId) => host.wouldAcceptSeeds.get(sessionId) ?? null,
       getSessionMemoryEnabled: (sessionId) => host.memorySettings?.get(sessionId),
       getConversationFileChanges: async (sessionId, targetRowId, messageIds) => {
         host.fileChangeCalls.push({ sessionId, targetRowId, messageIds });
@@ -298,6 +303,64 @@ describe("订阅与帧调度", () => {
     expect(result.initialFrame?.payload.kind).toBe("snapshot");
     // 初始帧只进入 server 内部 dispatch result，不走 online notification 出口。
     expect(host.frames).toHaveLength(0);
+  });
+
+  it("would-accept 控制面种子进初始 snapshot；种子缺席时不发布该键", async () => {
+    const host = makeHost();
+    const gateway = makeGateway(host);
+    const log = new EventLog();
+    gateway.ingest("session-1", sessionCreated(log));
+    const card: PendingWouldAcceptCard = {
+      cardId: "card-1",
+      source: "im",
+      summary: "群里问发布状态",
+      suggestedTier: "record_only",
+      createdAt: 1_796_000_000_000,
+    };
+    host.wouldAcceptSeeds.set("session-1", [card]);
+
+    const { initialFrame } = await gateway.subscribe(subscribeParams());
+    if (initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot frame");
+    expect(initialFrame.payload.snapshot.pendingWouldAccept).toEqual([card]);
+
+    // 控制面缺席（flag 关）：host 返回 null → 键不发布，UI 按 unknown≠0 不渲染。
+    const noPlaneHost = makeHost();
+    const noPlaneGateway = makeGateway(noPlaneHost);
+    const noPlaneLog = new EventLog();
+    noPlaneGateway.ingest("session-1", sessionCreated(noPlaneLog));
+    const absent = await noPlaneGateway.subscribe(subscribeParams());
+    if (absent.initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot");
+    expect(absent.initialFrame.payload.snapshot.pendingWouldAccept).toBeUndefined();
+  });
+
+  it("控制面批转/产出后 refreshWouldAcceptPublishers 给已订阅会话发 delta，无需重订阅", async () => {
+    const host = makeHost();
+    const gateway = makeGateway(host);
+    const log = new EventLog();
+    gateway.ingest("session-1", sessionCreated(log));
+    const first: PendingWouldAcceptCard = {
+      cardId: "card-1",
+      source: "im",
+      summary: "群里问发布状态",
+      suggestedTier: "record_only",
+      createdAt: 1_796_000_000_000,
+    };
+    const second: PendingWouldAcceptCard = { ...first, cardId: "card-2", source: "webhook" };
+    host.wouldAcceptSeeds.set("session-1", [first]);
+
+    const subscription = await gateway.subscribe(subscribeParams());
+    subscription.commit();
+    // 首次订阅后控制面再产出一张卡：旧实现只能靠 resubscribe，这里必须走 delta。
+    host.wouldAcceptSeeds.set("session-1", [first, second]);
+    gateway.refreshWouldAcceptPublishers();
+    vi.advanceTimersByTime(CONTINUOUS_WINDOW);
+
+    const frame = host.frames.at(-1);
+    expect(frame?.payload.kind).toBe("deltas");
+    if (frame?.payload.kind !== "deltas") throw new Error("expected deltas frame");
+    const patch = frame.payload.deltas.find((delta) => delta.op === "state.updated");
+    if (patch?.op !== "state.updated") throw new Error("expected state.updated delta");
+    expect(patch.patch.pendingWouldAccept).toEqual([first, second]);
   });
 
   it("只从 live ingest 发送 telemetry fact，并按 eventId 有界入口去重", () => {

@@ -1,6 +1,9 @@
 import { memo } from "react";
 import { testId } from "@zcode/shared/test-ids";
-import type { PendingWouldAcceptCard } from "@zcode/shared/zcode-protocol-v4";
+import type {
+  PendingWouldAcceptCard,
+  WouldAcceptPromoteRpc,
+} from "@zcode/shared/zcode-protocol-v4";
 import { Button } from "@/components/ui/button.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { useWouldAcceptPromote } from "@/would-accept/useWouldAcceptPromote.js";
@@ -9,12 +12,23 @@ import { useWouldAcceptPromote } from "@/would-accept/useWouldAcceptPromote.js";
 export const TID_WOULD_ACCEPT_INBOX = "would-accept-inbox";
 export const TID_WOULD_ACCEPT_EMPTY = "would-accept-inbox-empty";
 export const TID_WOULD_ACCEPT_PROMOTE = "would-accept-inbox-promote";
+export const TID_WOULD_ACCEPT_SCHEME = "would-accept-inbox-scheme";
 
 const TIER_MESSAGE_IDS = {
   record_only: "wouldAccept.tier.recordOnly",
   speculative: "wouldAccept.tier.speculative",
   auto: "wouldAccept.tier.auto",
 } as const;
+
+/** 方案卡字段行：标签 + 内容，避免五段重复 JSX 漂移。 */
+function SchemeLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span className="text-foreground">{label}</span>{" "}
+      <span className="break-words">{value}</span>
+    </div>
+  );
+}
 
 export interface WouldAcceptInboxProps {
   /**
@@ -23,6 +37,11 @@ export interface WouldAcceptInboxProps {
    * [] = 已发布且零卡片的空态。
    */
   cards: readonly PendingWouldAcceptCard[] | undefined;
+  /**
+   * 批转实现覆盖（v4 会话 pane 用命令传输面实现 RPC）；缺席时回落到
+   * `services.mandateService` 服务缝。
+   */
+  promote?: WouldAcceptPromoteRpc;
 }
 
 /**
@@ -31,9 +50,12 @@ export interface WouldAcceptInboxProps {
  * record-only 裁决卡片列表 + 一键批转 auto。数据只来自快照投影；批转动作经
  * `useWouldAcceptPromote` 服务缝，宿主未接入 mandate RPC 时按钮禁用并如实提示。
  */
-export const WouldAcceptInbox = memo(function WouldAcceptInbox({ cards }: WouldAcceptInboxProps) {
+export const WouldAcceptInbox = memo(function WouldAcceptInbox({
+  cards,
+  promote: promoteOverride,
+}: WouldAcceptInboxProps) {
   const { intl } = useZCodeIntl();
-  const promote = useWouldAcceptPromote();
+  const promote = useWouldAcceptPromote(promoteOverride);
 
   // 展示抑制只过滤已批转的卡片；权威列表仍是快照投影，下帧投影到达即恢复口径。
   const visibleCards =
@@ -80,6 +102,46 @@ export const WouldAcceptInbox = memo(function WouldAcceptInbox({ cards }: WouldA
                 {" · "}
                 {new Date(card.createdAt).toLocaleString()}
               </span>
+              {card.scheme ? (
+                // M6 五字段方案卡：出口门保证 scheme 要么完整、要么缺席；这里的展开
+                // 与出口门同一口径——用户必须先看到方案内容才能决定批转 auto。
+                <div
+                  className="mt-1 flex flex-col gap-0.5 text-ui-caption"
+                  data-testid={testId(TID_WOULD_ACCEPT_SCHEME, card.cardId)}
+                >
+                  <SchemeLine
+                    label={intl.formatMessage({ id: "wouldAccept.scheme.currentEvidence" })}
+                    value={card.scheme.currentEvidence}
+                  />
+                  <div>
+                    <span className="text-foreground">
+                      {intl.formatMessage({ id: "wouldAccept.scheme.candidateOptions" })}
+                    </span>
+                    <ul className="list-disc pl-4">
+                      {card.scheme.candidateOptions.map((option) => (
+                        <li key={option.option}>
+                          {intl.formatMessage(
+                            { id: "wouldAccept.scheme.candidateOption" },
+                            { option: option.option, cost: option.cost },
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <SchemeLine
+                    label={intl.formatMessage({ id: "wouldAccept.scheme.recommendation" })}
+                    value={card.scheme.recommendation}
+                  />
+                  <SchemeLine
+                    label={intl.formatMessage({ id: "wouldAccept.scheme.impact" })}
+                    value={card.scheme.impact}
+                  />
+                  <SchemeLine
+                    label={intl.formatMessage({ id: "wouldAccept.scheme.verification" })}
+                    value={card.scheme.verification}
+                  />
+                </div>
+              ) : null}
             </div>
             <Button
               size="sm"

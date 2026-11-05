@@ -1,6 +1,7 @@
 // 会话流命令组：sendText / stop（模式样板）。
 // 每个命令组一个文件：handler 纯函数 (host, envelope) → CommandResult|undefined，
 // 决策逻辑直驱 core，环境能力走 host 钩子（见 ../types.ts 的过渡标注）。
+import { promptTriggerSourceOf } from "@zcode/core";
 import type {
   CommandEnvelope,
   CommandPayloadMap,
@@ -147,6 +148,7 @@ async function sendText(
         requireQueue: true,
         ...(attachments ? { attachments } : {}),
         toolDisallowlist: payload.toolDisallowlist,
+        triggerSource: promptTriggerSourceOf(envelope),
       });
       if (queued.admission.kind !== "queued") {
         throw new V4InputAdmissionRejectedError(
@@ -260,6 +262,8 @@ async function sendText(
       // promotion lease 本身属于 Core busy authority；若不声明 requireIdle，
       // 抢占完成后的 startNow 会先落 deferred queue，待 lease 释放后再被自动 drain。
       ...(forceStartNow ? { requireIdle: true } : {}),
+      // M4：信封带 triggerId = 事件回合；来源随 sendInput 进入 Core，facts 缺席即响亮失败。
+      triggerSource: promptTriggerSourceOf(envelope),
     });
   } catch (error) {
     if (
@@ -433,4 +437,28 @@ export async function preemptActiveTurnAndWait(
   return runtimeStop?.kind === "stopped";
 }
 
-export const sessionFlowHandlers = { sendText, stop };
+/**
+ * would-accept 批转 auto：桌面/Web 收件箱经 v4 命令面调用控制面 promoteWouldAccept。
+ *
+ * 控制面是 create-app 的 flag-on 产物；缺席（features.eventRouter=false 或宿主未注入
+ * options.superAgent）时命令本不该出现在 UI（快照不发布 pendingWouldAccept），这里仍
+ * 响亮拒绝而不是静默 noop，避免把「未启用」伪装成「已批转」。
+ */
+async function promoteWouldAccept(
+  host: V4CommandCoreHost,
+  envelope: CommandEnvelope,
+): Promise<CommandResult | undefined> {
+  const record = requireRecord(host, envelope.sessionId);
+  const plane = record.app.superAgentControlPlane;
+  if (!plane) {
+    throw new V4InputAdmissionRejectedError(
+      "superagent.controlPlaneUnavailable",
+      "would-accept promote requires features.eventRouter=true and a host-injected superAgent control plane",
+    );
+  }
+  const payload = envelope.payload as CommandPayloadMap["promoteWouldAccept"];
+  await plane.promoteWouldAccept(payload.cardId);
+  return undefined;
+}
+
+export const sessionFlowHandlers = { sendText, stop, promoteWouldAccept };

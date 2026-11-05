@@ -97,6 +97,7 @@ import type {
   HookInvocationRow,
   MutableConversationSnapshotAccumulator,
   PendingInteraction,
+  PendingWouldAcceptCard,
   PlanItem,
   QueueItem,
   ReasoningRow,
@@ -800,6 +801,20 @@ export class ProductProjection {
         endedTotal: Math.max(0, childSessionIds.length - running.length),
       },
     };
+  }
+
+  /**
+   * would-accept 收件箱种子（spec §5.5/§8-7）：卡片是控制面 decision_log 的读面，
+   * 不来自会话事件日志，因此没有对应 delta 生产者。这里直改投影初值（不 bump
+   * seq/revision，与 config/usage 种子同纪律）；订阅时由 gateway 现读控制面刷新，
+   * 已建立的订阅者要看到新增卡片需 resubscribe（promote 的成功由 UI 本地抑制收敛）。
+   */
+  seedWouldAccept(cards: readonly PendingWouldAcceptCard[]): void {
+    const next = [...cards];
+    if (JSON.stringify(this.snapshot.pendingWouldAccept ?? null) === JSON.stringify(next)) {
+      return;
+    }
+    this.snapshot = { ...this.snapshot, pendingWouldAccept: next };
   }
 
   /**

@@ -36,23 +36,31 @@ export type WouldAcceptPromoteController =
  * 走既有 `useOptionalServices()` 服务钩子缝；未在 ServiceProvider 内、或宿主尚未挂
  * mandateService 时返回 `{ configured: false }`，组件据此禁用入口并如实提示未接入。
  */
-export function useWouldAcceptPromote(): WouldAcceptPromoteController {
+export function useWouldAcceptPromote(
+  /**
+   * 宿主注入的批转实现（优先于 `services.mandateService`）：
+   * v4 会话 pane 用已持有的命令传输面（sendCommand）实现 `promoteWouldAccept` RPC，
+   * 不要求 ServiceAccessor 再挂一份 mandate 服务；测试也经此注入测试替身。
+   */
+  override?: WouldAcceptPromoteRpc,
+): WouldAcceptPromoteController {
   const services = useOptionalServices() as MandateSeamAccessor | null;
-  const promoteImpl = services?.mandateService?.promoteWouldAccept;
+  const impl = override ?? services?.mandateService;
+  const promoteImpl = impl?.promoteWouldAccept;
   const [status, setStatus] = useState<"idle" | "promoting" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
   const [promotedCardIds, setPromotedCardIds] = useState<ReadonlySet<string>>(() => new Set());
 
   const promoteWouldAccept = useCallback(
     async (cardId: string): Promise<boolean> => {
-      if (typeof promoteImpl !== "function") {
+      if (typeof promoteImpl !== "function" || !impl) {
         // 理论到不了这里：未接入时入口已禁用。到得了就响亮失败，不兜底。
         throw new Error("would-accept promote service is not configured");
       }
       setStatus("promoting");
       setError(null);
       try {
-        await promoteImpl.call(services?.mandateService, cardId);
+        await promoteImpl.call(impl, cardId);
         setStatus("idle");
         setPromotedCardIds((current) => {
           const next = new Set(current);
@@ -68,7 +76,7 @@ export function useWouldAcceptPromote(): WouldAcceptPromoteController {
         return false;
       }
     },
-    [promoteImpl, services?.mandateService],
+    [promoteImpl, impl],
   );
 
   if (typeof promoteImpl !== "function") return { configured: false };

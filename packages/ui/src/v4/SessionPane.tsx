@@ -2360,6 +2360,23 @@ export function SessionPane({
   );
   dispatchCommandRef.current = dispatchCommand;
 
+  // would-accept 收件箱批转：桌面/Web 用已持有的 v4 命令面调 CLI 控制面
+  // promoteWouldAccept（spec §5.5 / §8-14③）；控制面缺席由 CLI handler 拒绝 ACK。
+  const handlePromoteWouldAccept = useCallback(
+    async (cardId: string) => {
+      if (!sessionId) {
+        throw new Error("would-accept promote requires an active session");
+      }
+      const ack = await dispatchCommand("promoteWouldAccept", { cardId }, sessionId);
+      if (ack.status !== "accepted" && ack.status !== "duplicate") {
+        throw new Error(
+          `would-accept promote rejected: ${ack.reasonCode ?? ack.status}`,
+        );
+      }
+    },
+    [dispatchCommand, sessionId],
+  );
+
   const handleFetchFileChanges = useCallback(
     (target: ConversationRowTarget, options: ConversationFileChangesRequestOptions) => {
       const current = snapshotRef.current;
@@ -5846,6 +5863,8 @@ export function SessionPane({
               backgroundWorks={snapshot?.backgroundWorks ?? []}
               runningSubagents={subagents.running}
               workflowRuns={snapshot?.workflowRuns?.runs ?? []}
+              wouldAcceptCards={snapshot?.pendingWouldAccept}
+              onPromoteWouldAccept={handlePromoteWouldAccept}
               endedSubagentCount={subagents.endedTotal}
               rootSessionId={rootSessionId ?? sessionId ?? undefined}
               parentSessionId={sessionId ?? undefined}

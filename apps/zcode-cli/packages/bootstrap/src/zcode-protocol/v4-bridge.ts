@@ -1774,6 +1774,11 @@ export function createConversationV4Gateway(
     // createSession.config（handler 先应用到 runtime 再种）、历史会话 resume
     // （App 恢复结果可以只有模型身份，不能为了投影而绑定半成品执行模型）。
     getSessionMemoryEnabled: (sessionId) => context.sessions.get(sessionId)?.memoryEnabled,
+    // would-accept 收件箱没有事件日志 delta：订阅时现读控制面读面（flag 关/缺席 = null，
+    // 快照不发布 pendingWouldAccept，UI 按 unknown≠0 不渲染）。
+    getSessionWouldAcceptSeed: (sessionId) =>
+      context.sessions.get(sessionId)?.app.superAgentControlPlane?.listPendingWouldAccept() ??
+      null,
     getSessionConfigSeed: (sessionId) => {
       const record = context.sessions.get(sessionId);
       if (!record) return null;

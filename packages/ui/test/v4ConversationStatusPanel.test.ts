@@ -2,7 +2,7 @@
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { act, render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import type { GitRepositorySummary, ZCodeSessionRunningSubagent } from "@zcode/shared";
 import type {
   BackgroundWorkSummary,
@@ -11,6 +11,13 @@ import type {
   ToolCallRow,
   WorkflowRunState,
 } from "@zcode/shared/zcode-protocol-v4";
+import { pendingWouldAcceptCardSchema } from "@zcode/shared/zcode-protocol-v4";
+import { testId } from "@zcode/shared/test-ids";
+import {
+  TID_WOULD_ACCEPT_EMPTY,
+  TID_WOULD_ACCEPT_INBOX,
+  TID_WOULD_ACCEPT_PROMOTE,
+} from "@/would-accept/WouldAcceptInbox.js";
 import { getStatusPanelTodoFocusWindow } from "@/v4/statusPanelTodoWindow.js";
 
 const statusPanelCapture = vi.hoisted(() => ({
@@ -1595,5 +1602,33 @@ describe("ConversationStatusPanel", () => {
 
     statusPanelCapture.radioGroups[0]?.onValueChange?.("auto");
     expect(onVariantChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("would-accept 快照投影有卡时挂到右侧面板，批转按钮走注入 RPC；空投影不渲染", async () => {
+    const { ConversationStatusPanel } = await import("@/v4/ConversationStatusPanel.js");
+    // 真投影数据：用 snapshot pendingWouldAccept 的同一 schema 解析，而非手写 mock。
+    const card = pendingWouldAcceptCardSchema.parse({
+      cardId: "card-1",
+      source: "im",
+      summary: "群里问发布状态",
+      suggestedTier: "record_only",
+      createdAt: 1_796_000_000_000,
+    });
+    const onPromoteWouldAccept = vi.fn(async (_cardId: string) => undefined);
+    const props = {
+      workspacePath: "/repo",
+      gitSummary: null,
+      summaryPanelVariantOverride: "panel" as const,
+      wouldAcceptCards: [card],
+      onPromoteWouldAccept,
+    };
+    const view = render(createElement(ConversationStatusPanel, props));
+    expect(view.getByTestId(TID_WOULD_ACCEPT_INBOX)).toBeTruthy();
+    fireEvent.click(view.getByTestId(testId(TID_WOULD_ACCEPT_PROMOTE, card.cardId)));
+    await vi.waitFor(() => expect(onPromoteWouldAccept).toHaveBeenCalledWith("card-1"));
+
+    view.rerender(createElement(ConversationStatusPanel, { ...props, wouldAcceptCards: [] }));
+    expect(view.queryByTestId(TID_WOULD_ACCEPT_INBOX)).toBeNull();
+    expect(view.queryByTestId(TID_WOULD_ACCEPT_EMPTY)).toBeNull();
   });
 });
