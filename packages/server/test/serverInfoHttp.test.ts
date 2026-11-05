@@ -68,6 +68,7 @@ describe("server info HTTP endpoint", () => {
         },
       ],
       capabilities: {
+        capabilityTicketAdmission: true,
         desktopContinuous: true,
         websocketRpc: true,
         processResourceTelemetry: true,
