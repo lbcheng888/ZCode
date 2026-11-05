@@ -59,6 +59,12 @@
 - desktop 租约门不可达注入层按评审删除（如实延后 daemon scheduler 迁移批）✅
 - 验证：双 scope typecheck、architecture 0、lint 0 errors；累计 26 提交
 
+## 里程碑 B 第二批（2026-11-05）✅
+- headless 裁决模型会话装配（解除 UNIMPLEMENTED）：真 provider 链 + tools 恒空 + 惰性 Registry + typed 不可用
+- daemon scheduler B3：lease 门控（daemon 只 claim child leader 租约内 workspace）+ schedule.audit RPC + pending_dispatch 行
+- 测试：裁决 6 例（真 fake-provider）+ scheduler 8 单测 + 3 真 child 集成；server-cli 266 / bootstrap 242 全绿
+- 验证：双 scope typecheck、architecture 0、lint 0 errors；累计 30 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
