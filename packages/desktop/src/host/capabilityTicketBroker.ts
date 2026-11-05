@@ -33,9 +33,16 @@ import {
  * 语义：
  * - secret 只从 `issue` 返回一次，永不进 status/日志/协议/模型上下文。
  * - 每次兑换原子校验：存在性 → 过期 → 吊销/epoch → 绑定 → secret → nonce/seq 重放 → scope。
- * - 吊销即时：`revoke` / `revokeByAttachment` / `revokeByDevice` 推进 broker 全局单调 epoch；
- *   兑换请求**必须**携带签发时的 epoch，与当前值不等直接 `ticket.revoked`（fail-closed，
- *   不做本地缓存兜底，也没有“省略 epoch 就跳过校验”的旁路）。
+ * - 吊销即时：`revoke` / `revokeByAttachment` / `revokeByDevice` 推进 broker 全局单调 epoch，
+ *   同时把每张被吊销票据自身的 `revocationEpoch` 更新到该值。兑换请求**必须**携带票据自身的
+ *   签发快照，与该票据自己的 epoch 不等直接 `ticket.revoked`（fail-closed，不做本地缓存兜底，
+ *   也没有“省略 epoch 就跳过校验”的旁路）。
+ *
+ *   关键取舍：epoch 校验按**票据自身**判定，不按 broker 全局值。同一 window host 里多个
+ *   attachment 共享一个 broker；若拿全局 epoch 比较，任一 attachment detach/port close 都会
+ *   +1，其他未吊销 attachment 手里的签发快照永远追不上，票据会在 TTL 内被误判 revoked，
+ *   且客户端收不到新 epoch（只有重新 attach/setRole 才重投递）。被吊销票据由 state=revoked
+ *   先行拒绝；这里比对 ticket 自身快照，既保证“必须原样带回 epoch”，又不跨 attachment 误伤。
  * - `sweepExpired` 标记过期并清理超过保留窗口的终态记录；registry 在 attach 时机会式调用，
  *   避免 records Map 无界增长（不引入轮询定时器）。
  * - broker 重启 = 新实例 = 全部旧票据 `ticket.unknown`（C7 由内存权威天然满足）。
@@ -89,7 +96,10 @@ export interface CapabilityTicketBrokerOptions {
 }
 
 export interface CapabilityTicketStatus extends CapabilityTicket {
-  /** broker 当前全局 epoch。票据自带的 `revocationEpoch` 是签发时快照，二者不等即已过期授权。 */
+  /**
+   * broker 当前全局 epoch（审计用）。票据自带的 `revocationEpoch` 是该票据自身的快照：
+   * 未吊销时二者可能不等（别的 attachment 吊销过），这不代表本票据失效。
+   */
   currentRevocationEpoch: number;
 }
 
@@ -101,7 +111,7 @@ export interface CapabilityTicketBroker {
   revokeByDevice(deviceId: string): number;
   sweepExpired(at?: number): number;
   status(ticketId: string): CapabilityTicketStatus | undefined;
-  /** 当前全局吊销 epoch；执行端必须把它随兑换请求带回，旧值一律 deny。 */
+  /** 当前全局吊销 epoch（审计/观测用）。兑换必须携带票据自身的签发快照，不是本全局值。 */
   getRevocationEpoch(): number;
 }
 
@@ -307,9 +317,10 @@ export function createCapabilityTicketBroker(
       return redeemFailure("ticket.expired");
     }
     if (record.ticket.state === "revoked") return redeemFailure("ticket.revoked");
-    // 吊销 epoch 传播：schema 已强制携带；与 broker 当前 epoch 不等即拒绝（fail-closed）。
-    // 任意一次实际吊销都会推进 epoch，因此旧授权不会因为“吊销的是别的票据”而继续可用。
-    if (input.revocationEpoch !== revocationEpoch) {
+    // 吊销 epoch 传播：schema 已强制携带；与**该票据自身**的快照不等即拒绝（fail-closed）。
+    // 不能用 broker 全局 epoch：多个 attachment 共享 broker 时，别的 attachment 吊销会推进
+    // 全局值，让未受影响 attachment 的签发快照永远追不上，票据在 TTL 内被误判 revoked。
+    if (input.revocationEpoch !== record.ticket.revocationEpoch) {
       return redeemFailure("ticket.revoked");
     }
     if (record.ticket.state === "expired") return redeemFailure("ticket.expired");
@@ -355,7 +366,7 @@ export function createCapabilityTicketBroker(
         binding: { ...record.ticket.binding },
         scope: { ...record.ticket.scope },
         expiresAt: record.ticket.expiresAt,
-        revocationEpoch,
+        revocationEpoch: record.ticket.revocationEpoch,
         requiresHostConfirmation,
       },
     };

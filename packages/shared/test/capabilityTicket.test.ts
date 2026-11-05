@@ -243,6 +243,31 @@ describe("capability ticket contract", () => {
     ).toBe(false);
   });
 
+  it("ticketId 有长度/字符集上限：换行或超长载荷在解析阶段失败，不能进宿主日志", () => {
+    const base = {
+      ticketSecret: "s",
+      binding: BINDING,
+      action: { toolName: "Read" },
+      nonce: "n1",
+      revocationEpoch: 0,
+    };
+    expect(
+      capabilityTicketRedeemRequestSchema.safeParse({
+        ...base,
+        ticketId: "forged\ncapability ticket delivered attachmentId=x",
+      }).success,
+    ).toBe(false);
+    expect(
+      capabilityTicketRedeemRequestSchema.safeParse({
+        ...base,
+        ticketId: "t".repeat(129),
+      }).success,
+    ).toBe(false);
+    expect(
+      capabilityTicketRedeemRequestSchema.safeParse({ ...base, ticketId: "ticket-1" }).success,
+    ).toBe(true);
+  });
+
   it("协议帧 additive 携带 capabilityTicketId，未知 secret 键被丢弃", () => {
     const envelope = commandEnvelopeSchema.parse({
       commandId: "c1",

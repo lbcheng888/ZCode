@@ -26,8 +26,18 @@ import {
  * （显式 feature flag + fail-closed），执行端 admission 尚未消费 capabilityTicketId。
  */
 
-/** 公开票据句柄；协议帧/执行层可见，模型上下文按 §5 开放问题 6 暂不承诺可见。 */
-export const capabilityTicketIdSchema = z.string().min(1);
+/**
+ * 公开票据句柄；协议帧/执行层可见，模型上下文按 §5 开放问题 6 暂不承诺可见。
+ *
+ * 同时是日志/协议边界约束：ticketId 由宿主生成（base64url），客户端也可能在兑换帧里
+ * 自带任意 ticketId。限制字符集与长度，避免换行/超长载荷被原样拼进宿主日志（日志注入/防洪）。
+ * 非法 ID 在解析阶段就失败，拒绝路径不会把它写进日志。
+ */
+export const capabilityTicketIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/);
 export type CapabilityTicketId = z.infer<typeof capabilityTicketIdSchema>;
 
 /**
@@ -127,7 +137,8 @@ export type CapabilityTicketAction = z.infer<typeof capabilityTicketActionSchema
 /**
  * 兑换请求只在 broker 受控通道上传输（含 secret），**不得**作为协议帧或模型上下文内容。
  * `nonce` 单票去重；`seq` 为 sequential 票据的单调序号；`revocationEpoch` **必填**，调用端
- * 必须携带签发时拿到的 epoch，broker 与当前 epoch 不等即拒绝（吊销传播 fail-closed）。
+ * 必须携带**本票据**签发时的 epoch，与该票据自身的 epoch 不等即拒绝（吊销传播 fail-closed）。
+ * 注意不是 broker 全局 epoch：多个 attachment 共享 broker 时，吊销别的票据不应误伤未受影响的授权。
  * 允许省略就等于给出“跳过吊销校验”的旁路，因此这里不接受缺省。
  */
 export const capabilityTicketRedeemRequestSchema = z
@@ -166,7 +177,7 @@ export interface CapabilityTicketInjectionHandle {
   binding: CapabilityTicketBinding;
   scope: CapabilityTicketScope;
   expiresAt: number;
-  /** 兑换时 broker 的当前吊销 epoch；签发时快照与当前值必须相等才会成功。 */
+  /** 该票据自身的吊销 epoch（签发时快照；票据被吊销后推进）。不是 broker 全局值。 */
   revocationEpoch: number;
   requiresHostConfirmation: boolean;
 }

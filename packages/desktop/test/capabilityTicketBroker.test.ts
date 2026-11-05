@@ -421,7 +421,7 @@ describe("capability ticket broker", () => {
     ).toThrow(/ttl/);
   });
 
-  it("吊销即时生效；epoch 前进后旧 epoch 兑换 deny", () => {
+  it("吊销即时生效且只作用于目标票据：其他 attachment 用签发快照仍可兑换", () => {
     const clock = createClock();
     let sequence = 0;
     const broker = createCapabilityTicketBroker({
@@ -435,13 +435,22 @@ describe("capability ticket broker", () => {
       role: "read_mostly",
       mode: "sequential",
     });
+    const otherBinding = { ...BINDING, attachmentId: "attachment-2" };
+    const other = broker.issue({
+      binding: otherBinding,
+      scope: { toolClasses: ["read"] },
+      role: "read_mostly",
+      mode: "sequential",
+    });
     expect(broker.getRevocationEpoch()).toBe(0);
-    const staleEpoch = broker.getRevocationEpoch();
+    expect(other.ticket.revocationEpoch).toBe(0);
 
     expect(broker.revoke("ticket-1")).toBe(true);
+    // 全局 epoch 前进（审计观测值），但只更新被吊销的那张票据自身快照。
     expect(broker.getRevocationEpoch()).toBe(1);
     expect(broker.status("ticket-1")?.state).toBe("revoked");
     expect(broker.status("ticket-1")?.revocationEpoch).toBe(1);
+    expect(broker.status("ticket-2")?.revocationEpoch).toBe(0);
     expect(broker.revoke("ticket-1")).toBe(false);
 
     expect(
@@ -452,39 +461,36 @@ describe("capability ticket broker", () => {
         action: { toolName: "Read" },
         nonce: "n1",
         seq: 1,
-        revocationEpoch: broker.getRevocationEpoch(),
+        revocationEpoch: 0,
       }),
     ).toMatchObject({ ok: false, code: "ticket.revoked" });
 
-    // 未定向吊销但携带旧 epoch：fail-closed 拒绝。
-    const other = broker.issue({
-      binding: { ...BINDING, attachmentId: "attachment-2" },
-      scope: { toolClasses: ["read"] },
-      role: "read_mostly",
-      mode: "sequential",
-    });
+    // 未受影响的 attachment：签发快照（0）就是它的授权凭证，兑换成功。
+    // 不能用 broker 全局 epoch 比较，否则一次无关吊销会让它在 TTL 内永久失效。
     expect(
       broker.redeem({
         ticketId: other.ticket.ticketId,
         ticketSecret: other.ticketSecret,
-        binding: { ...BINDING, attachmentId: "attachment-2" },
+        binding: otherBinding,
         action: { toolName: "Read" },
         nonce: "n2",
         seq: 1,
-        revocationEpoch: staleEpoch,
+        revocationEpoch: 0,
       }),
-    ).toMatchObject({ ok: false, code: "ticket.revoked" });
+    ).toMatchObject({ ok: true });
+
+    // 伪造/追新的全局 epoch 不能替票据续命：必须与票据自身快照一致，否则 deny。
     expect(
       broker.redeem({
         ticketId: other.ticket.ticketId,
         ticketSecret: other.ticketSecret,
-        binding: { ...BINDING, attachmentId: "attachment-2" },
+        binding: otherBinding,
         action: { toolName: "Read" },
         nonce: "n3",
-        seq: 1,
+        seq: 2,
         revocationEpoch: broker.getRevocationEpoch(),
       }),
-    ).toMatchObject({ ok: true });
+    ).toMatchObject({ ok: false, code: "ticket.revoked" });
   });
 
   it("revokeByAttachment / revokeByDevice 批量吊销且不误伤其他绑定", () => {

@@ -59,7 +59,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-1",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -72,7 +72,7 @@ describe("attachment capability tickets", () => {
     expect(tickets.deliveries[0].delivery.binding).toEqual({
       workspaceIdentity: "remote:ssh:dev:/work/demo",
       attachmentId: "remote-1",
-      surfaceKind: "web",
+      surfaceKind: "desktop",
       subject: { kind: "session", id: "remote-1" },
     });
 
@@ -92,7 +92,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-1",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -114,7 +114,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-1",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: port.port,
     });
@@ -175,7 +175,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-old",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -184,7 +184,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-new",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -209,7 +209,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-1",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -220,7 +220,7 @@ describe("attachment capability tickets", () => {
     const interactiveTicket = tickets.deliveries[1].delivery;
     expect(interactiveTicket.ticketId).not.toBe(readTicket.ticketId);
     expect(interactiveTicket.scope).toEqual({ toolClasses: ["read"] });
-    // 旧票据先吊销再签发新票据，新票据的 epoch 快照必须等于 broker 当前值，否则兑换必失败。
+    // epoch 按票据自身判定：新票据快照就是它自己的兑换凭证。
     expect(interactiveTicket.revocationEpoch).toBe(tickets.broker.getRevocationEpoch());
     expect(tickets.broker.status(readTicket.ticketId)?.state).toBe("revoked");
     expect(
@@ -258,7 +258,7 @@ describe("attachment capability tickets", () => {
       registry.attach({
         requestId: "remote-1",
         attachmentId: "remote-1",
-        clientMode: "web-remote-replayable",
+        clientMode: "desktop-continuous",
         scope: REMOTE_SCOPE,
         port: createPort().port,
       }),
@@ -289,7 +289,7 @@ describe("attachment capability tickets", () => {
     registry.attach({
       requestId: "remote-1",
       attachmentId: "remote-1",
-      clientMode: "web-remote-replayable",
+      clientMode: "desktop-continuous",
       scope: REMOTE_SCOPE,
       port: createPort().port,
     });
@@ -300,7 +300,7 @@ describe("attachment capability tickets", () => {
       "controlled channel closed",
     );
 
-    expect(registry.getRole("remote-1")).toBe("read_mostly");
+    expect(registry.getRole("remote-1")).toBe("host");
     expect(registry.list()[0].capabilityTicketId).toBe(oldTicket.ticketId);
     // 角色切换顺序是先吊销旧票据再签发新票据（新票据快照才能等于当前 epoch）。签发/投递
     // 失败时新票据被回滚、角色保持原值，旧票据已吊销 → 该附件没有可用授权（fail-closed）。
@@ -342,5 +342,99 @@ describe("attachment capability tickets", () => {
     expect(tickets.deliveries).toHaveLength(0);
     expect(expose.mock.calls[0][0]).not.toHaveProperty("capabilityTicketId");
     expect(registry.list()[0]).not.toHaveProperty("capabilityTicketId");
+  });
+
+  it("web/mobile relay 形态不签发、不投递 secret，并记录 typed transport-unimplemented", () => {
+    const tickets = createTicketHarness();
+    const skipped: Array<{ attachmentId: string; clientMode: string; reason: string }> = [];
+    const expose = vi.fn(() => ({ dispose: vi.fn() }));
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose,
+      capabilityTickets: {
+        broker: tickets.broker,
+        deliverSecret: tickets.deliverSecret,
+        onSecretDeliveryUnsupported: (event) => skipped.push(event),
+      },
+    });
+    registry.attach({
+      requestId: "web-1",
+      attachmentId: "web-1",
+      clientMode: "web-remote-replayable",
+      scope: REMOTE_SCOPE,
+      port: createPort().port,
+    });
+
+    // relay 只转发 Uint8Array，控制帧到不了 web/mobile 客户端：不签发、不投递、不宣称成功。
+    expect(tickets.deliveries).toHaveLength(0);
+    expect(expose.mock.calls[0][0]).not.toHaveProperty("capabilityTicketId");
+    expect(expose.mock.calls[0][0]).not.toHaveProperty("capabilityTicketBinding");
+    expect(registry.list()[0]).not.toHaveProperty("capabilityTicketId");
+    expect(skipped).toEqual([
+      {
+        attachmentId: "web-1",
+        clientMode: "web-remote-replayable",
+        reason: "transport-unimplemented",
+      },
+    ]);
+  });
+
+  it("同一 broker 的多个 attachment 吊销互不误伤：B 用签发时 epoch 仍可兑换", () => {
+    const tickets = createTicketHarness();
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+      capabilityTickets: {
+        broker: tickets.broker,
+        deliverSecret: tickets.deliverSecret,
+      },
+    });
+    registry.attach({
+      requestId: "attach-a",
+      attachmentId: "attachment-a",
+      clientMode: "desktop-continuous",
+      scope: REMOTE_SCOPE,
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "attach-b",
+      attachmentId: "attachment-b",
+      clientMode: "desktop-continuous",
+      scope: REMOTE_SCOPE,
+      port: createPort().port,
+    });
+    const a = tickets.deliveries[0].delivery;
+    const b = tickets.deliveries[1].delivery;
+    expect(b.revocationEpoch).toBe(0);
+
+    registry.detach("attachment-a");
+    expect(tickets.broker.status(a.ticketId)?.state).toBe("revoked");
+    expect(tickets.broker.getRevocationEpoch()).toBeGreaterThan(b.revocationEpoch);
+
+    // B 未被吊销：用签发快照兑换仍然成功（不会被 A 吊销推进的全局 epoch 误伤）。
+    expect(
+      tickets.broker.redeem({
+        ticketId: b.ticketId,
+        ticketSecret: b.ticketSecret,
+        binding: b.binding,
+        action: { toolName: "Read" },
+        nonce: "b-1",
+        seq: 1,
+        revocationEpoch: b.revocationEpoch,
+      }),
+    ).toMatchObject({ ok: true });
+
+    // 伪造/追新的全局 epoch 不能替票据“续命”：按票据自身快照判定，仍 deny。
+    expect(
+      tickets.broker.redeem({
+        ticketId: b.ticketId,
+        ticketSecret: b.ticketSecret,
+        binding: b.binding,
+        action: { toolName: "Read" },
+        nonce: "b-2",
+        seq: 1,
+        revocationEpoch: tickets.broker.getRevocationEpoch(),
+      }),
+    ).toMatchObject({ ok: false, code: "ticket.revoked" });
   });
 });
