@@ -26,9 +26,46 @@ export interface WindowHostCapabilityTicketDelivery {
   scope: CapabilityTicketScope;
 }
 
-export interface WindowHostCapabilityTickets {
+export interface WindowHostCapabilityTickets<TPort> {
   broker: CapabilityTicketBroker;
-  deliverSecret: (attachmentId: string, delivery: WindowHostCapabilityTicketDelivery) => void;
+  /**
+   * 受控 secret 投递。第三个参数是同一次 attach 的 port：实现只能把 delivery 帧 post
+   * 到该 attachment 自己的受控通道，不得写日志/参数/模型上下文。
+   */
+  deliverSecret: (
+    attachmentId: string,
+    delivery: WindowHostCapabilityTicketDelivery,
+    port: TPort,
+  ) => void;
+  /**
+   * 传输形态不支持控制帧时的 typed skip（不是“投递成功”）。宿主必须据此记录
+   * delivery-unsupported，不得打印 delivered。缺省忽略（但行为仍是“不签发”）。
+   */
+  onSecretDeliveryUnsupported?: (event: {
+    attachmentId: string;
+    clientMode: ZCodeAgentV4ClientMode;
+    reason: "transport-unimplemented";
+  }) => void;
+}
+
+/**
+ * 能通过 attachment MessagePort 端到端投递票据 secret 的传输形态**登记表**。
+ *
+ * - `desktop-continuous`：remote attachment 由 main 把 MessagePort 直接转交给 renderer，
+ *   delivery/redeem 控制帧可达，覆盖。
+ * - `web-remote-replayable`（web/mobile 远控）：main 侧 relay 的 MessagePortProtocol 只双向
+ *   转发 `Uint8Array` RPC 帧（webRemoteControlManager.ts），独立控制帧被丢弃，secret 到不了
+ *   客户端。登记为 secret delivery **未实现**：不签发、不投递、不宣称成功（fail-closed）。
+ *
+ * 新增传输形态必须先在这里显式登记并通过真实通道验证；未登记 = 不支持，不静默降级。
+ */
+const CAPABILITY_TICKET_SECRET_DELIVERY_CLIENT_MODES: ReadonlySet<ZCodeAgentV4ClientMode> =
+  new Set<ZCodeAgentV4ClientMode>(["desktop-continuous"]);
+
+export function isCapabilityTicketSecretDeliverySupported(
+  clientMode: ZCodeAgentV4ClientMode,
+): boolean {
+  return CAPABILITY_TICKET_SECRET_DELIVERY_CLIENT_MODES.has(clientMode);
 }
 
 export interface WindowHostAttachmentPort {
@@ -59,6 +96,11 @@ export interface WindowHostExposeAttachmentParams<TServices, TPort, TCapabilitie
   deviceScopeKey?: string;
   /** P6 能力票据的公开句柄；secret 走 deliverSecret 受控通道，绝不进入本参数。 */
   capabilityTicketId?: string;
+  /**
+   * 宿主签发的权威绑定（不含 secret）。兑换监听用它校验请求绑定；角色变更重新签发时
+   * binding 不变（scope 才变）。
+   */
+  capabilityTicketBinding?: CapabilityTicketBinding;
   services: TServices;
   generation: number;
   capabilities?: TCapabilities;
@@ -90,10 +132,11 @@ export function createWindowHostAttachmentRegistry<
   ) => WindowHostAttachmentHandle;
   /**
    * P6 能力票据接线（可选）。未配置时 attach 行为与现状 bit-exact（无 ticket 字段）。
-   * 配置后：remote attachment 建立即签发 sequential 票据（绑定 session subject），
-   * detach/close/替换/角色变更即时吊销；签发或 secret 投递任一步失败都回滚并原样抛错。
+   * 配置后：**secret 通道可达**的 remote attachment 建立即签发 sequential 票据（绑定 session
+   * subject），detach/close/替换/角色变更即时吊销；签发或 secret 投递任一步失败都回滚并原样
+   * 抛错。web/mobile relay 形态不签发，只上报 typed `transport-unimplemented`。
    */
-  capabilityTickets?: WindowHostCapabilityTickets;
+  capabilityTickets?: WindowHostCapabilityTickets<TPort>;
 }) {
   const attachments = new Map<string, TrackedAttachment<TServices, TPort, TCapabilities>>();
 
@@ -112,6 +155,7 @@ export function createWindowHostAttachmentRegistry<
    * 只有 remote attachment 有执行侧的 run/session 主体：绑定 subject 用所属
    * remoteSessionId（spec §2.3 要求 subject 必填）。local / source-settings 没有远端执行面
    * 主体，不签发票据（宿主本机沿用既有权限管线）。不得用合成 id 伪造 subject。
+   * 并且只有 secret 通道可达的传输形态才签发（见 CAPABILITY_TICKET_SECRET_DELIVERY_CLIENT_MODES）。
    *
    * 签名失败（issue 或 deliverSecret 抛错）必须回滚已签发票据，否则会留下 registry 查不到、
    * 却仍能在 TTL 内兑换的孤儿授权；失败原样上抛，不降级成“无票据继续 attach”。
@@ -121,10 +165,21 @@ export function createWindowHostAttachmentRegistry<
     clientMode: ZCodeAgentV4ClientMode;
     scope: WindowHostAttachmentScope;
     role: AttachmentRole;
-  }): string | undefined {
+    port: TPort;
+  }): { ticketId: string; binding: CapabilityTicketBinding } | undefined {
     const tickets = options.capabilityTickets;
     if (!tickets) return undefined;
     if (params.scope.kind !== "remote") return undefined;
+    // 传输形态未实现 secret 投递时不能签发：否则会留下“看起来已投递、实际客户端收不到”
+    // 的活票据，并让宿主日志误报 delivered。这里按登记表显式跳过并上报 typed 事实。
+    if (!isCapabilityTicketSecretDeliverySupported(params.clientMode)) {
+      tickets.onSecretDeliveryUnsupported?.({
+        attachmentId: params.attachmentId,
+        clientMode: params.clientMode,
+        reason: "transport-unimplemented",
+      });
+      return undefined;
+    }
     const binding: CapabilityTicketBinding = {
       workspaceIdentity: params.scope.workspaceIdentity,
       attachmentId: params.attachmentId,
@@ -140,14 +195,18 @@ export function createWindowHostAttachmentRegistry<
         role: params.role,
         mode: "sequential",
       });
-      tickets.deliverSecret(params.attachmentId, {
-        ticketId: issued.ticket.ticketId,
-        ticketSecret: issued.ticketSecret,
-        expiresAt: issued.ticket.expiresAt,
-        revocationEpoch: issued.ticket.revocationEpoch,
-        binding,
-        scope,
-      });
+      tickets.deliverSecret(
+        params.attachmentId,
+        {
+          ticketId: issued.ticket.ticketId,
+          ticketSecret: issued.ticketSecret,
+          expiresAt: issued.ticket.expiresAt,
+          revocationEpoch: issued.ticket.revocationEpoch,
+          binding,
+          scope,
+        },
+        params.port,
+      );
     } catch (error) {
       if (issued !== undefined) {
         tickets.broker.revoke(issued.ticket.ticketId);
@@ -157,7 +216,7 @@ export function createWindowHostAttachmentRegistry<
     if (issued === undefined) {
       throw new Error("Capability ticket issue returned no ticket");
     }
-    return issued.ticket.ticketId;
+    return { ticketId: issued.ticket.ticketId, binding };
   }
 
   function attach(params: {
@@ -195,11 +254,12 @@ export function createWindowHostAttachmentRegistry<
       // 替换同 attachmentId：先吊销旧票据，再签发新票据，避免旧 secret 在替换窗口继续兑换。
       options.capabilityTickets?.broker.revokeByAttachment(params.attachmentId);
     }
-    const capabilityTicketId = issueCapabilityTicketForAttachment({
+    const capabilityTicket = issueCapabilityTicketForAttachment({
       attachmentId: params.attachmentId,
       clientMode: params.clientMode,
       scope: params.scope,
       role,
+      port: params.port,
     });
     const exposedParams: WindowHostExposeAttachmentParams<TServices, TPort, TCapabilities> = {
       requestId: params.requestId,
@@ -208,7 +268,12 @@ export function createWindowHostAttachmentRegistry<
       scope: params.scope,
       role,
       ...(deviceScopeKey !== undefined ? { deviceScopeKey } : {}),
-      ...(capabilityTicketId !== undefined ? { capabilityTicketId } : {}),
+      ...(capabilityTicket !== undefined
+        ? {
+            capabilityTicketId: capabilityTicket.ticketId,
+            capabilityTicketBinding: capabilityTicket.binding,
+          }
+        : {}),
       services: resolved.services,
       generation: resolved.generation,
       ...(resolved.capabilities !== undefined ? { capabilities: resolved.capabilities } : {}),
@@ -219,8 +284,8 @@ export function createWindowHostAttachmentRegistry<
       handle = options.expose(exposedParams);
     } catch (error) {
       // expose 失败时不能留下无宿主的票据。
-      if (capabilityTicketId !== undefined) {
-        options.capabilityTickets?.broker.revoke(capabilityTicketId);
+      if (capabilityTicket !== undefined) {
+        options.capabilityTickets?.broker.revoke(capabilityTicket.ticketId);
       }
       throw error;
     }
@@ -327,9 +392,8 @@ export function createWindowHostAttachmentRegistry<
       throw new Error("host role can only be derived from a desktop-continuous attachment");
     }
     if (parsed.data !== tracked.params.role) {
-      // 角色变更 = scope 变更。顺序关键：先吊销旧票据（推进 epoch），再签发新票据，让新票据
-      // 的 epoch 快照等于 broker 当前值；反过来先签发再吊销会让新票据立刻带着旧 epoch、
-      // 永远兑换失败。
+      // 角色变更 = scope 变更。先吊销旧票据再签发新票据，保证旧 scope 的授权在切换窗口
+      // 立即失效（epoch 按票据自身判定，新票据快照与本票据的吊销无关）。
       //
       // 失败语义：吊销旧的之后若签发/投递失败，helper 会回滚新票据并原样抛错；角色保持原值，
       // 但旧票据已被吊销 → 该 attachment 在重新 attach 前没有可用票据（fail-closed，绝不
@@ -338,17 +402,20 @@ export function createWindowHostAttachmentRegistry<
       if (previousTicketId !== undefined) {
         options.capabilityTickets?.broker.revoke(previousTicketId);
       }
-      const nextTicketId = issueCapabilityTicketForAttachment({
+      const nextTicket = issueCapabilityTicketForAttachment({
         attachmentId: tracked.params.attachmentId,
         clientMode: tracked.params.clientMode,
         scope: tracked.params.scope,
         role: parsed.data,
+        port: tracked.params.port,
       });
       tracked.params.role = parsed.data;
-      if (nextTicketId !== undefined) {
-        tracked.params.capabilityTicketId = nextTicketId;
+      if (nextTicket !== undefined) {
+        tracked.params.capabilityTicketId = nextTicket.ticketId;
+        tracked.params.capabilityTicketBinding = nextTicket.binding;
       } else {
         delete tracked.params.capabilityTicketId;
+        delete tracked.params.capabilityTicketBinding;
       }
       return true;
     }

@@ -166,7 +166,15 @@ import {
 } from "./cronRunLifecycle.js";
 import { connectServerRemote, type ServerRemoteConnection } from "./serverRemoteConnection.js";
 import { bindBotGroupTaskScope } from "./botGroupTaskScope.js";
-import { createWindowHostAttachmentRegistry } from "./windowHostAttachmentRegistry.js";
+import {
+  createWindowHostAttachmentRegistry,
+  type WindowHostCapabilityTickets,
+} from "./windowHostAttachmentRegistry.js";
+import { createCapabilityTicketBroker } from "./capabilityTicketBroker.js";
+import {
+  createCapabilityTicketRedeemChannel,
+  postCapabilityTicketDelivery,
+} from "./capabilityTicketChannel.js";
 import { exposeWindowHostAttachmentServices } from "./windowHostAttachmentRpcPolicy.js";
 import { scopeConversationShareServiceForAttachment } from "./conversationShareAttachmentService.js";
 import {
@@ -2717,15 +2725,52 @@ function exposeServicesOnMessagePort(
 }
 
 /**
- * P6 能力票据在生产组合根**默认关闭**。真实落地还缺两块（spec §2.5）：
- * 1. 连接级受控 secret 投递通道（secret 只能到执行端内存，不能进 RPC/协议帧/日志）；
- * 2. CLI/执行端 admission 对 capabilityTicketId 的消费、兑换与宿主确认路由。
- * 在这两块接线前显式开启必须 fail-closed 拒绝启动，不能静默跑成“看起来已启用但没生效”。
+ * P6 能力票据（spec §2）。默认关闭；`ZCODE_P6_CAPABILITY_TICKETS=1` 时在生产组合根生效：
+ * remote attachment attach 即签发、经 attachment MessagePort 的专用控制帧投递 secret、
+ * 同一 port 上接收兑换请求并原子校验；detach/port close/角色变更/宿主关闭即时吊销。
+ *
+ * 安全边界（CONTRACT 见 host/capabilityTicketChannel.ts）：secret 只在 broker 内存与
+ * attachment 专属 port 的一次性 delivery 帧；不进 RPC 参数、command/input 协议帧、日志、
+ * SQLite 或模型上下文。未启用时 registry 不签发、不挂监听、不出现任何 ticket 字段，
+ * 既有路径 bit-exact。
+ *
+ * 仍缺（不在本 lane，如实登记）：CLI 执行端对 `capabilityTicketId` 的 admission 消费与
+ * 凭据注入（spec §2.5 C2）未接线；ticketId 目前只是协议 additive 句柄，不构成执行授权。
+ * 平台覆盖：只有 desktop-continuous 的直连 renderer port 能投递控制帧；web/mobile 的
+ * web-remote-replayable relay 只转发 Uint8Array，登记为 secret delivery 未实现，不签发并记
+ * typed skip（见 windowHostAttachmentRegistry 的传输形态登记表）。
  */
 const p6CapabilityTicketsEnabled = process.env["ZCODE_P6_CAPABILITY_TICKETS"] === "1";
+const capabilityTicketBroker = p6CapabilityTicketsEnabled
+  ? createCapabilityTicketBroker()
+  : undefined;
+// secret 只经 attachment 专属 MessagePort 投递（见 capabilityTicketChannel.ts CONTRACT）。
+// 日志只允许公开 ticketId；secret 绝不进入任何日志参数。
+const hostCapabilityTickets: WindowHostCapabilityTickets<Electron.MessagePortMain> | undefined =
+  capabilityTicketBroker
+    ? {
+        broker: capabilityTicketBroker,
+        deliverSecret(attachmentId, delivery, port) {
+          postCapabilityTicketDelivery(port, delivery);
+          logger.info(
+            `capability ticket delivered attachmentId=${attachmentId} ticketId=${delivery.ticketId} expiresAt=${delivery.expiresAt}`,
+          );
+        },
+        // web/mobile relay 形态：控制帧到不了客户端。这里显式记 typed skip，绝不打印
+        // delivered（平台矩阵如实，不把“看起来投递”当成功）。
+        onSecretDeliveryUnsupported({ attachmentId, clientMode, reason }) {
+          logger.warn(
+            `capability ticket secret delivery skipped attachmentId=${attachmentId} clientMode=${clientMode} reason=${reason}`,
+          );
+        },
+      }
+    : undefined;
+
 if (p6CapabilityTicketsEnabled) {
-  throw new Error(
-    "P6 capability tickets enabled but the controlled secret delivery channel and admission consumer are not wired; refusing to start (fail-closed)",
+  // 运行时事实而非注释承诺：本批只签发/兑换票据，CLI 执行端尚未消费 capabilityTicketId，
+  // 开启该 flag 不会让设备级执行授权生效。运维必须以此日志为准，不得按“执行已被 gate”宣传。
+  logger.warn(
+    "capability tickets enabled (issue-only): CLI execution admission does not consume capabilityTicketId; execution is not gated by tickets",
   );
 }
 
@@ -2771,25 +2816,59 @@ const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
       capabilities: windowRemoteConnectionRegistry.resolveScopedCapabilities(scope),
     };
   },
+  ...(hostCapabilityTickets ? { capabilityTickets: hostCapabilityTickets } : {}),
   expose: (params) => {
     const { port, services, clientMode, scope, capabilities, attachmentId, deviceScopeKey } = params;
-    return exposeServicesOnMessagePort(
-      port,
-      services,
-      false,
-      clientMode,
-      scope,
-      capabilities,
-      attachmentId
-        ? {
-            attachmentId,
-            ...(deviceScopeKey !== undefined ? { deviceScopeKey } : {}),
-            // 每次现取 registry 角色（含 disposed 检查）：角色变更/吊销在下一命令生效，
-            // 不用 attach 时快照（spec §1.4）。
-            resolveRole: () => resolveAttachmentRegistryRole?.(params.attachmentId),
-          }
-        : undefined,
-    );
+    const tickets = hostCapabilityTickets;
+    // 兑换监听必须在 MessagePortProtocol 构造 / port.start() 之前注册，避免 start 后
+    // 同步到达的兑换帧落在监听注册前的窗口里。
+    const redeemChannel =
+      tickets && params.capabilityTicketBinding !== undefined
+        ? createCapabilityTicketRedeemChannel({
+            port,
+            broker: tickets.broker,
+            attachmentId: params.attachmentId,
+            authoritativeBinding: params.capabilityTicketBinding,
+            logDenied: ({ attachmentId: deniedAttachmentId, ticketId, code }) =>
+              logger.warn(
+                `capability ticket redeem denied attachmentId=${deniedAttachmentId}` +
+                  `${ticketId !== undefined ? ` ticketId=${ticketId}` : ""} code=${code}`,
+              ),
+          })
+        : undefined;
+    try {
+      const handle = exposeServicesOnMessagePort(
+        port,
+        services,
+        false,
+        clientMode,
+        scope,
+        capabilities,
+        attachmentId
+          ? {
+              attachmentId,
+              ...(deviceScopeKey !== undefined ? { deviceScopeKey } : {}),
+              // 每次现取 registry 角色（含 disposed 检查）：角色变更/吊销在下一命令生效，
+              // 不用 attach 时快照（spec §1.4）。
+              resolveRole: () => resolveAttachmentRegistryRole?.(params.attachmentId),
+            }
+          : undefined,
+      );
+      if (!redeemChannel) return handle;
+      // 兑换监听绑定这条 attachment 的 port 与宿主权威 binding：secret 泄漏到别的
+      // attachment 也只能撞 binding_mismatch。dispose 与 handle 同生命周期（port close →
+      // registry disposeTracked → handle.dispose）。
+      return {
+        server: handle.server,
+        dispose() {
+          redeemChannel.dispose();
+          handle.dispose();
+        },
+      };
+    } catch (error) {
+      redeemChannel?.dispose();
+      throw error;
+    }
   },
 });
 

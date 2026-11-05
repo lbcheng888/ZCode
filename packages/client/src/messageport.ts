@@ -1,5 +1,9 @@
 import { MessagePortProtocol, ChannelClient } from "@zcode/rpc";
 import type { IServiceAccessor } from "@zcode/services";
+import {
+  createCapabilityTicketChannelConnection,
+  type CapabilityTicketChannelConnection,
+} from "./capabilityTicketChannel.js";
 import { RemoteServiceAccess } from "./remoteServiceAccess.js";
 import { isRendererProductionBuild } from "./rendererLoggingEnv.js";
 
@@ -13,6 +17,12 @@ function logMessagePortDebug(message: string): void {
 
 export interface MessagePortServiceConnection {
   services: IServiceAccessor;
+  /**
+   * P6 能力票据通道。被动监听：只在 attachment port 上识别宿主投递的受控帧，
+   * 不影响 RPC 字节流。未收到 delivery 时 `ticket` 为 undefined（host 未启用票据 /
+   * 该 attachment 是 local 来源）。
+   */
+  capabilityTickets: CapabilityTicketChannelConnection;
   dispose: (reason?: Error) => void;
 }
 
@@ -27,6 +37,10 @@ export function createMessagePortServiceConnection(
   options: { sourceServerManagementService?: boolean } = {},
 ): MessagePortServiceConnection {
   logMessagePortDebug("[messageport] creating protocol and client...");
+  // P6：必须在 MessagePortProtocol 构造前注册票据通道监听。宿主在 attach 时就把
+  // delivery 帧 post 到另一端，port 未 start 时消息排队；协议构造会 start()，此时
+  // 两个监听都已就位，不会丢帧。票据通道只消费非 Uint8Array 控制对象。
+  const capabilityTickets = createCapabilityTicketChannelConnection({ port });
   const protocol = new MessagePortProtocol(port);
   const client = new ChannelClient(protocol);
   client.onDidInitialize(() => {
@@ -38,11 +52,13 @@ export function createMessagePortServiceConnection(
   let disposed = false;
   return {
     services,
+    capabilityTickets,
     dispose: (reason?: Error) => {
       if (disposed) {
         return;
       }
       disposed = true;
+      capabilityTickets.dispose();
       client.dispose(reason);
       protocol.disconnect();
     },
