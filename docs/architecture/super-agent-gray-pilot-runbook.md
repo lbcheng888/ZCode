@@ -16,7 +16,7 @@
 2. **回滚顺序固定：先把 `mandateGate` 置 false，再把 `eventRouter` 置 false**。`mandateGate=true` 且 `eventRouter=false` 是启动期响亮失败（`create-app.ts:197-205`），顺序反了会导致宿主起不来。
 3. **不要删除 `~/.zcode/v2/super-agent.sqlite`**。legacy 路径不读它；保留供审计与回滚取证。确需清理时先停宿主、先备份、再经明确批准。
 4. **不夸大 auto 档**。当前实现里 `speculative` 与 `auto` 都走 `specRun.start`（`apps/zcode-cli/packages/bootstrap/src/super-agent/trigger/verdict-interpret.ts:215-232`），设计 M4 的 auto = createTask/resume 面**未实现**；TUI 文案“auto execution tier activates in a later phase”（`apps/zcode-cli/packages/tui/src/app-would-accept.ts:135-139`）与代码行为不一致。三级试点验证的是 spec lane 执行面，不是 auto 自治建任务。
-5. **不要把 env 代理当安全边界**。spec lane 的已知残留（`curl --noproxy '*'`、undici `fetch` 直连）在 P6 OS 围栏落地前仍然成立，见 spec-lane §0/§5/§8-6。试点期间按“零 egress + 零凭据 + 结构隔离”运行，但不得对外宣称硬隔离。
+5. **不要把 env 代理当安全边界**。spec lane 的已知残留（`curl --noproxy '*'`、undici `fetch` 直连）仍然成立，见 spec-lane §0/§5/§8-6。P6 围栏默认关闭，且当前只有 darwin sandbox-exec 可用；Linux/Windows 启用 `features.specEgressFence` 会 fail-closed 拒绝启动。试点期间按“零 egress + 零凭据 + 结构隔离”运行，但不得对外宣称硬隔离。
 
 ## 1. 开关矩阵与灰度边界
 
@@ -235,7 +235,7 @@ bot 配置实际路径取决于宿主的数据根：默认 `~/.zcode/v2/bot-conf
 - 波次 1：1 repo，10 个 run / 7 天。
 - 波次 2：3 repo，20 个 run / 14 天。
 - 波次 3：全部试点 repo，30 天。
-- 非零 egress 在任何波次都不开；要开必须等 P6 OS 围栏（`super-agent-p6-capabilities-spec.md` §3）落地。
+- 非零 egress 在任何波次都不开；要开必须先确认目标平台围栏真实可用（`features.specEgressFence=true`，当前仅 darwin sandbox-exec 通过真跑；Linux/Windows 会 fail-closed）。
 
 判据：零凭据字节（测试 + env 审计）、零出站工具、零对外消息、零自动 push、每个 run 失败都可见、accept 与成功 run 的差额有解释、代理终态关闭、无 repo 损坏、无并发写冲突、无非零 egress 请求。
 
@@ -290,7 +290,7 @@ bot 配置实际路径取决于宿主的数据根：默认 `~/.zcode/v2/bot-conf
 9. `durableSchedulerDispatch=false`：派发桥循环未接，durable-wait 不可用。
 10. 进程重启后排队事件输入的 mandate facts 会丢，退化为 user-origin（已知接缝）。
 11. `app.close` 存在在途裁决批落在关库之后的窄竞态：onError 告警、零写入、候选留 pending（spec §8-12）。
-12. env 代理残留（`--noproxy` / undici fetch）在 P6 围栏前仍可直连；零 egress 白名单不是硬边界，不得对外宣称物理隔离。
+12. env 代理残留（`--noproxy` / undici fetch）仍可直连；P6 围栏默认关闭，Linux/Windows 未实现（启用即拒绝启动），零 egress 白名单不是硬边界，不得对外宣称物理隔离。
 13. 协议宿主的 `autoReplyGuard` 是桩：群内 IM 被咨询即响亮抛错（`server-operations.ts:3453-3460`），botsService 状态未随入站下沉（spec §8-10②）。**群聊试点在该接缝接通前不开放**；若误开，首条群内咨询即事故，按 §7.2“控制面启动/守卫响亮失败”处置，不得用放宽守卫的方式绕过。
 
 ## 9. 每日/每波次记录模板
