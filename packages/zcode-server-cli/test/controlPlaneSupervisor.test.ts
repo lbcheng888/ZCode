@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONTROL_PLANE_PROTOCOL_VERSION } from "../src/contracts.js";
 import { resolveServerLayout } from "../src/runtime/paths.js";
-import { createControlPlaneLauncher } from "../src/supervisor/controlPlaneLauncher.js";
+import {
+  createControlPlaneLauncher,
+  createDefaultControlPlaneLauncher,
+} from "../src/supervisor/controlPlaneLauncher.js";
 import { Supervisor, type ControlPlaneOptions } from "../src/supervisor/supervisor.js";
 
 class FakeCore extends EventEmitter {
@@ -55,7 +58,19 @@ process.on("message", (message) => {
   }
 });
 process.send({ type: "ready", protocolVersion, generation, version: "test" });
-const healthTimer = setInterval(() => process.send({ type: "health", at: Date.now() }), 25);
+const healthTimer = setInterval(() => process.send({
+  type: "health",
+  at: Date.now(),
+  pendingEventCount: 2,
+  leaderWorkspaceCount: 1,
+  pendingDispatchCount: 3,
+  degraded: { reason: "test degraded", since: 1 },
+  workspaceErrors: [{ workspaceIdentity: "ws-1", error: "test error" }],
+  rejectedPeerCount: 4,
+  protocolErrorCount: 1,
+  followerIngestCount: 5,
+  notEnsuredIngestCount: 6,
+}), 25);
 healthTimer.unref();
 `;
 
@@ -215,7 +230,18 @@ describe("Supervisor control-plane child", () => {
       () => supervisor.controlPlaneStatus()?.health !== null,
       "control plane health message",
     );
-    expect(supervisor.controlPlaneStatus()?.health?.at).toBeGreaterThan(0);
+    expect(supervisor.controlPlaneStatus()?.health).toMatchObject({
+      at: expect.any(Number),
+      pendingEventCount: 2,
+      leaderWorkspaceCount: 1,
+      pendingDispatchCount: 3,
+      degraded: { reason: "test degraded", since: 1 },
+      workspaceErrors: [{ workspaceIdentity: "ws-1", error: "test error" }],
+      rejectedPeerCount: 4,
+      protocolErrorCount: 1,
+      followerIngestCount: 5,
+      notEnsuredIngestCount: 6,
+    });
 
     const stopped = await supervisor.stop();
     expect(stopped).toMatchObject({ state: "stopped", pid: null });
@@ -370,6 +396,52 @@ describe("Supervisor control-plane child", () => {
     );
     expect(supervisor.controlPlaneStatus()?.generation).toBe(2);
     expect(supervisor.status().generation).toBe(2);
+    await supervisor.stop();
+  });
+
+  it("fails startup loudly and records the root cause when the headless entry is missing", async () => {
+    const root = await makeRoot();
+    const { supervisor } = await createSupervisor(root, {
+      launcher: createDefaultControlPlaneLauncher({
+        devSearchFrom: join(root, "missing"),
+        platform: "darwin",
+      }),
+    });
+
+    await expect(supervisor.start()).rejects.toThrow(/headless 入口不可解析/);
+    // detached `serve --daemon` stdio=ignore：根因必须落持久化快照，而不是只留 exit code。
+    expect(supervisor.status().lastExitReason).toContain("headless 入口不可解析");
+    expect(supervisor.status().state).toBe("stopped");
+  });
+
+  it("turns a launcher throw during crash restart into a crash signal, not uncaughtException", async () => {
+    const root = await makeRoot();
+    const crashing = controlPlaneLauncherFor(CRASHING_CHILD_SCRIPT);
+    let launches = 0;
+    const { supervisor } = await createSupervisor(root, {
+      launcher: {
+        launch: (params) => {
+          launches += 1;
+          if (launches === 1) return crashing.launch(params);
+          // 入口在崩溃后退化（release 文件消失/开发树被清理）。
+          throw new Error("headless entry disappeared");
+        },
+      },
+      crashBackoffMs: [20, 20],
+    });
+
+    await supervisor.start();
+    await waitForSupervisorReady(supervisor);
+    await waitFor(
+      () => supervisor.controlPlaneStatus()?.state === "crash-loop-stopped",
+      "launch failure crash budget exhaustion",
+      10_000,
+    );
+    const status = supervisor.controlPlaneStatus();
+    expect(status?.state).toBe("crash-loop-stopped");
+    expect(status?.lastExitReason).toContain("headless entry disappeared");
+    expect(launches).toBeGreaterThanOrEqual(2);
+    expect(supervisor.status().state).toBe("ready");
     await supervisor.stop();
   });
 });

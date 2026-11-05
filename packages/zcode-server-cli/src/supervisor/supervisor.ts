@@ -13,6 +13,7 @@ import {
   CORE_KILL_TIMEOUT_MS,
   CORE_READY_TIMEOUT_MS,
   CORE_STOP_GRACE_TIMEOUT_MS,
+  controlPlaneHealthFieldsSchema,
   controlPlaneMessageSchema,
   controlPlaneStatusSchema,
   coreMessageSchema,
@@ -36,6 +37,7 @@ import { recoverSupervisorStartup } from "../runtime/startupRecovery.js";
 import { waitForUpdateReady } from "../runtime/updateReadiness.js";
 import { createRollbackFailure, updateErrorMessage } from "../runtime/updateErrors.js";
 import { CrashBudget } from "./crashBudget.js";
+import { ensureControlPlaneAuthToken, removeControlPlaneAuthToken } from "./controlPlaneAuth.js";
 
 // 生命周期事件按运维排障判据用 info/warn/error（出问题时运维要能在日志里看到）；
 // 高频 heartbeat/task-activity 明细走 debug，避免生产日志膨胀。
@@ -57,6 +59,8 @@ export interface ControlPlaneOptions {
   /** 独立崩溃预算；测试注入短退避，生产缺省沿用 Server CLI 预算。 */
   crashBackoffMs?: readonly number[];
   crashWindowMs?: number;
+  /** §2.3 启动方投影给 child 的 flag（child 只读 mandateGate，缺省 false）。 */
+  mandateGate?: boolean;
   now?: () => number;
 }
 
@@ -159,6 +163,10 @@ export class Supervisor {
       // recovery 可能已经恢复 current pointer；必须在恢复后读取，避免启动已回滚的 candidate。
       this.activeRelease = await this.releaseManager.readCurrentForExecution();
       await mkdir(this.layout.runDir, { recursive: true, mode: 0o700 });
+      if (this.options.controlPlane) {
+        // §3.8 显式凭据握手：Core 与 child 都需要在 spawn 前读到同一份 0600 凭据。
+        await ensureControlPlaneAuthToken(this.layout.serverRoot);
+      }
       const handler: ControlHandler = (request) => this.handleControl(request);
       this.control = await createControlServer(this.layout.controlEndpoint, handler);
       this.state = "starting";
@@ -167,7 +175,15 @@ export class Supervisor {
         version: this.options.version,
       });
       this.launchCore();
-      this.launchControlPlane();
+      try {
+        this.launchControlPlane();
+      } catch (error) {
+        // B-A14：门禁开但入口不可解析时启动必须响亮失败；先落 lastExitReason，
+        // 让 detached `serve --daemon`（stdio=ignore）也能从持久化快照看到根因。
+        this.recordControlPlaneLaunchFailure(error);
+        await this.persistStatusSnapshot();
+        throw error;
+      }
       await this.persistStatusSnapshot();
       return this.status();
     } catch (error) {
@@ -175,6 +191,12 @@ export class Supervisor {
       // 初始状态落盘失败会留下锁（以及可能已启动的 Core），同一 Supervisor 重试会把
       // 自己识别成另一个实例。启动临界区必须在确认 Core/control 都收口后才释放锁。
       const recoveryFailed = this.state === "stop-failed";
+      // control-plane launcher 同步抛错时，stopCore 会用 "startup-failed" 覆盖
+      // lastExitReason；先保存在内存，收口后再恢复成真正根因（B-A14）。
+      const controlPlaneLaunchFailure =
+        this.controlPlaneState === "crashed" || this.controlPlaneState === "crash-loop-stopped"
+          ? (this.controlPlaneLastExitReason ?? this.lastExitReason)
+          : undefined;
       let coreStopped = this.core === undefined;
       if (this.core) {
         try {
@@ -209,6 +231,7 @@ export class Supervisor {
         }
       }
 
+      if (controlPlaneLaunchFailure) this.lastExitReason = controlPlaneLaunchFailure;
       if (coreStopped && controlClosed && controlPlaneStopped) {
         // 恢复失败本身已经写入 stop-failed；即使没有 Core/control 需要收口，也保留该
         // 状态，让 status 继续暴露待人工处理的事务，同时释放锁允许同实例稍后重试。
@@ -265,6 +288,12 @@ export class Supervisor {
     await this.persistStatusSnapshot();
     await this.control?.close();
     this.control = undefined;
+    if (this.options.controlPlane) {
+      // 凭据文件是 daemon 代际资产；收口后删除，下一 daemon 启动重新铸造。
+      await removeControlPlaneAuthToken(this.layout.serverRoot).catch((error: unknown) => {
+        log.warn("failed to remove control plane auth token", error);
+      });
+    }
     await this.lock.release();
     log.info("supervisor stopped", { reason });
     if (reason !== "restart") this.options.onStopped?.();
@@ -463,7 +492,13 @@ export class Supervisor {
       this.activeRelease = pending;
       this.state = "starting";
       this.launchCore();
-      this.launchControlPlane();
+      try {
+        this.launchControlPlane();
+      } catch (error) {
+        this.recordControlPlaneLaunchFailure(error);
+        await this.persistStatusSnapshot();
+        throw error;
+      }
       await waitForUpdateReady(
         () => this.state,
         this.options.coreReadyTimeoutMs ?? CORE_READY_TIMEOUT_MS,
@@ -511,7 +546,13 @@ export class Supervisor {
       if (previous) {
         this.state = "starting";
         this.launchCore();
-        this.launchControlPlane();
+        try {
+          this.launchControlPlane();
+        } catch (error) {
+          this.recordControlPlaneLaunchFailure(error);
+          await this.persistStatusSnapshot();
+          throw error;
+        }
         try {
           await waitForUpdateReady(
             () => this.state,
@@ -699,6 +740,57 @@ export class Supervisor {
     void this.persistStatusSnapshot();
   }
 
+  /**
+   * 记录 launcher 同步抛错（入口不可解析/可执行文件消失）。launcher 抛错时没有 child，
+   * 但状态必须进入 crashed 并写入一等原因，不能把根因丢成 unhandled exception。
+   */
+  private recordControlPlaneLaunchFailure(error: unknown): void {
+    const reason = `control plane launch failed: ${error instanceof Error ? error.message : String(error)}`;
+    this.controlPlaneState = "crashed";
+    this.controlPlaneLastExitReason = reason;
+    this.lastExitReason = reason;
+    log.error("super-agent control plane launch failed", { reason });
+  }
+
+  /**
+   * 崩溃后的重启定时器直接调用 launcher；默认 launcher 在入口不可解析时会同步抛错，
+   * 异常发生在 setTimeout 回调里会变成 Supervisor 的 uncaughtException。这里把同步
+   * 抛错收口成 crashed/crash-loop-stopped，并继续计入崩溃预算。
+   */
+  private scheduleControlPlaneRestart(delayMs: number): void {
+    const restartTimer = setTimeout(() => {
+      this.controlPlaneRestartTimer = undefined;
+      if (this.controlPlaneState !== "crashed") return;
+      this.controlPlaneState = "starting";
+      try {
+        this.launchControlPlane();
+      } catch (error) {
+        this.recordControlPlaneLaunchFailure(error);
+        const decision = this.controlPlaneCrashBudget?.recordCrash() ?? {
+          shouldRestart: false,
+          delayMs: 0,
+          exhausted: true,
+        };
+        if (!decision.shouldRestart) {
+          this.controlPlaneState = "crash-loop-stopped";
+          log.error("super-agent control plane crash budget exhausted after launch failure", {
+            lastExitReason: this.controlPlaneLastExitReason,
+          });
+          void this.persistStatusSnapshot();
+          return;
+        }
+        log.warn("super-agent control plane launch failed, scheduling restart", {
+          lastExitReason: this.controlPlaneLastExitReason,
+          delayMs: decision.delayMs,
+        });
+        void this.persistStatusSnapshot();
+        this.scheduleControlPlaneRestart(decision.delayMs);
+      }
+    }, delayMs);
+    restartTimer.unref();
+    this.controlPlaneRestartTimer = restartTimer;
+  }
+
   private launchControlPlane(): void {
     const options = this.options.controlPlane;
     if (!options) return;
@@ -712,6 +804,7 @@ export class Supervisor {
       dataBaseDir: this.layout.dataBaseDir,
       serverRoot: this.layout.serverRoot,
       release: this.activeRelease,
+      mandateGate: options.mandateGate === true,
     });
     this.controlPlane = child;
     this.controlPlaneState = "starting";
@@ -780,14 +873,7 @@ export class Supervisor {
         lastExitReason: reason,
         delayMs: decision.delayMs,
       });
-      const restartTimer = setTimeout(() => {
-        this.controlPlaneRestartTimer = undefined;
-        if (this.controlPlaneState !== "crashed") return;
-        this.controlPlaneState = "starting";
-        this.launchControlPlane();
-      }, decision.delayMs);
-      restartTimer.unref();
-      this.controlPlaneRestartTimer = restartTimer;
+      this.scheduleControlPlaneRestart(decision.delayMs);
     };
     child.once("error", (error: Error & { code?: string }) => {
       spawnErrorReason = `control plane spawn error code=${error.code ?? "unknown"}: ${error.message}`;
@@ -847,15 +933,11 @@ export class Supervisor {
         ...(message.version ? { version: message.version } : {}),
       });
     } else if (message.type === "health") {
-      this.controlPlaneHealth = {
-        at: message.at,
-        ...(message.pendingEventCount !== undefined
-          ? { pendingEventCount: message.pendingEventCount }
-          : {}),
-      };
-      log.debug("super-agent control plane health", {
-        pendingEventCount: message.pendingEventCount,
-      });
+      // 严格 schema 已在 shared 统一：B 期扩展字段（leader/pending/degraded/
+      // workspaceErrors/peer/protocol 计数）原样进入 control-plane-status，不丢字段。
+      const { type: _healthType, ...healthFields } = message;
+      this.controlPlaneHealth = controlPlaneHealthFieldsSchema.parse(healthFields);
+      log.debug("super-agent control plane health", healthFields);
     } else if (message.type === "fatal") {
       // child 已明确不可恢复（路径不一致 / 门禁开但 eventRouter 关 / socket bind 冲突）：
       // 先记录一等失败原因，再确保进程收口，由统一崩溃预算决定是否重启。

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { isPublicZCodeErrorCode, ZCODE_VERSION } from "@zcode/shared";
+import { resolveControlPlaneAuthTokenPath } from "@zcode/shared/super-agent-control-plane-protocol";
 import { SourceServerWorkspaceAliasRepo } from "@zcode/services/node";
 import {
   CONTROL_PLANE_KILL_TIMEOUT_MS,
@@ -19,6 +20,12 @@ import {
 } from "./contracts.js";
 import { requestControl } from "./ipc/controlClient.js";
 import type { ControlPlaneOptions } from "./supervisor/supervisor.js";
+import { createDefaultControlPlaneLauncher } from "./supervisor/controlPlaneLauncher.js";
+import {
+  createControlPlaneClient,
+  resolveControlPlaneEndpoint,
+  type ControlPlaneClient,
+} from "./supervisor/controlPlaneClient.js";
 import {
   resolveCanonicalServerLayout,
   resolveServerLayout,
@@ -69,6 +76,46 @@ export interface ServerCliRuntimeOptions {
    */
   controlPlane?: ControlPlaneOptions;
 }
+
+/**
+ * 部署门禁打开时的默认 control-plane 选项（B-SPEC §2.2）：launcher 从当前 release /
+ * 开发树解析 headless 入口，入口不可解析时在 Supervisor 启动临界区同步抛错收口，
+ * 不 spawn 假进程。门禁来源（features.eventRouter 单一投影）由启动装配方决定；本包
+ * 不自行读取 RuntimeConfig（§2.3 禁止第二份来源）。
+ */
+export function createDefaultControlPlaneOptions(
+  options: Parameters<typeof createDefaultControlPlaneLauncher>[0] & { mandateGate?: boolean } = {},
+): ControlPlaneOptions {
+  const { mandateGate, ...launcherOptions } = options;
+  return {
+    launcher: createDefaultControlPlaneLauncher(launcherOptions),
+    // §2.3 单一投影源：runServe 的 RuntimeConfig 快照在这里随 launcher 一起下发；
+    // 由 Supervisor 再经 launch params → spawn env 送达 child（不各自再读配置）。
+    ...(mandateGate !== undefined ? { mandateGate } : {}),
+  };
+}
+
+/**
+ * B-SPEC §3.1 薄接线：只暴露 Core 侧 RPC 客户端的构造，不连接、不投递。
+ * 生产配置下自动带 §3.8 凭据文件；host.command 与 worker 回调（§3.3）尚未接线，
+ * Core 业务接入时用本工厂构造后自行 connect() 并注册 onInboundRequest。
+ */
+export function createCoreControlPlaneClient(
+  serverRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): ControlPlaneClient {
+  return createControlPlaneClient({
+    endpoint: resolveControlPlaneEndpoint(serverRoot, platform),
+    authTokenFile: resolveControlPlaneAuthTokenPath(serverRoot),
+  });
+}
+
+export {
+  createControlPlaneClient,
+  resolveControlPlaneEndpoint,
+  ControlPlaneRpcError,
+} from "./supervisor/controlPlaneClient.js";
+export type { ControlPlaneClient } from "./supervisor/controlPlaneClient.js";
 
 const stdout = (io: CliIO, value: unknown): void =>
   io.stdout?.write(`${typeof value === "string" ? value : JSON.stringify(value)}\n`);
@@ -363,10 +410,12 @@ async function runServe(
       layout,
       "ready",
       baselineUpdatedAt,
-      () => {
+      (persisted) => {
         if (childEarlyExit) {
+          // detached Supervisor stdio=ignore：根因只能经持久化快照回传，不能只报 exit code。
+          const reason = persisted?.lastExitReason ? `：${persisted.lastExitReason}` : "";
           throw new Error(
-            `ZCode Server daemon exited before ready (code=${childEarlyExit.code ?? "null"} signal=${childEarlyExit.signal ?? "none"}); check ${layout.statusFile} for details`,
+            `ZCode Server daemon exited before ready (code=${childEarlyExit.code ?? "null"} signal=${childEarlyExit.signal ?? "none"})${reason}; check ${layout.statusFile} for details`,
           );
         }
       },
@@ -644,7 +693,7 @@ async function waitForPersistedStatus(
   layout: ReturnType<typeof resolveServerLayout>,
   expectedState: "ready" | "stopped",
   minUpdatedAt = 0,
-  assertStillWaiting?: () => void,
+  assertStillWaiting?: (status: ServerStatus | null) => void,
   expectedServiceRegistered?: boolean,
 ): Promise<ServerStatus> {
   const deadline = Date.now() + 10_000;
@@ -657,7 +706,7 @@ async function waitForPersistedStatus(
         status.serviceRegistered === expectedServiceRegistered)
     )
       return status;
-    assertStillWaiting?.();
+    assertStillWaiting?.(status);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for Server ${expectedState}`);

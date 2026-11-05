@@ -1,4 +1,8 @@
 import { sourceServerRunningTasksSchema, type SourceServerRunningTask } from "@zcode/shared";
+import {
+  CONTROL_PLANE_PROTOCOL_VERSION,
+  controlPlaneHealthFieldsSchema,
+} from "@zcode/shared/super-agent-control-plane-protocol";
 import { z } from "zod";
 
 export const SERVER_CLI_PROTOCOL_VERSION = 1;
@@ -186,8 +190,21 @@ export type CoreCommand = z.infer<typeof coreCommandSchema>;
 // 设计裁决 7（super-agent-trigger-subsystem-spec §7-7）：daemon 用受管子进程承载 bootstrap
 // 组合根。control-plane 使用独立严格 schema，协议版本随该 schema 演进；子进程协议不兼容时
 // 必须显式失败，不静默降级。milestone-b-spec §2.4 要求 schema 新增字段与协议版本同批 bump：
-// ControlPlaneStatus 增 firstReadyAt（代际 ever-ready 证据），故版本从与 Server CLI 同源的 1 升到 2。
-export const CONTROL_PLANE_PROTOCOL_VERSION = 2;
+// v2 增 firstReadyAt；v3 增 health 扩展字段（leader/pending/degraded/workspaceErrors/
+// peer/protocol 计数）。health 字段集直接复用 shared schema，避免 Supervisor 严格快照
+// 与 child 消息两侧漂移。
+// 生命周期消息/命令/版本已迁 @zcode/shared（headless child 与 Core 侧共用同一契约），
+// 本文件只 re-export 保持既有调用方导入路径不变。
+export {
+  CONTROL_PLANE_PROTOCOL_VERSION,
+  controlPlaneCommandSchema,
+  controlPlaneHealthFieldsSchema,
+  controlPlaneMessageSchema,
+} from "@zcode/shared/super-agent-control-plane-protocol";
+export type {
+  ControlPlaneCommand,
+  ControlPlaneMessage,
+} from "@zcode/shared/super-agent-control-plane-protocol";
 
 /**
  * control-plane 子进程启动参数。launcher 负责映射为具体命令行/env；Supervisor 只认这一个
@@ -199,36 +216,9 @@ export interface ControlPlaneLaunchParams {
   dataBaseDir: string;
   serverRoot: string;
   release: ReleaseManifest | null;
+  /** §2.3 启动方投影给 child 的 flag；child 只读 mandateGate，缺省 false。 */
+  mandateGate?: boolean;
 }
-
-export const controlPlaneMessageSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("ready"),
-      protocolVersion: z.number().int().nonnegative(),
-      generation: z.number().int().nonnegative(),
-      version: z.string().min(1).optional(),
-      releaseId: z.string().min(1).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("health"),
-      at: z.number().int().nonnegative(),
-      pendingEventCount: z.number().int().nonnegative().optional(),
-    })
-    .strict(),
-  z.object({ type: z.literal("stopped"), reason: z.string().max(500) }).strict(),
-  // milestone-b-spec §2.3：路径不一致、门禁开但 eventRouter 关、socket bind 冲突等启动级
-  // 不可恢复错误由 child 上报 fatal；Supervisor 必须把它当一等失败事件处理，不能降级成普通退出。
-  z.object({ type: z.literal("fatal"), message: z.string().max(500) }).strict(),
-]);
-export type ControlPlaneMessage = z.infer<typeof controlPlaneMessageSchema>;
-
-export const controlPlaneCommandSchema = z.discriminatedUnion("command", [
-  z.object({ command: z.literal("shutdown") }),
-]);
-export type ControlPlaneCommand = z.infer<typeof controlPlaneCommandSchema>;
 
 export const controlPlaneStateSchema = z.enum([
   "starting",
@@ -253,13 +243,7 @@ export const controlPlaneStatusSchema = z
     // 本代际 ever-ready 证据，供 §3.6 状态判断与排障（启动窗口是否关闭还需结合 crash 信号）。
     firstReadyAt: z.number().int().nonnegative().nullable(),
     lastExitReason: z.string().max(500).nullable(),
-    health: z
-      .object({
-        at: z.number().int().nonnegative(),
-        pendingEventCount: z.number().int().nonnegative().optional(),
-      })
-      .strict()
-      .nullable(),
+    health: controlPlaneHealthFieldsSchema.nullable(),
     crashBudget: crashBudgetSchema,
   })
   .strict();
