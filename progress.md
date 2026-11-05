@@ -45,6 +45,13 @@
 - P6 能力规格（设备权限/能力票据/OS egress 围栏，均标注未实现）+ 灰度试点手册（三级开关/观测/回滚/放量判据）
 - 验证：根 typecheck 过、architecture 0、lint 0 errors、server-cli 221 测试绿；累计 19 提交
 
+## 里程碑 B 核心实现（2026-11-05）✅
+- 共享协议契约 `@zcode/shared/super-agent-control-plane-protocol`（生命周期消息/RPC 帧/15 方法 zod schema/端点推导）
+- headless 控制面入口 `zcode control-plane`：socket bind（0600/0700、陈旧清理）、首帧认证、IPC ready/health/shutdown、per-workspace plane（Core ready 门后抢租约）、RPC 方法集 + 反向 host.* 客户端
+- daemon 侧：默认 launcher（release/dev 解析，无入口响亮失败）+ JSONL RPC 客户端（256KiB/超时/zod/断线审计）
+- 真子进程+真 socket+真 sqlite 集成测试：ready→ensure→ingest 幂等→lease→shutdown 对称、不可信 peer 拒绝、协议版本 fatal
+- 验证：根+CLI typecheck 过、architecture 0、lint 0 errors、bootstrap super-agent 171 + daemon 集成 21 + server-cli 33 测试绿；累计 23 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
