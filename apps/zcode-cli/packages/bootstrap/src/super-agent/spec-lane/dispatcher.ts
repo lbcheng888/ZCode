@@ -5,12 +5,15 @@
  *   2. buildProcessEnv({ proxyUrl: plan.proxyUrl }) → 无凭据子进程 env（生产 =
  *      adapters buildSpecRunEnv；接线缝见 spec §6-4，由组合根注入）；
  *   3. buildSpecRestrictedProfile() → 受限 profile（工具面/权限模式结构固定）；
- *   4. launch → **subagent run**（Phase 3 唯一合法形态；workflow 形态在 profile /
+ *   4. fence.prepare → per-run OS egress 围栏（可选；启用时失败即拒绝启动，
+ *      spec §3.4 顺序：代理之后、命令执行之前）；
+ *   5. launch → **subagent run**（Phase 3 唯一合法形态；workflow 形态在 profile /
  *      processEnv 接线前禁止启动，本端口不提供 workflow 形态）；
- *   5. run 终态后 stopSpecRunEgress。
+ *   6. run 终态后 teardown 围栏、stopSpecRunEgress。
  *
  * 失败模型：任一步失败原样上抛（dispatcher 不吞、不降级直连）；applyVerdicts 的
- * 异步阶段经 onError 告警。缺 proxyUrl / env 未携带代理 / profile 被削弱 = 拒绝启动。
+ * 异步阶段经 onError 告警。缺 proxyUrl / env 未携带代理 / profile 被削弱 /
+ * 围栏不可用 = 拒绝启动。
  */
 import { buildSpecRestrictedProfile, SPEC_RESTRICTED_PROFILE_NAME } from "@zcode/core";
 import type { AgentProfile } from "@zcode/shared";
@@ -20,6 +23,7 @@ import type {
   SpecRunNetworkPolicy,
   SuperAgentSpecLaneContract,
 } from "./contract.js";
+import type { SpecFenceContract, SpecFenceHandle } from "./fence/index.js";
 
 /** dispatcher 启动载荷（结构 = trigger.TriggerSpecRunInput 子集，不 import 兄弟模块）。 */
 export interface SpecRunDispatchInput {
@@ -53,6 +57,8 @@ export interface SpecRunLaunchRequest {
   processEnv: Record<string, string>;
   /** 与 buildProcessEnv 同源；接执行适配器（createNodeExecutionAdapter({ network })）。 */
   network: SpecRunNetworkPolicy;
+  /** 本次 run 已建立的 OS 围栏句柄；未启用围栏时缺省（现状协作式代理）。 */
+  fence?: SpecFenceHandle;
   prompt: string;
   trigger: SpecRunDispatchInput;
 }
@@ -67,6 +73,27 @@ export interface SpecRunDispatcherDeps {
   resolveWorkspaceRoot: (input: SpecRunDispatchInput) => string;
   /** per-repo 依赖镜像白名单（spec §4.3）；缺省 [] = 零 egress。 */
   resolveAllowHosts?: (workspaceRoot: string) => readonly string[];
+  /**
+   * P6 OS 级 egress 围栏（spec §3）。缺省 = 现状协作式代理（flag off）。
+   * 提供时强制：prepare 失败（平台不支持/权限不足/探测不确定）抛 typed
+   * FenceStartupError，run 拒绝启动，不回落 env 代理。
+   */
+  fence?: SpecFenceContract;
+}
+
+/** egress plan 的代理地址 → 围栏 broker 端点；端口缺失/非法即拒绝启动。 */
+function parseEgressBroker(proxyUrl: string): { host: string; port: number } {
+  let parsed: URL;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch (error) {
+    throw new Error(`spec run 拒绝启动：egress proxyUrl 非法（${proxyUrl}）`, { cause: error });
+  }
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`spec run 拒绝启动：egress proxyUrl 缺有效端口（${proxyUrl}）`);
+  }
+  return { host: parsed.hostname, port };
 }
 
 function buildSpecRunPrompt(input: SpecRunDispatchInput): string {
@@ -120,6 +147,7 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
         ? { allowHosts: deps.resolveAllowHosts(workspaceRoot) }
         : {}),
     });
+    let fenceHandle: SpecFenceHandle | undefined;
     try {
       if (plan.proxyUrl.trim().length === 0) {
         // 无代理 = 拒绝启动（spec §0：任何路径都不回退直连）。
@@ -139,18 +167,36 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
           `spec run 拒绝启动：profile 被替换为 ${profile.name}（必须是 ${SPEC_RESTRICTED_PROFILE_NAME}）`,
         );
       }
+      if (deps.fence) {
+        // 序列：prepare egress 代理 → prepare OS 围栏 → launch（执行命令）。
+        // 围栏不可用 = 抛 typed FenceStartupError，run 拒绝启动（spec §3.4 E6）。
+        const broker = parseEgressBroker(plan.proxyUrl);
+        fenceHandle = await deps.fence.prepare({
+          runId: input.triggerId,
+          workspaceRoot,
+          broker,
+          // 能力范围必须与本次 egress plan 一致：Linux netns 无法到达宿主 broker，
+          // 非空白名单在 fence.prepare 内 typed 拒绝（不先启动再中途失败）。
+          allowHosts: plan.allowHosts,
+        });
+      }
       await deps.launch.launch({
         workspaceRoot,
         form: "subagent",
         profile,
         processEnv,
         network: plan.networkPolicy,
+        ...(fenceHandle ? { fence: fenceHandle } : {}),
         prompt: buildSpecRunPrompt(input),
         trigger: input,
       });
     } finally {
-      // 任何失败路径都停代理（不泄漏监听）；stop 自身失败原样上抛。
-      await deps.egress.stopSpecRunEgress(workspaceRoot);
+      // 先拆围栏（本 run 已结束），再停代理（不泄漏监听）；任一失败原样上抛。
+      try {
+        if (fenceHandle) await fenceHandle.teardown();
+      } finally {
+        await deps.egress.stopSpecRunEgress(workspaceRoot);
+      }
     }
   };
 

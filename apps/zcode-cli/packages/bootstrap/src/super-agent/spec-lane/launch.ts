@@ -8,8 +8,10 @@
  *     createNodeExecutionAdapter），Bash 等子进程 I/O 才真正吃到代理 env；
  *   - profile 以显式覆盖传入，不进 runtime 的 agent registry（模型侧 Agent 工具
  *     不能自选 spec profile，避免拿到常规 env 执行）；
- *   - run 终态（成功/失败/取消）后关闭本次执行端口，egress 代理由 dispatcher
- *     finally 停止。
+ *   - 若 dispatcher 已建立 OS 围栏（P6 §3），执行端口被包装：每条命令改写为
+ *     围栏内执行（Linux unshare --net + nftables / macOS sandbox-exec）；
+ *   - run 终态（成功/失败/取消）后关闭本次执行端口，围栏与 egress 代理由
+ *     dispatcher finally 清理。
  *
  * fail-closed：无 subagent 端口、env 代理与 network 不同源、执行端口工厂缺席
  * 一律拒绝启动；不降级到直连或其它执行形态。
@@ -26,6 +28,7 @@ import type {
 
 import type { SpecRunNetworkPolicy } from "./contract.js";
 import type { SpecRunLaunchPort, SpecRunLaunchRequest } from "./dispatcher.js";
+import { createFencedExecutionPort } from "./fence/index.js";
 
 /** 执行端口工厂输入：无凭据 env 与同源 network 策略（生产接 createNodeExecutionAdapter）。 */
 export interface SpecRunExecutionPortInput {
@@ -71,10 +74,15 @@ export function createSpecRunSubagentLaunchPort(
         );
       }
 
-      const executionPort = deps.createExecutionPort({
+      const baseExecutionPort = deps.createExecutionPort({
         processEnv: request.processEnv,
         network: request.network,
       });
+      // fence 由 dispatcher 在 egress 代理之后、命令执行之前建立；这里把每条
+      // 执行请求改写为围栏内执行。未启用围栏时行为不变（现状协作式代理）。
+      const executionPort = request.fence
+        ? createFencedExecutionPort(baseExecutionPort, request.fence)
+        : baseExecutionPort;
       const traceContext = createChildTraceContext(deps.traceContext, {
         sessionId: deps.parentSessionId,
         attributes: {

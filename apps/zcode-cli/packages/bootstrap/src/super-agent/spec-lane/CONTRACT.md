@@ -15,6 +15,7 @@
 与其它模块的交集（hook 点，全部经组合根/dispatcher，本模块不主动接线）：
 
 - **dispatcher（mandate/spec-trigger lane，M4/M2）**：调 `prepareSpecRunEgress` → 拿 plan 接执行适配器（`network`）与 `buildSpecRunEnv`（`processEnv`）；生产 launch 适配器 `createSpecRunSubagentLaunchPort` 把 restricted profile + 无凭据执行端口接到既有 subagent 端口，run 终态调 `stopSpecRunEgress`。dispatcher 按 workspace 串行 prepare→launch→stop（单代理实例不被并发 run 互相关闭）。verdict 门、结果卡交付不在本模块。
+- **P6 OS egress 围栏（`fence/`，spec §3）**：可选注入 dispatcher（`deps.fence`）。顺序固定为 egress.prepare → fence.prepare → launch → fence.teardown → egress.stop；围栏准备失败抛 typed `FenceStartupError`，run 拒绝启动，绝不回退协作式代理。围栏包装执行请求时打 `internalFence` 标记，执行适配器据此禁止围栏外 login-shell snapshot / bash prelude，并关闭依赖外层 shell 的 cwd 捕获（避免 rc 绕过与错误 cwd）。平台矩阵机器可读：darwin = allowlist；linux 当前 = zero-egress-only（broker 跨 netns 不可达），非空 allowHosts 在 prepare 直接 typed 拒绝。启动时对残留围栏目录对账回收（同 runId 存活 = `fence.residual_conflict`）。
 - **adapters `buildSpecRunEnv`**：同源消费 plan.proxyUrl；凭据真空与代理 env 注入在那侧（spec §3）。
 - **core `buildSpecRestrictedProfile`**：工具面剔除出站/信道工具（spec §2）；与本模块正交，组合根同时装配两者。
 - **contracts config（config lane）**：`specEgress.allowHosts` 的 repo 配置键与读取；本模块只收 `allowHosts` 参数 + `normalizeSpecEgressAllowlist` 纯函数。

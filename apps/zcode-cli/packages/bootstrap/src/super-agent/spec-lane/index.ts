@@ -38,3 +38,34 @@ export {
   type SpecRunSubagentLaunchPortDeps,
 } from "./launch.js";
 export { superAgentSpecLaneModule } from "./module.js";
+
+// P6 OS 级 egress 围栏（spec §3）：平台矩阵、命令构建器、能力探测与执行包装。
+export {
+  FenceStartupError,
+  SPEC_FENCE_PLATFORM_MATRIX,
+  fencePlatformMatrixEntry,
+  createSpecFence,
+  createFencedExecutionPort,
+  buildFenceCommandPlan,
+  buildFencedExecutionCommand,
+  buildDarwinFenceProfile,
+  buildLinuxFenceRuleset,
+  isLoopbackBrokerHost,
+  quotePosixShellArg,
+  type FenceCapability,
+  type FenceEgressScope,
+  type FenceErrorCode,
+  type FenceMechanism,
+  type FencePlatformMatrixEntry,
+  type FenceRunStatus,
+  type PrepareFenceRequest,
+  type SpecFenceContract,
+  type SpecFenceHandle,
+  type BuildFenceCommandPlanInput,
+  type FenceBrokerEndpoint,
+  type FenceCommandPlan,
+  type LinuxFenceCommandPlan,
+  type DarwinFenceCommandPlan,
+  type UnsupportedFenceCommandPlan,
+  type CreateSpecFenceOptions,
+} from "./fence/index.js";

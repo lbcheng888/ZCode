@@ -5,13 +5,15 @@ import {
 } from "@zcode/core";
 
 import {
+  FenceStartupError,
   createSpecRunDispatcher,
+  type PrepareFenceRequest,
+  type PrepareSpecRunEgressRequest,
+  type SpecFenceContract,
+  type SpecFenceHandle,
+  type SpecRunEgressPlan,
   type SpecRunLaunchRequest,
-} from "../../src/super-agent/spec-lane/index.js";
-import type {
-  PrepareSpecRunEgressRequest,
-  SpecRunEgressPlan,
-  SuperAgentSpecLaneContract,
+  type SuperAgentSpecLaneContract,
 } from "../../src/super-agent/spec-lane/index.js";
 
 const WORKSPACE_ROOT = "/tmp/ws-spec";
@@ -179,6 +181,105 @@ describe("M5 spec run dispatcher（三件套绑死 + subagent 唯一形态）", 
 
     await dispatcher.start(specInput());
     expect(seen[0]?.allowHosts).toEqual(["registry.npmjs.org"]);
+  });
+
+  it("围栏准备失败 → run 拒绝启动（FenceStartupError 上抛、launch 不执行、代理仍被清理）", async () => {
+    const launched: SpecRunLaunchRequest[] = [];
+    const fenceCalls = { prepares: 0, teardowns: 0 };
+    const fence: SpecFenceContract = {
+      async probeCapability() {
+        throw new Error("dispatcher 不应直接 probe；prepare 内部负责");
+      },
+      async prepare() {
+        fenceCalls.prepares += 1;
+        throw new FenceStartupError("fence.unsupported_platform", "win32", "Windows WFP 未实现");
+      },
+    };
+    const egress = fakeEgress();
+    const dispatcher = createSpecRunDispatcher({
+      egress,
+      fence,
+      buildProcessEnv: proxyEnv,
+      resolveWorkspaceRoot: () => WORKSPACE_ROOT,
+      launch: {
+        launch: async (request) => {
+          launched.push(request);
+          return { runId: "run-1" };
+        },
+      },
+    });
+
+    await expect(dispatcher.start(specInput())).rejects.toBeInstanceOf(FenceStartupError);
+    expect(fenceCalls.prepares).toBe(1);
+    expect(fenceCalls.teardowns).toBe(0);
+    expect(launched).toHaveLength(0);
+    expect(egress.stops).toEqual([WORKSPACE_ROOT]);
+  });
+
+  it("围栏建立成功 → launch 携带句柄，run 终态先拆围栏再停代理", async () => {
+    const launched: SpecRunLaunchRequest[] = [];
+    const events: string[] = [];
+    const fencePrepares: PrepareFenceRequest[] = [];
+    const fence: SpecFenceContract = {
+      async probeCapability() {
+        throw new Error("dispatcher 不应直接 probe；prepare 内部负责");
+      },
+      async prepare(request) {
+        fencePrepares.push(request);
+        events.push(`fence.prepare:${request.runId}`);
+        const handle: SpecFenceHandle = {
+          runId: request.runId,
+          mechanism: "linux-netns-nftables",
+          broker: request.broker,
+          wrapExecutionRequest: (execution) => execution,
+          async teardown() {
+            events.push(`fence.teardown:${request.runId}`);
+          },
+        };
+        return handle;
+      },
+    };
+    const egress: SuperAgentSpecLaneContract = {
+      async prepareSpecRunEgress(): Promise<SpecRunEgressPlan> {
+        events.push("egress.prepare");
+        return {
+          workspaceRoot: WORKSPACE_ROOT,
+          proxyUrl: "http://127.0.0.1:12345",
+          networkPolicy: { httpProxy: "http://127.0.0.1:12345", noProxy: "" },
+          allowHosts: [],
+        };
+      },
+      async stopSpecRunEgress(): Promise<void> {
+        events.push("egress.stop");
+      },
+    };
+    const dispatcher = createSpecRunDispatcher({
+      egress,
+      fence,
+      buildProcessEnv: proxyEnv,
+      resolveWorkspaceRoot: () => WORKSPACE_ROOT,
+      launch: {
+        launch: async (request) => {
+          launched.push(request);
+          events.push("launch");
+          return { runId: "run-1" };
+        },
+      },
+    });
+
+    await dispatcher.start(specInput());
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.fence?.runId).toBe("t-1");
+    expect(launched[0]?.fence?.broker).toEqual({ host: "127.0.0.1", port: 12345 });
+    // 能力范围必须跟随本次 egress plan（Linux 非空白名单据此 typed 拒绝）。
+    expect(fencePrepares[0]?.allowHosts).toEqual([]);
+    expect(events).toEqual([
+      "egress.prepare",
+      "fence.prepare:t-1",
+      "launch",
+      "fence.teardown:t-1",
+      "egress.stop",
+    ]);
   });
 
   it("同 workspace 并发 start 串行：prepare→launch→stop 原子，后一个 run 等前一个停代理", async () => {
