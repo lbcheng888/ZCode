@@ -362,6 +362,7 @@ export {
 
 export * from "./conversationSelection.js";
 export * from "./attachment-source.js";
+export * from "./attachment-role.js";
 
 export * from "./channel-mention.js";
 

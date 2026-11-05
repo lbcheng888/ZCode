@@ -320,6 +320,195 @@ describe("WindowHostAttachmentRegistry", () => {
     expect(registry.size()).toBe(2);
   });
 
+  it("宿主 attachment 记录是角色权威：本机连续连接 host，可重放连接默认 read_mostly", () => {
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+    });
+    registry.attach({
+      requestId: "desktop-local",
+      attachmentId: "desktop-local",
+      clientMode: "desktop-continuous",
+      scope: { kind: "local" },
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "mobile-local",
+      attachmentId: "mobile-local",
+      clientMode: "web-remote-replayable",
+      scope: { kind: "local" },
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "desktop-remote",
+      attachmentId: "desktop-remote",
+      clientMode: "desktop-continuous",
+      scope: {
+        kind: "remote",
+        remoteSessionId: "remote-1",
+        workspacePath: "/work/demo",
+        workspaceIdentity: "remote:ssh:dev:/work/demo",
+      },
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "mobile-remote",
+      attachmentId: "mobile-remote",
+      clientMode: "web-remote-replayable",
+      scope: {
+        kind: "remote",
+        remoteSessionId: "remote-1",
+        workspacePath: "/work/demo",
+        workspaceIdentity: "remote:ssh:dev:/work/demo",
+      },
+      port: createPort().port,
+    });
+
+    expect(registry.getRole("desktop-local")).toBe("host");
+    expect(registry.getRole("mobile-local")).toBe("read_mostly");
+    expect(registry.getRole("desktop-remote")).toBe("host");
+    expect(registry.getRole("mobile-remote")).toBe("read_mostly");
+  });
+
+  it("角色只由宿主 clientMode 派生，attach 结构上没有客户端自报角色的入口", () => {
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+    });
+    // 即便客户端伪造 clientKind（握手提示位）也到不了这里：attach 只接受宿主注入的 clientMode。
+    registry.attach({
+      requestId: "remote-a",
+      attachmentId: "remote-a",
+      clientMode: "web-remote-replayable",
+      scope: { kind: "remote", remoteSessionId: "r1", workspacePath: "/w", workspaceIdentity: "ws" },
+      port: createPort().port,
+    });
+
+    expect(registry.getRole("remote-a")).toBe("read_mostly");
+    // 远端连接无法被 setRole 升级为 host。
+    expect(() => registry.setRole("remote-a", "host")).toThrow("desktop-continuous");
+  });
+
+  it("宿主显式授予 interactive 即时生效，吊销/断连后角色立即失效", () => {
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+    });
+    const port = createPort();
+    registry.attach({
+      requestId: "mobile-1",
+      attachmentId: "mobile-1",
+      clientMode: "web-remote-replayable",
+      scope: { kind: "local" },
+      port: port.port,
+    });
+
+    expect(registry.getRole("mobile-1")).toBe("read_mostly");
+    // 宿主显式授予后下一次读取立即是 interactive（不缓存旧结论）。
+    expect(registry.setRole("mobile-1", "interactive")).toBe(true);
+    expect(registry.getRole("mobile-1")).toBe("interactive");
+    expect(registry.list().map((attachment) => attachment.role)).toContain("interactive");
+
+    // 收回 interactive 也是即时生效。
+    expect(registry.setRole("mobile-1", "read_mostly")).toBe(true);
+    expect(registry.getRole("mobile-1")).toBe("read_mostly");
+
+    // 断连（port close）后记录被移除，角色不可再读取（准入层按 read_mostly fail-closed）。
+    port.close();
+    expect(registry.getRole("mobile-1")).toBeUndefined();
+
+    // 显式 detach 与吊销同样即时。
+    registry.detach("mobile-1");
+    expect(registry.getRole("mobile-1")).toBeUndefined();
+  });
+
+  it("setRole 原地更新同一 params 对象，expose 持有的引用不会停留在旧角色", () => {
+    let captured: { role: string } | undefined;
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: (params) => {
+        captured = params;
+        return { dispose: vi.fn() };
+      },
+    });
+    registry.attach({
+      requestId: "mobile-1",
+      attachmentId: "mobile-1",
+      clientMode: "web-remote-replayable",
+      scope: { kind: "local" },
+      port: createPort().port,
+    });
+
+    expect(captured?.role).toBe("read_mostly");
+    registry.setRole("mobile-1", "interactive");
+    // 同一个引用：任何缓存了 expose 参数的消费者也能看到宿主的新授权。
+    expect(captured?.role).toBe("interactive");
+    expect(registry.getRole("mobile-1")).toBe("interactive");
+  });
+
+  it("invalid host role updates crash instead of silently escalating/downgrading", () => {
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+    });
+    registry.attach({
+      requestId: "mobile-1",
+      attachmentId: "mobile-1",
+      clientMode: "web-remote-replayable",
+      scope: { kind: "local" },
+      port: createPort().port,
+    });
+
+    expect(() => registry.setRole("mobile-1", "full" as never)).toThrow("Invalid attachment role");
+    // 远端连接不得被升级成 host。
+    expect(() => registry.setRole("mobile-1", "host")).toThrow("desktop-continuous");
+    expect(registry.getRole("mobile-1")).toBe("read_mostly");
+    expect(registry.setRole("missing", "interactive")).toBe(false);
+  });
+
+  it("deviceScope 键按 workspaceIdentity\\0surfaceKind 记录", () => {
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+    });
+    const remoteScope = {
+      kind: "remote" as const,
+      remoteSessionId: "remote-1",
+      workspacePath: "/work/demo",
+      workspaceIdentity: "remote:ssh:dev:/work/demo",
+    };
+    registry.attach({
+      requestId: "desktop-remote",
+      attachmentId: "desktop-remote",
+      clientMode: "desktop-continuous",
+      scope: remoteScope,
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "mobile-remote",
+      attachmentId: "mobile-remote",
+      clientMode: "web-remote-replayable",
+      scope: remoteScope,
+      port: createPort().port,
+    });
+    registry.attach({
+      requestId: "local",
+      attachmentId: "local",
+      clientMode: "desktop-continuous",
+      scope: { kind: "local" },
+      port: createPort().port,
+    });
+
+    const list = registry.list();
+    expect(list.find((item) => item.attachmentId === "desktop-remote")?.deviceScopeKey).toBe(
+      "remote:ssh:dev:/work/demo\u0000desktop",
+    );
+    expect(list.find((item) => item.attachmentId === "mobile-remote")?.deviceScopeKey).toBe(
+      "remote:ssh:dev:/work/demo\u0000web",
+    );
+    expect(list.find((item) => item.attachmentId === "local")?.deviceScopeKey).toBeUndefined();
+  });
+
   it("remote session 失效时释放该 session 的所有 desktop/mobile attachment 且保持幂等", () => {
     const desktopDispose = vi.fn();
     const mobileDispose = vi.fn();

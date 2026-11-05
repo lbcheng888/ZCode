@@ -3,6 +3,7 @@ import { localTtftFactsSchema } from "../localTtft.js";
 // 传输外壳：连接握手 / 订阅 / 帧信封。
 // 阶段为类型占位（后半接通道层时启用），数据形状已按规范定稿。
 import { z } from "zod";
+import { clientKindSchema } from "../attachment-role.js";
 import { APP_USAGE_RANGES, appUsageSnapshotSchema } from "../usage-stats.js";
 import { zcodeWorkspaceRefSchema } from "../zcode-protocol-legacy-types.js";
 import {
@@ -71,7 +72,8 @@ export const clientHelloSchema = z
     kind: z.literal("clientHello"),
     protocolVersion: z.literal(V4_WIRE_PROTOCOL_VERSION),
     clientId: z.string(),
-    clientKind: z.enum(["desktop", "web", "mobileRemote", "mobileApp"]).optional(),
+    // 只是提示，不是身份/权限权威（P6 spec §1.1）。角色由宿主 attachment 记录派生。
+    clientKind: clientKindSchema.optional(),
     appVersion: z.string(),
     // 缺失代表旧客户端，不具备 Settings-centered review UI。
     capabilities: z
