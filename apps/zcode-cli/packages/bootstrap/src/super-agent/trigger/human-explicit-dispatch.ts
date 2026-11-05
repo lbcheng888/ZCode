@@ -49,7 +49,7 @@ export async function dispatchHumanExplicit(
   const event = getTriggerEvent(deps.db, triggerId);
   if (!event) return { kind: "not_found", triggerId };
 
-  const worker = deps.worker.findWorkerByThreadKey({
+  const worker = await deps.worker.findWorkerByThreadKey({
     workspaceIdentity: event.workspaceIdentity,
     threadKey: event.threadKey,
   });

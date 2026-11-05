@@ -132,7 +132,12 @@ export interface SuperAgentHostPorts {
  * 本包不 import services，结构类型即合同）。
  */
 export type SuperAgentTriggerSinkOutcome =
-  | { handled: true; triggerId: string; route: IngestRoute }
+  | {
+      handled: true;
+      triggerId: string;
+      route: IngestRoute;
+      delivery?: "routed" | "delivery_failed"; // §3.4 additive：owned/human-explicit 投递结果。
+    }
   | { handled: false };
 
 export interface SuperAgentTriggerSink {
@@ -145,7 +150,11 @@ export interface CreateSuperAgentControlPlaneOptions {
   /** 控制面进程/会话实例 id（缺省随机 uuid）。 */
   ownerId?: string;
   onError: (error: unknown, context: string) => void;
-  sessionFace: SuperAgentSessionFace;
+  /**
+   * 单会话宿主事实。headless daemon（多会话宿主）注入完整 `hostPorts.worker` 时无需
+   * sessionFace；二者至少提供一个，否则装配期响亮失败。
+   */
+  sessionFace?: SuperAgentSessionFace;
   hostPorts: SuperAgentHostPorts;
   /** 裁决短命 model-only 会话（create-app 用 runtime 辅助生成面构建，测试可注脚本端口）。 */
   adjudicationSession: AdjudicationModelSessionPort;
@@ -209,6 +218,11 @@ export interface SuperAgentControlPlane {
   ): SuperAgentAdmissionMandateResolution | undefined;
   /** leader 竞争 + 清过期 + 回填 + 驱动器启动 + 桥续推；幂等。 */
   start(): Promise<void>;
+  /**
+   * 优雅释放本人 leader 租约（milestone-b-spec §2.5，`delete ... where owner_id=?`）。
+   * 必须在 stop() 关库前调用；返回释放行数（follower/已释放为 0）。
+   */
+  releaseLeadership(): number;
   /** 对称停止：心跳/驱动器/短窗会话 + 关库；幂等。在途裁决批不取消（自然收尾，spec §8-12）。 */
   stop(): void;
 }
@@ -597,11 +611,19 @@ export async function createSuperAgentControlPlane(
     autoReplyGuard: hostPorts.autoReplyGuard,
     now,
   });
+  const sessionFace = options.sessionFace;
+  if (!hostPorts.worker && !sessionFace) {
+    // 多会话宿主必须注入完整 worker port；单会话宿主必须给 sessionFace。两者都缺 =
+    // 无法构成 resume/createTask，装配期响亮失败（不静默建平行会话）。
+    throw new Error(
+      "super-agent 组合根缺少 worker 装配面：hostPorts.worker 与 sessionFace 至少提供一个",
+    );
+  }
   const worker =
     hostPorts.worker ??
     createInProcessTriggerWorkerPort({
       database: db,
-      face: options.sessionFace,
+      face: sessionFace as SuperAgentSessionFace,
       handleCommand: hostPorts.handleCommand,
       now,
     });
@@ -751,7 +773,8 @@ export async function createSuperAgentControlPlane(
               "super_agent.route_owned",
             );
           }
-          break;
+          const delivery = outcome.kind === "routed" ? "routed" : "delivery_failed";
+          return { handled: true, triggerId: result.triggerId, route: result.route, delivery };
         }
         case "human_explicit": {
           const outcome = await trigger.dispatchHumanExplicit(result.triggerId);
@@ -763,7 +786,16 @@ export async function createSuperAgentControlPlane(
               "super_agent.dispatch_human_explicit",
             );
           }
-          break;
+          const delivered =
+            outcome.kind === "resumed" ||
+            outcome.kind === "created_task" ||
+            outcome.kind === "delivered";
+          return {
+            handled: true,
+            triggerId: result.triggerId,
+            route: result.route,
+            delivery: delivered ? "routed" : "delivery_failed",
+          };
         }
         case "unowned_candidate":
           adjudication.notifyCandidate(result.triggerId);
@@ -976,6 +1008,12 @@ export async function createSuperAgentControlPlane(
     listPendingWouldAccept,
     promoteWouldAccept,
     resolveAdmissionMandateFacts,
+    releaseLeadership(): number {
+      if (closed) return 0;
+      // 优雅收口（§2.5）：只删本人 ownerId 的租约行；失败原样上浮给 entry 的 onError。
+      const result = db.prepare("delete from control_plane_leases where workspace_identity = ? and owner_id = ?").run(workspaceIdentity, ownerId);
+      return Number(result.changes); // 不改 leader：stop() 仍据此停驱动器、清心跳。
+    },
     async start() {
       if (started || closed) return;
       started = true;

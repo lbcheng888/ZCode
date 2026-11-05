@@ -10,7 +10,7 @@ import { scheduleCliExitWatchdog } from "./shutdown.js";
 import { installCliProcessErrorBoundary } from "./process-errors.js";
 import { installProtocolStderrBoundary } from "./protocol-stderr.js";
 import { createProtocolProcessLifecycle } from "./protocol-lifecycle.js";
-import { isProtocolServerInvocation } from "./arguments.js";
+import { isControlPlaneInvocation, isProtocolServerInvocation } from "./arguments.js";
 
 void main();
 
@@ -62,6 +62,17 @@ async function main(): Promise<void> {
     // 即使最终没有创建 AgentRuntime，也会让每个 MCP 子进程持有整套业务依赖。
     if (isPluginHostInvocation(argv)) {
       process.exitCode = await runPluginHostCommand(context, argv.slice(1));
+      return;
+    }
+    // daemon 受管 headless child（milestone-b-spec §2.2）：只装配 bootstrap 侧控制面，
+    // 不加载 provider/run 路径；必须在 provider-runtime-env 之前分流，避免为子进程
+    // 读取用户配置与网络变量。
+    if (isControlPlaneInvocation(argv)) {
+      const { runSuperAgentControlPlaneCommand } = await import("@zcode/bootstrap");
+      process.exitCode = await runSuperAgentControlPlaneCommand({
+        argv: argv.slice(1),
+        env: process.env,
+      });
       return;
     }
     if (argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage")) {

@@ -74,6 +74,17 @@ export type {
   ZCodePluginsOverviewData,
 } from "./plugins.js";
 export { runZCodeProtocolAgent } from "./zcode-protocol-entrypoint.js";
+export {
+  parseControlPlaneEntryConfig,
+  runSuperAgentControlPlaneCommand,
+  startControlPlaneDaemon,
+} from "./app/super-agent-daemon-entry.js";
+export type {
+  ControlPlaneEntryConfig,
+  RunSuperAgentControlPlaneCommandOptions,
+  RunningControlPlaneDaemon,
+  StartControlPlaneDaemonOptions,
+} from "./app/super-agent-daemon-entry.js";
 // Exposed for the CLI's --output-format stream-json: it needs the same event
 // shape the protocol server emits, rather than inventing a second one.
 export { mapSessionEvent } from "./zcode-protocol/session-mapper.js";

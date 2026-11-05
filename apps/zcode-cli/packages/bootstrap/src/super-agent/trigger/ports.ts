@@ -29,7 +29,14 @@ export interface TriggerHostDeliveryPort {
  * 持平的验收依赖 createTask 直通既有路径。
  */
 export interface TriggerWorkerPort {
-  findWorkerByThreadKey(input: FindWorkerByThreadKeyInput): ResumableWorker | undefined;
+  /**
+   * 查询 target thread 的 worker 投影。跨进程宿主（daemon child → Core）的查询是 RPC，
+   * 返回 Promise；进程内宿主可同步返回。调用方必须 await（milestone-b-spec §3.3
+   * `host.worker.find` 为异步方法）。
+   */
+  findWorkerByThreadKey(
+    input: FindWorkerByThreadKeyInput,
+  ): ResumableWorker | undefined | Promise<ResumableWorker | undefined>;
   resume(input: ResumeWorkerInput): Promise<{ sessionId: string }>;
   createTask(input: CreateTaskInput): Promise<{ sessionId: string }>;
 }

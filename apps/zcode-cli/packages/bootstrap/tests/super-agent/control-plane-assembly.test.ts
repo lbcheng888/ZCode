@@ -177,6 +177,8 @@ describe("super-agent 控制面装配（flag-on，真 DB + 真 CommandInbox）",
       handled: true,
       triggerId: expect.any(String),
       route: "owned",
+      // milestone-b-spec §3.4：sink outcome 增加 additive delivery（进程内附件同样回传）。
+      delivery: "routed",
     });
     const triggerId = result.handled ? result.triggerId : "";
     expect(triggerId).not.toBe("");

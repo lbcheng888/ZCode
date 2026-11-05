@@ -388,6 +388,7 @@ scheduler 同理：本代际 child 曾 leader 后失效 → 该 workspace 的 cl
 
 - socket 仅本机、data-root 权限；不做 TCP 监听，不引网络鉴权。socket `0600` / 目录 `0700` 只是纵深防御，**不是**「同 data-root 进程即可信」的证明。
 - **peer 身份是认证，taint 不是**：连接建立后、首帧之前校验 peer——Linux `SO_PEERCRED`、macOS `LOCAL_PEERPID`、Windows `GetNamedPipeClientProcessId` + 客户端 SID；可信集合 = 本 data-root 的 Supervisor 与 Core（Core PID 由 Supervisor 经 child IPC / spawn env 传递）。无法取得 peer 身份或 peer 不在可信集合 → 立即断开、计数并上报 health，fail-closed。同 UID 但不是 Core 的进程因 PID 不匹配被拒；设计 §5 登记的同 UID 本机攻击面在本 RPC 上收窄为「能取得 Core PID 身份的进程」，仍不承诺。
+- **B 期落地路径（实施偏差登记）**：Node 公共 API 不暴露上述 peer credential，原生绑定尚未落地。B 期改为**显式凭据握手**：Supervisor 在 daemon 启动期用 `randomBytes` 铸造凭据并原子写入 `<serverRoot>/run/super-agent.auth`（0600，目录 0700）；Core 连接首帧提交凭据，child 在认证前不处理任何业务帧，缺失/不匹配立即断开并计错。凭据每次 daemon 启动重新铸造（Core 重启读同一文件，租约不中断）；文件缺失/为空时 child 启动级 fatal、客户端连接 fail-closed。它收窄的攻击面是「能读同 UID 0600 文件的进程」，仍属设计 §5 不承诺范围；内核级 peer credential 保留为未来加固项，不得把平台 resolver 的「恒拒绝」当作本节已实现。
 - 帧内禁止凭据、token、完整 prompt 之外的敏感字段；payload 摘要沿用 intake 上限。
 - `taint` 只由可信出口铸造，反序列化后校验 `taint === true`，否则拒收；这是来源完整性检查，**不构成认证**，不能替代 peer 校验。
 - P6（deviceScope/能力票据）在此边界挂接：远程/多设备接入若未来复用该 RPC，必须先加 capability ticket 与吊销传播；B 不实现 P6，也不预留无鉴权的远程扩展。
@@ -644,7 +645,7 @@ B 期目标（待实现）：
 7. **P6**：不在本里程碑交付；§3.8 仅登记未来接入约束。
 8. **租约心跳归属收窄**：trigger-subsystem-spec §7-7 写「daemon 本体只做入站 webhook、scheduler claim、租约心跳、子进程监管」。本 spec 把 `control_plane_leases` 的 claim/heartbeat/release 唯一归属 child 内 workspace plane（域库单写者），Core 只经 `lease.list`/`lease.get` 只读门控（§4.4）。这是对 §7-7「daemon 本体」的收窄解释（daemon = Supervisor+Core+child 整体，心跳由 child 执行），避免 Core 与 child 形成两个心跳写者。
 9. **mandateFacts 跨进程通道**：trigger-subsystem-spec 的 host 通道只覆盖 v4 wire 命令；本 spec 新增 agent↔Core 内部 `admission.resolveMandate`（解析时点前移到每个 admission 边界，含排队提升/steer），并明确 facts 不进公开 wire command（§3.7）。
-10. **RPC peer 认证**：设计 §5 登记「同 UID 本机攻击面不承诺」；本 spec 在该 RPC 上额外要求 peer 身份校验（SO_PEERCRED/LOCAL_PEERPID/Windows client PID+SID，可信集合=Supervisor/Core），不可验证即拒绝（§3.8）。
+10. **RPC peer 认证**：设计 §5 登记「同 UID 本机攻击面不承诺」；本 spec 在该 RPC 上额外要求 peer 身份校验（SO_PEERCRED/LOCAL_PEERPID/Windows client PID+SID，可信集合=Supervisor/Core），不可验证即拒绝（§3.8）。B 期在 Node 无原生绑定的前提下以 Supervisor 铸造的 0600 显式凭据握手落地（§3.8「B 期落地路径」），内核级 peer credential 留作未来加固。
 
 ---
 

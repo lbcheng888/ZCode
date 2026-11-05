@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   extractDisallowedToolsArgs,
+  isControlPlaneInvocation,
   isProtocolServerInvocation,
   parseGlobalArgs,
 } from "../../src/arguments.js";
@@ -33,6 +34,13 @@ test("工具禁用规则与 ToolSearch 模式可同时解析且不修改原参�
 test("全局参数保持严格校验且禁用规则不能缺失", () => {
   assert.throws(() => contract.parseGlobalArgs(["--unknown-argument"]));
   assert.throws(() => contract.extractDisallowedToolsArgs(["--disallowedTools"]));
+});
+
+test("headless control-plane 子命令识别与协议/prompt 入口分离", () => {
+  assert.equal(isControlPlaneInvocation(["control-plane"]), true);
+  assert.equal(isControlPlaneInvocation(["super-agent-control-plane"]), true);
+  assert.equal(isControlPlaneInvocation(["app-server"]), false);
+  assert.equal(isControlPlaneInvocation(["--prompt", "control-plane"]), false);
 });
 
 test("协议入口识别与普通 prompt 调用保持分离", () => {

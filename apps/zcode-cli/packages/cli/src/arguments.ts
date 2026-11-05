@@ -129,6 +129,16 @@ export function isProtocolServerInvocation(argv: string[]): boolean {
   }
 }
 
+/** 内部命令：daemon Supervisor spawn 的 headless control-plane child（milestone B §2.2）。 */
+export const CONTROL_PLANE_COMMAND_NAMES: readonly string[] = [
+  "control-plane",
+  "super-agent-control-plane",
+];
+
+export function isControlPlaneInvocation(argv: readonly string[]): boolean {
+  return argv[0] !== undefined && CONTROL_PLANE_COMMAND_NAMES.includes(argv[0]);
+}
+
 const DISALLOWED_TOOLS_FLAGS = new Set(["--disallowedTools", "--disallowed-tools"]);
 
 export const extractDisallowedToolsArgs = (
