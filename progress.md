@@ -72,6 +72,12 @@
 - 测试：server-cli 288 / bootstrap 12226 / 真 child 集成（ACK 丢失重推、kill -9 续推、宽限 skipped）✅
 - 验证：双 scope typecheck、architecture 0（planeManager 存量行数例外）、lint 0 errors；累计 33 提交
 
+## 宿主窄方法与 P6 设备矩阵批次（2026-11-05）✅
+- createTask 幂等绑定（bot-trigger-task-bindings 持久化 + threadKey 串行）+ autoReplyGuard 真实占额包装（协议 additive 扩展）✅
+- P6 设备权限矩阵（AttachmentRole/deviceScope/工具矩阵/只读叠加契约，未知值 fail-closed）✅
+- 修复致命评审：actorId 猜机器人 → senderType 事实透传；吊销角色 undefined 直接拒绝 ✅
+- 测试：服务 288 / host 70 / shared+desktop 31；双 scope typecheck、architecture 0、lint 0 errors；累计 38 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
