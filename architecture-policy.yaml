@@ -1130,5 +1130,6 @@ exceptions:
       - apps/zcode-cli/packages/core/src/tool/capability-ticket-context.ts
       - apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/command-admission.ts
       - packages/desktop/src/host/capabilityTicketAdmissionChannel.ts
+      - packages/desktop/src/host/capabilityTicketAuditStore.ts
       - packages/services/src/zcode-agent/capabilityTicketAdmissionRelay.ts
     reason: P6 收口三项接线（C2 工具执行票据上下文、Desktop→远端宿主 admission relay 通道、Services relay authority）各需一个职责单一的新文件；分别落在未受管的 core tool/desktop host/services zcode-agent 目录，沿用本表逐文件准入先例，不移动既有模块边界，接管整个包不在本次范围内。

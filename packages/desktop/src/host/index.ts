@@ -18,6 +18,7 @@ import { createHostDatabaseStartup } from "./database-startup/hostDatabaseStartu
 import { isOffPeakTerminalStatus } from "@zcode/shared";
 import { createHostNetworkCapture } from "./hostNetworkCapture.js";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { createPluginSandboxRegistrationBridge } from "./pluginSandbox/index.js";
 import { createWindowTopicResourceRelay } from "./windowTopicResourceRelay.js";
 import {
@@ -80,6 +81,7 @@ import {
   buildTaskChangeSummary,
   createHostApiNetworkTransport,
   createSettingServiceWithMigrations,
+  getDataBaseDir,
   OffPeakModelUnavailableError,
   OffPeakPermanentDispatchError,
   type BotProjectConnection,
@@ -173,6 +175,7 @@ import {
   type WindowHostCapabilityTickets,
 } from "./windowHostAttachmentRegistry.js";
 import { createCapabilityTicketBroker } from "./capabilityTicketBroker.js";
+import { createCapabilityTicketAuditStore } from "./capabilityTicketAuditStore.js";
 import { createWindowCapabilityTicketAdmissionChannel } from "./capabilityTicketAdmissionChannel.js";
 import {
   createCapabilityTicketRedeemChannel,
@@ -2778,8 +2781,19 @@ function exposeServicesOnMessagePort(
  * typed skip（见 windowHostAttachmentRegistry 的传输形态登记表）。
  */
 const p6CapabilityTicketsEnabled = process.env["ZCODE_P6_CAPABILITY_TICKETS"] === "1";
+const capabilityTicketAuditStore = p6CapabilityTicketsEnabled
+  ? createCapabilityTicketAuditStore({
+      databasePath: join(getDataBaseDir(), ".zcode", "v2", "capability-tickets.sqlite"),
+    })
+  : undefined;
 const capabilityTicketBroker = p6CapabilityTicketsEnabled
-  ? createCapabilityTicketBroker()
+  ? createCapabilityTicketBroker({
+      ...(capabilityTicketAuditStore ? { audit: capabilityTicketAuditStore } : {}),
+      onAuditRestartInvalidated: (count) =>
+        logger.warn(
+          `capability ticket audit: invalidated ${count} non-terminal row(s) from a previous broker process`,
+        ),
+    })
   : undefined;
 // P6 C2：远端执行宿主的票据 admission 回连权威。频道只注册在已鉴权的 host 连接
 // （desktop-continuous / host capability）反向 server 上，broker/角色权威留在本进程。

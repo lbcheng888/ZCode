@@ -97,6 +97,11 @@
 - 修复 executor↔handlers 运行时环：准入访问器拆到 `commands/command-admission.ts`，handler 不再反向 import executor，避免整组 handler 在不同导入顺序下静默丢失 ✅
 - 验证：双 scope typecheck、architecture 0、lint 0 errors；bootstrap 12346、services 3577、desktop 3004、server-cli 304、client+shared 1951、native addon 8 全绿（bootstrap 全量中 mcp-oauth 跨进程用例单跑通过，属并行负载 flake）✅
 
+## P6 规则匹配与票据审计批次（2026-11-06）✅
+- deviceScope 规则匹配进 PermissionService：无 scope 的 ask/allow 只对 host 生效，无 scope 的 deny 作为安全底线对所有 attachment 生效；规则 schema/类型 additive 支持 `deviceScope` ✅
+- 票据审计持久化：宿主级 `capability-tickets.sqlite` 只记公开字段（无 secret），broker 重启把上一进程未终态行标记 expired 并告警；审计写失败让签发/兑换 fail-loud ✅
+- 测试：core attachment-permission 27、desktop ticket broker+audit 21 通过；双 scope typecheck/lint/architecture 待收口 ✅
+
 ## 已知接缝（登记、非阻塞）
 - 能力票据吊销只在下一条命令 admission 生效（CLI turn 内无宿主控制面通道复核 epoch；`revocationEpoch` 只是签发快照）
 - 能力票据 `web-remote-replayable` relay 形态不投递 secret（只转发 `Uint8Array`，控制帧不可达）；该形态不签发票据、保留无票据旧路径（desktop-continuous renderer 信封已自动携带 `capabilityTicketId`）

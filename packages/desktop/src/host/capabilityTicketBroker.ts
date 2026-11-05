@@ -89,11 +89,25 @@ interface TicketRecord {
  */
 const CAPABILITY_TICKET_TERMINAL_RETENTION_MS = 10 * 60_000;
 
+/**
+ * 票据审计端口（spec §2.3 规则 6）。只写公开字段，**绝不写 secret**。
+ * 写失败必须原样上抛：票据签发/兑换不能在该记的审计没记上时继续。
+ */
+export interface CapabilityTicketAuditPort {
+  record(ticket: CapabilityTicket): void;
+  /** broker 重启时把上一进程未终态行标记失效，返回受影响行数；不存/不复活票据。 */
+  invalidateNonTerminal(at: number): number;
+}
+
 export interface CapabilityTicketBrokerOptions {
   now?: () => number;
   createTicketId?: () => string;
   createSecret?: () => string;
   maxTtlMs?: number;
+  /** 缺省 = 不持久化（测试/未启用）；生产组合根注入 SQLite 审计库。 */
+  audit?: CapabilityTicketAuditPort;
+  /** broker 重启失效旧行后的观测钩子（宿主日志用）。 */
+  onAuditRestartInvalidated?: (count: number) => void;
 }
 
 /**
@@ -171,8 +185,15 @@ export function createCapabilityTicketBroker(
   const createTicketId = options.createTicketId ?? defaultCreateTicketId;
   const createSecret = options.createSecret ?? defaultCreateSecret;
   const maxTtlMs = options.maxTtlMs ?? CAPABILITY_TICKET_MAX_TTL_MS;
+  const audit = options.audit;
   const records = new Map<string, TicketRecord>();
   let revocationEpoch = 0;
+  // spec §2.3 规则 6：broker 重启 = 旧进程未终态票据全部失效。审计库只做记录，
+  // 不据此恢复任何票据；失效计数交给宿主告警，不能静默。
+  if (audit !== undefined) {
+    const invalidated = audit.invalidateNonTerminal(now());
+    if (invalidated > 0) options.onAuditRestartInvalidated?.(invalidated);
+  }
 
   function issue(request: IssueCapabilityTicketRequest): IssuedCapabilityTicket {
     const parsed = issueCapabilityTicketRequestSchema.safeParse(request);
@@ -232,6 +253,15 @@ export function createCapabilityTicketBroker(
       seenNonces: new Set<string>(),
       lastSeq: undefined,
     });
+    if (audit !== undefined) {
+      try {
+        audit.record(ticket);
+      } catch (error) {
+        // 审计写失败 = 签发失败；不留下一个只存在于内存、无法审计的票据。
+        records.delete(ticketId);
+        throw error;
+      }
+    }
     return { ticket, ticketSecret };
   }
 
@@ -241,11 +271,13 @@ export function createCapabilityTicketBroker(
     ticket.revokedAt = at;
     revocationEpoch += 1;
     ticket.revocationEpoch = revocationEpoch;
+    audit?.record(ticket);
   }
 
   function markExpired(ticket: CapabilityTicket): void {
     if (ticket.state === "revoked" || ticket.state === "expired") return;
     ticket.state = "expired";
+    audit?.record(ticket);
   }
 
   function revoke(ticketId: string): boolean {
@@ -419,6 +451,7 @@ export function createCapabilityTicketBroker(
       record.ticket.redeemedAt = at;
       record.lastSeq = input.seq;
     }
+    audit?.record(record.ticket);
     // 写操作在非 host 角色下是 ask：兑换成功只代表票据有效，不代表宿主已确认（spec §1.3）。
     // 当前签发侧已禁止非 host 申请 workspace_write，这里仍把结论写进句柄，执行端不得省略。
     const requiresHostConfirmation =
