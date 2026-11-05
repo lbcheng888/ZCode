@@ -1,6 +1,7 @@
 // P6 设备权限矩阵在生产准入层的叠加行为（spec §1.3 矩阵 + §1.5 D1/D4/D5）。
 // 只测 PermissionService 的最终结论：附件限制必须叠加在既有有序管线之后，且只能收紧。
 import { describe, expect, it } from "vitest";
+import type { PermissionRuleValue } from "@zcode/contracts";
 import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
 import {
   PermissionService,
@@ -199,5 +200,57 @@ describe("P6 attachment 角色叠加", () => {
     expect(service.checkPermission(context("Bash", downgraded), bashCapability).decision).toBe(
       "deny",
     );
+  });
+
+  it("deviceScope：无 scope 的 allow 只对 host 生效，deny 规则全局生效", () => {
+    const service = new PermissionService();
+    const interactiveRemote: HostAttachmentAdmissionFacts = {
+      source: "remote",
+      attachment: { attachmentId: "phone-1", role: "interactive" },
+    };
+    const legacyAllow = { toolName: "Read" };
+    const scopedInteractiveAllow = {
+      toolName: "Read",
+      deviceScope: { roles: ["interactive" as const] },
+    };
+    const scopedHostAllow = { toolName: "Read", deviceScope: { roles: ["host" as const] } };
+    const seen: (readonly PermissionRuleValue[])[] = [];
+    const policy = {
+      evaluateRules: (
+        _behavior: "allow" | "deny" | "ask",
+        rules: readonly PermissionRuleValue[],
+      ) => {
+        seen.push([...rules]);
+        return false;
+      },
+      suggestedPermissionUpdates: [],
+    };
+
+    // 远端 interactive：只有显式 roles 命中的规则进入评估；桌面 legacy allow 不继承。
+    service.checkPermission(
+      context("Read", interactiveRemote, "build"),
+      readCapability,
+      { version: 1, allow: [legacyAllow, scopedInteractiveAllow, scopedHostAllow] },
+      policy,
+    );
+    expect(seen.at(-1)).toEqual([scopedInteractiveAllow]);
+
+    // host：legacy allow 与 host-scoped allow 生效，interactive-scoped 不命中。
+    seen.length = 0;
+    service.checkPermission(
+      context("Read", hostLocal, "build"),
+      readCapability,
+      { version: 1, allow: [legacyAllow, scopedInteractiveAllow, scopedHostAllow] },
+      policy,
+    );
+    expect(seen.at(-1)).toEqual([legacyAllow, scopedHostAllow]);
+
+    // deny 是安全底线：无 scope 的 deny 对远端同样生效，不能因不继承规则而放宽。
+    expect(
+      service.checkPermission(context("Read", interactiveRemote, "build"), readCapability, {
+        version: 1,
+        deny: [{ toolName: "Read" }],
+      }).decision,
+    ).toBe("deny");
   });
 });

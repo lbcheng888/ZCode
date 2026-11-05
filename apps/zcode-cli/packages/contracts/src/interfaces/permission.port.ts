@@ -2,6 +2,7 @@
 // Permission Broker Port - async client permission boundary
 // ============================================================
 
+import type { DeviceScope } from "@zcode/shared";
 import type { PermissionDecision } from "../events/session.events.js";
 import type { ModelToolSideEffectScope } from "../model/index.js";
 import type { CollaborationMode, RiskLevel } from "./session.port.js";
@@ -19,6 +20,8 @@ export type PermissionCapabilityGroup =
 export interface PermissionRuleValue {
   toolName: string;
   ruleContent?: string;
+  /** P6 §1.3：规则级设备范围；缺省规则只对 host 生效。 */
+  deviceScope?: DeviceScope;
 }
 
 export interface PermissionRuleset {

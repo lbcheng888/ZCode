@@ -23,6 +23,8 @@ import {
   composeAttachmentPermissionDecision,
   evaluateAttachmentToolRestriction,
   parseAttachmentRole,
+  ruleAppliesToAttachment,
+  type AttachmentContext,
 } from "@zcode/shared";
 import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
 import {
@@ -619,6 +621,21 @@ export class PermissionService {
     return capability.destructive || !capability.readOnly || capability.sideEffectScope !== "none";
   }
 
+  /** 把宿主可信 attachment 事实投影成规则匹配用的上下文（角色已由准入层校验）。 */
+  private attachmentContextOf(context: PermissionContext): AttachmentContext | undefined {
+    const attachment = context.attachment?.attachment;
+    if (!attachment) return undefined;
+    return {
+      attachmentId: attachment.attachmentId,
+      role: parseAttachmentRole(attachment.role),
+      ...(attachment.deviceKind !== undefined ? { deviceKind: attachment.deviceKind } : {}),
+      ...(attachment.deviceId !== undefined ? { deviceId: attachment.deviceId } : {}),
+      ...(attachment.workspaceIdentity !== undefined
+        ? { workspaceIdentity: attachment.workspaceIdentity }
+        : {}),
+    };
+  }
+
   private matchesProjectRules(
     ruleset: PermissionRuleset | null | undefined,
     behavior: PermissionBehavior,
@@ -628,8 +645,18 @@ export class PermissionService {
   ): boolean {
     const rules = ruleset?.[behavior];
     if (!Array.isArray(rules)) return false;
-    const toolRules = rules.filter((rule) =>
-      this.matchesRuleScope(rule, context.toolName, capability),
+    // P6 §1.3 匹配规则 2：无 deviceScope 的既有规则只对 host 生效，防止桌面 allow
+    // 规则被远端 attachment 继承；带 scope 的规则按角色/设备/附件精确命中。
+    const attachmentContext = this.attachmentContextOf(context);
+    const source = context.attachment?.source ?? "local-host";
+    const toolRules = rules.filter(
+      (rule) =>
+        // deny 是安全底线：无 scope 的 deny 规则对全部 attachment 生效，不能因为
+        // 远端角色不“继承”桌面规则而放宽；ask/allow 才按 host-only 过滤。
+        (rule.deviceScope === undefined && behavior === "deny"
+          ? true
+          : ruleAppliesToAttachment(rule.deviceScope, attachmentContext, source)) &&
+        this.matchesRuleScope(rule, context.toolName, capability),
     );
     if (toolRules.length === 0) return false;
     if (rulePolicy) return rulePolicy.evaluateRules(behavior, toolRules);

@@ -6,6 +6,7 @@
 // 旧协议死亡（zcode-protocol/index.ts 删除）后，这是该协议面的唯一幸存面。
 
 import { z } from "zod";
+import { deviceScopeSchema } from "./attachment-role.js";
 import { modelSelectionSchema } from "./model-selection.js";
 
 const nonEmptyString = z.string().trim().min(1);
@@ -55,6 +56,9 @@ export const zcodePermissionRuleValueSchema = z
   .object({
     toolName: nonEmptyString,
     ruleContent: z.string().optional(),
+    // P6 §1.3：规则级设备范围。缺省规则只对 host 生效；匹配由 core PermissionService
+    // 调 ruleAppliesToAttachment 执行，wire/storage 只负责 additive 透传。
+    deviceScope: deviceScopeSchema.optional(),
   })
   .strict();
 export const zcodePermissionUpdateSchema = z
