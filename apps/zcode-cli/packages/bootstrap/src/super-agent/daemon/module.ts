@@ -4,7 +4,16 @@
  */
 export const superAgentDaemonModule = {
   id: "super-agent-daemon",
-  requires: ["shared", "super-agent-adjudication", "super-agent-intake", "super-agent-trigger", "zcode-cli"],
+  requires: [
+    "shared",
+    "super-agent-adjudication",
+    "super-agent-intake",
+    "super-agent-trigger",
+    "zcode-cli",
+    // headless 裁决会话复用进程 Provider Registry 的路径契约（Built-in/Personal
+    // Config env 键与文件布局）；不复制字符串。
+    "provider-node",
+  ],
   provides: ["super-agent-daemon"],
   publicEntrypoints: ["index.ts", "contract.ts"],
 } as const;

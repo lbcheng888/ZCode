@@ -66,6 +66,10 @@ export interface RequestLedgerEntry {
   route: WireFormat;
   stream: boolean;
   toolResultCount: number;
+  /** 请求携带的工具名（两种 wire 同一集合；空数组 = 零工具请求，如裁决主闸）。 */
+  toolNames: readonly string[];
+  /** 请求声明的输出上限（wire 的 max_tokens / max_completion_tokens；未声明 = undefined）。 */
+  maxOutputTokens?: number;
   inFlightAtArrival: number;
   verdict: Verdict;
   /** 实际写出的状态码；reset / hang 没有。 */
@@ -102,7 +106,7 @@ export function requestLedger(server: FakeProviderServer): string {
       entry.closedByClient ? "closedByClient" : undefined,
       entry.servedStatus !== undefined ? `served:${entry.servedStatus}` : undefined,
     ].filter((flag) => flag !== undefined);
-    return `#${entry.ordinal} ${verdict} toolResults=${entry.toolResultCount}${flags.length > 0 ? ` ${flags.join(" ")}` : ""}`;
+    return `#${entry.ordinal} ${verdict} toolResults=${entry.toolResultCount} tools=[${entry.toolNames.join(",")}] maxOut=${entry.maxOutputTokens ?? "none"}${flags.length > 0 ? ` ${flags.join(" ")}` : ""}`;
   });
   return [`request ledger (${server.requests.length}):`, ...rows].join("\n");
 }
@@ -140,6 +144,29 @@ function countToolResults(route: WireFormat, body: Record<string, unknown>): num
     }
   }
   return count;
+}
+
+/** Anthropic `tools[].name` / OpenAI `tools[].function.name` → 名称集合（保持到达顺序）。 */
+function toolNamesOf(route: WireFormat, body: Record<string, unknown>): string[] {
+  const rawTools = Array.isArray(body.tools) ? body.tools : [];
+  const names: string[] = [];
+  for (const raw of rawTools) {
+    const tool = asRecord(raw);
+    if (!tool) continue;
+    const name =
+      route === "openai-chat-completions" ? asRecord(tool.function)?.name : tool.name;
+    if (typeof name === "string" && name.length > 0) names.push(name);
+  }
+  return names;
+}
+
+/** 两种 wire 的输出上限字段同义（Anthropic max_tokens / OpenAI max_completion_tokens）。 */
+function maxOutputTokensOf(body: Record<string, unknown>): number | undefined {
+  for (const key of ["max_tokens", "max_completion_tokens"]) {
+    const value = body[key];
+    if (typeof value === "number" && Number.isInteger(value)) return value;
+  }
+  return undefined;
 }
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -272,6 +299,8 @@ async function handle(
   }
   const stream = body.stream === true;
   const toolResultCount = countToolResults(route, body);
+  const toolNames = toolNamesOf(route, body);
+  const maxOutputTokens = maxOutputTokensOf(body);
 
   const entry: RequestLedgerEntry = {
     ordinal: state.nextOrdinal++,
@@ -279,6 +308,8 @@ async function handle(
     route,
     stream,
     toolResultCount,
+    toolNames,
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     inFlightAtArrival: state.inFlight,
     verdict: { kind: "serve" },
     closedByClient: false,

@@ -30,3 +30,16 @@ export {
   type DaemonPlaneManagerOptions,
   DaemonPlaneManager,
 } from "./planeManager.js";
+
+export {
+  ADJUDICATION_MAX_OUTPUT_TOKENS,
+  AdjudicationSessionUnavailableError,
+  type AdjudicationSessionAssembly,
+  type CreateAdjudicationSessionAssembly,
+  type HeadlessAdjudicationModelSource,
+  createUnavailableAdjudicationSession,
+  createHeadlessAdjudicationSession,
+  createLazyAdjudicationSession,
+  createEnvironmentAdjudicationSessionAssembly,
+  resolveHeadlessProviderRuntimeEnv,
+} from "./adjudicationSession.js";

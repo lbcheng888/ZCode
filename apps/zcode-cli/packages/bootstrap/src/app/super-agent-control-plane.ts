@@ -83,9 +83,8 @@ import {
 } from "../super-agent/trigger/index.js";
 import {
   createAdjudicationDriver,
-  type AdjudicationDeliveryPort,
-  type AdjudicationModelSessionPort,
-  type SuperAgentAdjudicationContract,
+  type AdjudicationDeliveryPort, type AdjudicationModelSessionRequest,
+  type AdjudicationModelSessionPort, type SuperAgentAdjudicationContract,
 } from "../super-agent/adjudication/index.js";
 
 /** CommandInbox 在线投递面（= 协议宿主 ConversationV4Gateway.handleCommand 的形状）。 */
@@ -507,6 +506,8 @@ export function createRuntimeAdjudicationSession(deps: {
   ) => Promise<WorkspaceGenerateTextResult>;
   resolveSelection: () => ModelSelection | undefined;
   abortSignal: AbortSignal;
+  /** 按本批候选数推导输出预算（已按模型 spec 钳制）；缺席 = 沿用既有语义（headless daemon 必须提供）。 */
+  resolveMaxOutputTokens?: (request: AdjudicationModelSessionRequest) => number | undefined;
 }): AdjudicationModelSessionPort {
   return {
     async run(request) {
@@ -524,6 +525,7 @@ export function createRuntimeAdjudicationSession(deps: {
           prompt: request.prompt,
           tools: [],
           querySource: "super_agent_adjudication",
+          maxOutputTokens: deps.resolveMaxOutputTokens?.(request),
         },
         { abortSignal: deps.abortSignal },
       );

@@ -145,6 +145,11 @@ export interface AdjudicationModelSessionRequest {
   sessionKey: string;
   prompt: string;
   /**
+   * 本批候选数（prompt 已包含同样数量的候选块）。宿主的 verdict 输出预算必须按此
+   * 推导——固定上限会在满批（32 个 accept × M6 五字段卡）下截断 JSON，整批降级。
+   */
+  candidateCount: number;
+  /**
    * 会话级只读工具白名单（M3 工具面：trigger/订阅/目标摘要/recall 只读）。
    * 空数组 = 零内置工具；未知未来工具默认排除（fail-closed 主闸）。
    */

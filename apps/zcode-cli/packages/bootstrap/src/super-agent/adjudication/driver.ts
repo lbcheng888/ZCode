@@ -283,6 +283,7 @@ export function createAdjudicationDriver(
         workspaceIdentity,
         sessionKey,
         prompt,
+        candidateCount: rows.length,
         toolAllowlist: ADJUDICATION_TOOL_ALLOWLIST,
         toolDisallowlist: ADJUDICATION_TOOL_DISALLOWLIST,
         modelTier: "adjudicator",

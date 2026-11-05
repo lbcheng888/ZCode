@@ -22,7 +22,12 @@ import {
 } from "@zcode/shared/super-agent-control-plane-protocol";
 
 import { openSuperAgentDatabase } from "../super-agent/storage/index.js";
-import type { AdjudicationModelSessionPort } from "../super-agent/adjudication/index.js";
+import {
+  createEnvironmentAdjudicationSessionAssembly,
+  createLazyAdjudicationSession,
+  type AdjudicationSessionAssembly,
+  type CreateAdjudicationSessionAssembly,
+} from "../super-agent/daemon/adjudicationSession.js";
 import {
   DaemonPlaneManager,
   resolveTasksIndexDatabasePath,
@@ -149,18 +154,6 @@ export function assertControlPlaneStorageRoot(dataBaseDir: string): {
   return { superAgentDatabasePath, tasksIndexDatabasePath };
 }
 
-/** 裁决模型会话：headless child 的 model-only 生成面尚未装配（§8-7 阻塞项）。 */
-const UNIMPLEMENTED_ADJUDICATION_SESSION: AdjudicationModelSessionPort = {
-  async run() {
-    throw new Error(
-      "super-agent daemon 裁决模型会话未装配：headless child 的 model-only 生成面（spec §8-7）待定；事件保持未决，不伪造裁决结论",
-    );
-  },
-  destroySession() {
-    // 无会话可销毁。
-  },
-};
-
 export interface StartControlPlaneDaemonOptions {
   config: ControlPlaneEntryConfig;
   /**
@@ -179,6 +172,14 @@ export interface StartControlPlaneDaemonOptions {
   /** 测试可在临时目录绑定端点；缺省按 serverRoot 推导。 */
   endpoint?: string;
   platform?: NodeJS.Platform;
+  /**
+   * 裁决会话装配钩子（惰性：首个裁决批才调用）。生产缺省
+   * {@link createEnvironmentAdjudicationSessionAssembly}；测试可注入真实 provider
+   * Registry 替身或 hang 端口，仍用入口自己的 abortSignal 验证 shutdown 取消在途调用。
+   */
+  adjudicationSessionAssembly?: CreateAdjudicationSessionAssembly;
+  /** provider Registry 读取的 env；缺省 process.env（生产 CLI 传 process.env）。 */
+  env?: Record<string, string | undefined>;
 }
 
 export interface RunningControlPlaneDaemon {
@@ -236,6 +237,9 @@ export async function startControlPlaneDaemon(
   let rpc: Awaited<ReturnType<typeof createControlPlaneRpcServer>> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let manager: DaemonPlaneManager | undefined;
+  let adjudication: AdjudicationSessionAssembly | undefined;
+  /** shutdown/父断连先 abort：在途裁决模型请求随信号取消，再收口 plane/库。 */
+  const abortController = new AbortController();
   /** 曾建立过 Core 数据面连接后断开的降级证据（§2.4 degraded）。 */
   let hadCoreChannel = false;
   let degraded: { reason: string; since: number } | undefined;
@@ -254,6 +258,13 @@ export async function startControlPlaneDaemon(
       clearInterval(heartbeat);
       heartbeat = undefined;
     }
+    // 先 abort 再收口：daemon 退出时在途裁决模型请求必须随信号取消，不能在关库后
+    // 继续写 decision_log（否则产生关库后的错误噪音或半结算）。
+    try {
+      abortController.abort(new Error("control-plane daemon shutting down"));
+    } catch (error) {
+      recordError(undefined, error, "daemon.abort");
+    }
     try {
       await rpc?.close();
     } catch (error) {
@@ -263,6 +274,12 @@ export async function startControlPlaneDaemon(
       await manager?.shutdown();
     } catch (error) {
       recordError(undefined, error, "daemon.planes.shutdown");
+    }
+    try {
+      // 惰性装配：未装 provider Registry 时 dispose 立即返回。
+      await adjudication?.dispose();
+    } catch (error) {
+      recordError(undefined, error, "daemon.adjudication.dispose");
     }
     try {
       database?.close();
@@ -304,11 +321,27 @@ export async function startControlPlaneDaemon(
     const paths = assertControlPlaneStorageRoot(options.config.dataBaseDir);
     database = await openSuperAgentDatabase({ databasePath: paths.superAgentDatabasePath });
 
+    // 裁决会话惰性装配：首个裁决批才启动 provider Registry（Core 物化 Built-in
+    // Config 存在启动顺序竞态，spec §8-7）；不可用即 typed 失败端口，候选留 pending。
+    adjudication = createLazyAdjudicationSession({
+      abortSignal: abortController.signal,
+      createAssembly:
+        options.adjudicationSessionAssembly ??
+        ((assemblyInput) =>
+          createEnvironmentAdjudicationSessionAssembly({
+            env: options.env ?? process.env,
+            dataBaseDir: options.config.dataBaseDir,
+            abortSignal: assemblyInput.abortSignal,
+            onUnavailable: (error) => {
+              recordError(undefined, error, "daemon.adjudication.unavailable");
+            },
+          })),
+    });
     manager = new DaemonPlaneManager({
       dataBaseDir: options.config.dataBaseDir,
       serverRoot: options.config.serverRoot,
       database,
-      adjudicationSession: UNIMPLEMENTED_ADJUDICATION_SESSION,
+      adjudicationSession: adjudication.session,
       mandateGate: options.config.mandateGate,
       now,
       onPlaneError: (workspaceIdentity, error, context) =>
@@ -362,6 +395,8 @@ export async function startControlPlaneDaemon(
     if (finished) {
       // 启动窗口内已收到 shutdown/disconnect：不再 ready，收口已创建的 socket/db。
       await rpc.close();
+      abortController.abort(new Error("control-plane daemon shutting down"));
+      await adjudication.dispose();
       database.close();
       return { done, shutdown };
     }
@@ -430,9 +465,19 @@ export async function startControlPlaneDaemon(
       message: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
     try {
+      abortController.abort(new Error("control-plane daemon startup failed"));
+    } catch {
+      // abort 不覆盖 fatal 原因。
+    }
+    try {
       await rpc?.close();
     } catch {
       // 启动收口失败不覆盖 fatal 原因。
+    }
+    try {
+      await adjudication?.dispose();
+    } catch {
+      // 同上。
     }
     try {
       database?.close();
@@ -483,6 +528,7 @@ export async function runSuperAgentControlPlaneCommand(
 
   const daemon = await startControlPlaneDaemon({
     config,
+    env: options.env,
     ...(options.peerGuard ? { peerGuard: options.peerGuard } : {}),
     ...(authTokenFile ? { authTokenFile } : {}),
     send: (message) => {

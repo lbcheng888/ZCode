@@ -16,6 +16,11 @@ export interface CannedModelOptions {
   submitPayload?: unknown;
   /** 「可见输出」帧里的文本，缺省 "Working."。 */
   visibleText?: string;
+  /**
+   * 纯文本应答（无工具调用）。给出时每轮都返回同一文本、`finish_reason` 为正常结束；
+   * 用于非工具型 model-only 调用（如裁决 verdict JSON）。与 turns/submitPayload 互斥。
+   */
+  textReply?: string;
 }
 
 const DEFAULT_CANNED_TURNS = 3;
@@ -31,23 +36,36 @@ export const SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
 } as const;
 
-interface CannedTurn {
+interface CannedToolTurn {
+  kind: "tool";
   toolName: string;
   toolInput: unknown;
   toolCallId: string;
 }
 
-/** 罐头模型：对话进度 → 这一轮该发哪个工具调用。纯函数。 */
+interface CannedTextTurn {
+  kind: "text";
+  text: string;
+}
+
+export type CannedTurn = CannedToolTurn | CannedTextTurn;
+
+/** 罐头模型：对话进度 → 这一轮该发哪个工具调用 / 纯文本。纯函数。 */
 export function cannedTurn(toolResultCount: number, options: CannedModelOptions): CannedTurn {
+  if (options.textReply !== undefined) {
+    return { kind: "text", text: options.textReply };
+  }
   const turns = options.turns ?? DEFAULT_CANNED_TURNS;
   if (toolResultCount < turns) {
     return {
+      kind: "tool",
       toolName: "Glob",
       toolInput: CANNED_GLOB_INPUT,
       toolCallId: `call-glob-${toolResultCount + 1}`,
     };
   }
   return {
+    kind: "tool",
     toolName: SUBMIT_RESULT_TOOL_NAME,
     toolInput: { result: options.submitPayload ?? DEFAULT_SUBMIT_PAYLOAD },
     toolCallId: `call-submit-${toolResultCount + 1}`,
@@ -97,8 +115,22 @@ function anthropicVisibleText(index: number, text: string): string {
   ].join("");
 }
 
+/** Anthropic 流的纯文本收尾（stop_reason=end_turn + usage + message_stop）。 */
+function anthropicTextFrames(ordinal: number, text: string): string {
+  return [
+    anthropicMessageStart(ordinal),
+    anthropicVisibleText(0, text),
+    sseFrame("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: USAGE_OUT },
+    }),
+    sseFrame("message_stop", { type: "message_stop" }),
+  ].join("");
+}
+
 /** Anthropic 流的工具调用块 + 收尾（input 拆成两个 delta，逼真一点）。 */
-function anthropicToolUseFrames(index: number, turn: CannedTurn): string {
+function anthropicToolUseFrames(index: number, turn: CannedToolTurn): string {
   const json = JSON.stringify(turn.toolInput);
   const half = Math.ceil(json.length / 2);
   return [
@@ -128,6 +160,18 @@ function anthropicToolUseFrames(index: number, turn: CannedTurn): string {
 }
 
 function anthropicNonStreamBody(ordinal: number, turn: CannedTurn): unknown {
+  if (turn.kind === "text") {
+    return {
+      id: `msg_${ordinal}`,
+      type: "message",
+      role: "assistant",
+      model: MODEL_NAME,
+      content: [{ type: "text", text: turn.text }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: USAGE_IN, output_tokens: USAGE_OUT },
+    };
+  }
   return {
     id: `msg_${ordinal}`,
     type: "message",
@@ -169,7 +213,23 @@ function openaiVisibleChunk(ordinal: number, text: string): string {
 }
 
 /** OpenAI 流的工具调用块 + finish + usage + [DONE]。 */
-function openaiToolCallFrames(ordinal: number, turn: CannedTurn): string {
+function openaiTextFrames(ordinal: number, text: string): string {
+  return [
+    openaiRoleChunk(ordinal),
+    openaiVisibleChunk(ordinal, text),
+    openaiChunk(ordinal, { delta: {}, finish_reason: "stop" }),
+    openaiChunk(ordinal, undefined, {
+      usage: {
+        prompt_tokens: USAGE_IN,
+        completion_tokens: USAGE_OUT,
+        total_tokens: USAGE_IN + USAGE_OUT,
+      },
+    }),
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+function openaiToolCallFrames(ordinal: number, turn: CannedToolTurn): string {
   const json = JSON.stringify(turn.toolInput);
   const half = Math.ceil(json.length / 2);
   return [
@@ -197,6 +257,22 @@ function openaiToolCallFrames(ordinal: number, turn: CannedTurn): string {
 }
 
 function openaiNonStreamBody(ordinal: number, turn: CannedTurn): unknown {
+  if (turn.kind === "text") {
+    return {
+      id: `chatcmpl-${ordinal}`,
+      object: "chat.completion",
+      created: 1,
+      model: MODEL_NAME,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: turn.text },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: USAGE_IN, completion_tokens: USAGE_OUT, total_tokens: USAGE_IN + USAGE_OUT },
+    };
+  }
   return {
     id: `chatcmpl-${ordinal}`,
     object: "chat.completion",
@@ -237,6 +313,11 @@ export function visibleFrame(route: WireFormat, ordinal: number, text: string): 
 }
 
 export function successStream(route: WireFormat, ordinal: number, turn: CannedTurn): string {
+  if (turn.kind === "text") {
+    return route === "anthropic-messages"
+      ? anthropicTextFrames(ordinal, turn.text)
+      : openaiTextFrames(ordinal, turn.text);
+  }
   return route === "anthropic-messages"
     ? anthropicMessageStart(ordinal) + anthropicToolUseFrames(0, turn)
     : openaiRoleChunk(ordinal) + openaiToolCallFrames(ordinal, turn);

@@ -23,3 +23,9 @@ peer 守卫（首帧显式握手 token + 平台 peer 可达时补充）、per-wo
 - `createControlPlanePeerGuard` / `parseTrustedPids`：peer 判定。
 - `createControlPlaneRpcServer`：JSONL 双向 RPC server（方法分派由 entry 注入）。
 - `DaemonPlaneManager`：per-workspace plane 生命周期（ensure/ingest/lease 读面）。
+- `createLazyAdjudicationSession` / `createEnvironmentAdjudicationSessionAssembly`：
+  headless child 的裁决 model-only 会话（复用 `createRuntimeAdjudicationSession` +
+  `AgentRuntime.generateWorkspaceText`，tools 恒空）；首个裁决批才启动 provider
+  Registry（避开 Core 物化 Built-in Config 的启动顺序竞态），shutdown 先 abort 信号。
+- `AdjudicationSessionUnavailableError` / `createUnavailableAdjudicationSession`：
+  provider 配置/凭据不可用的 typed 失败端口；候选留 pending，绝不伪造 verdict。
