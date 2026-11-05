@@ -19,6 +19,7 @@ async function fixture(t) {
   for (const name of ["bin", "agent", "web", "server"]) {
     await mkdir(join(root, name), { recursive: true });
   }
+  await cp(runnerSource, join(root, "bin/chengcode.mjs"));
   await cp(runnerSource, join(root, "bin/zcode.mjs"));
   await writeFile(join(root, "package.json"), JSON.stringify({ type: "module", version: "1.2.3" }));
   await writeFile(
@@ -65,9 +66,11 @@ test("help exposes Web mode and preserves CLI help; version uses the distributio
   const { runner } = await fixture(t);
   assert.equal((await exec(process.execPath, [runner, "--version"])).stdout.trim(), "1.2.3");
   const help = (await exec(process.execPath, [runner, "--help"])).stdout;
-  assert.match(help, /zcode --web/);
+  assert.match(help, /chengcode --web/);
   assert.match(help, /"argv":\["--help"\]/);
   const webHelp = (await exec(process.execPath, [runner, "--web", "--help"])).stdout;
+  assert.match(webHelp, /chengcode --web/);
+  assert.match(webHelp, /Compatibility alias for `chengcode`/);
   assert.match(webHelp, /--workspace/);
   assert.doesNotMatch(webHelp, /"argv"/);
   await assert.rejects(exec(process.execPath, [runner, "--web", "--unknown"]), /Unknown option/);
@@ -148,7 +151,7 @@ test("Web mode passes its runtime configuration and terminates its child on shut
   assert.deepEqual(await exited, [0, null]);
 });
 
-test("installer creates zcode and the installed command defaults to CLI", async (t) => {
+test("installer creates chengcode and keeps zcode as a compatibility alias", async (t) => {
   const { directory, root } = await fixture(t);
   const downloads = join(directory, "downloads");
   const releaseDir = join(downloads, "releases/1.2.3");
@@ -171,8 +174,14 @@ test("installer creates zcode and the installed command defaults to CLI", async 
     },
   });
   await rm(root, { recursive: true });
-  const result = await exec(join(bin, "zcode"), [], { cwd: directory });
-  assert.deepEqual(JSON.parse(result.stdout).argv, []);
-  const webHelp = await exec(join(bin, "zcode"), ["--web", "--help"]);
-  assert.match(webHelp.stdout, /zcode --web/);
+
+  const chengcode = await exec(join(bin, "chengcode"), [], { cwd: directory });
+  assert.deepEqual(JSON.parse(chengcode.stdout).argv, []);
+  const chengcodeWebHelp = await exec(join(bin, "chengcode"), ["--web", "--help"]);
+  assert.match(chengcodeWebHelp.stdout, /chengcode --web/);
+
+  const zcode = await exec(join(bin, "zcode"), [], { cwd: directory });
+  assert.deepEqual(JSON.parse(zcode.stdout).argv, []);
+  const zcodeWebHelp = await exec(join(bin, "zcode"), ["--web", "--help"]);
+  assert.match(zcodeWebHelp.stdout, /chengcode --web/);
 });

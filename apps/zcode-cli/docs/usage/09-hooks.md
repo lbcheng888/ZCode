@@ -55,10 +55,10 @@ if (event.hook_event_name === "PreToolUse") {
 放在项目运行配置中的 Hook 默认未信任。开启 `hooks.enabled`、打开项目或使用 yolo 都不会自动信任它。
 
 ```sh
-zcode hooks trust review --workspace /absolute/path/to/project --json
-zcode hooks trust grant --workspace /absolute/path/to/project --hook-digest SHA256_FROM_REVIEW
-zcode hooks trust status --workspace /absolute/path/to/project --json
-zcode hooks trust revoke --workspace /absolute/path/to/project --hook-digest SHA256_FROM_REVIEW
+chengcode hooks trust review --workspace /absolute/path/to/project --json
+chengcode hooks trust grant --workspace /absolute/path/to/project --hook-digest SHA256_FROM_REVIEW
+chengcode hooks trust status --workspace /absolute/path/to/project --json
+chengcode hooks trust revoke --workspace /absolute/path/to/project --hook-digest SHA256_FROM_REVIEW
 ```
 
 先审查命令和来源，再使用 review 返回的 digest。需要批量授权当前声明时，使用 `--all-current --bundle-digest SHA256_FROM_REVIEW`；不要省略绑定到当前内容的 digest。

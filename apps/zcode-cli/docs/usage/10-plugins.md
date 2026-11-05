@@ -5,17 +5,17 @@
 ## 常用命令
 
 ```sh
-zcode plugins list --json
-zcode plugins list --available --json
-zcode plugins marketplace list --json
-zcode plugins marketplace add /absolute/path/to/marketplace
-zcode plugins install example-plugin@example-market --scope user
-zcode plugins enable example-plugin@example-market
-zcode plugins disable example-plugin@example-market
-zcode plugins update example-plugin@example-market
-zcode plugins uninstall example-plugin@example-market --keep-data
-zcode plugins marketplace update example-market
-zcode plugins marketplace remove example-market
+chengcode plugins list --json
+chengcode plugins list --available --json
+chengcode plugins marketplace list --json
+chengcode plugins marketplace add /absolute/path/to/marketplace
+chengcode plugins install example-plugin@example-market --scope user
+chengcode plugins enable example-plugin@example-market
+chengcode plugins disable example-plugin@example-market
+chengcode plugins update example-plugin@example-market
+chengcode plugins uninstall example-plugin@example-market --keep-data
+chengcode plugins marketplace update example-market
+chengcode plugins marketplace remove example-market
 ```
 
 示例市场和插件须先存在。`--scope` 支持 `user` 和 `project`；修改项目启用配置时指定对应工作目录。安装、启用、更新和卸载是不同操作，完成后重新查看清单，并用新进程验证。
@@ -57,10 +57,10 @@ manifest 示例：
 验证：
 
 ```sh
-zcode plugins validate /absolute/path/to/example-plugin --json
-zcode plugins list --json
-zcode skills list --json
-zcode commands list --json
+chengcode plugins validate /absolute/path/to/example-plugin --json
+chengcode plugins list --json
+chengcode skills list --json
+chengcode commands list --json
 ```
 
 插件可携带本地可执行内容。安装前审查其 Hook、MCP 命令、依赖和数据访问范围。validate 只检查结构与诊断，不证明插件安全或所有功能可用。兼容 manifest 中的字段也不一定具有运行时实现；以加载诊断为准。

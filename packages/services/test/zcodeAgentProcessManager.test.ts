@@ -414,8 +414,8 @@ describe("resolveDefaultZCodeAgentCommand", () => {
     await manager.disposeWorkspace({ workspacePath });
     gate.commitRecovery(recoveryEpoch);
 
-    await expect(starting).rejects.toThrow("ZCode agent process start was cancelled.");
-    await expect(duplicate).rejects.toThrow("ZCode agent process start was cancelled.");
+    await expect(starting).rejects.toThrow("ChengCode agent process start was cancelled.");
+    await expect(duplicate).rejects.toThrow("ChengCode agent process start was cancelled.");
     await expect(manager.getClient({ workspacePath })).resolves.toBeDefined();
 
     await manager.disposeAllAndWait();

@@ -34,6 +34,16 @@ describe("i18n catalog", () => {
     expect(isUiLocale("fr-FR")).toBe(false);
   });
 
+  it("presents ChengCode as the primary CLI command and zcode as a compatibility alias", () => {
+    for (const locale of SUPPORTED_LOCALES) {
+      const help = getZCodeCopy(locale).cli.help("1.2.3");
+      expect(help.startsWith("ChengCode 1.2.3")).toBe(true);
+      expect(help).toContain("chengcode [command] [options]");
+      expect(help).toContain("zcode [command] [options]");
+      expect(help).toMatch(/alias|别名/);
+    }
+  });
+
   it("keeps all locale catalogs shape-compatible", () => {
     const [firstLocale, ...rest] = SUPPORTED_LOCALES;
     const baseShape = catalogShape(getZCodeCopy(firstLocale));

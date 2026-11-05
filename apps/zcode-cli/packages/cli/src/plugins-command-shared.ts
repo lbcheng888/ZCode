@@ -87,7 +87,7 @@ export function resolveScope(value: string | undefined): PluginScope | undefined
   if (value === "user") return "user";
   if (value === "project") return "workspace";
   if (value === "local") {
-    throw new PluginsUsageError("Scope 'local' is not supported by zcode. Use: user, project");
+    throw new PluginsUsageError("Scope 'local' is not supported by ChengCode. Use: user, project");
   }
   throw new PluginsUsageError(`Invalid scope '${value}'. Use: user, project`);
 }

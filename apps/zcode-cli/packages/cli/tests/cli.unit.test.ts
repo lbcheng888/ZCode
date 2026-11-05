@@ -847,7 +847,10 @@ test("prints localized CLI help with explicit locale", async () => {
   const exitCode = await run(ctx, createPromptDeps());
 
   assert.equal(exitCode, 0);
+  assert.match(ctx.stdout.output(), /^ChengCode /);
   assert.match(ctx.stdout.output(), /用法:/);
+  assert.match(ctx.stdout.output(), /chengcode \[command\]/);
+  assert.match(ctx.stdout.output(), /zcode \[command\].*兼容别名/);
   assert.match(ctx.stdout.output(), /--locale <locale>/);
 });
 
@@ -4042,7 +4045,9 @@ test("prints help with help flag", async () => {
   const exitCode = await run(ctx);
 
   assert.equal(exitCode, 0);
-  assert.match(ctx.stdout.output(), /With no command, zcode opens the full-screen TUI\./);
+  assert.match(ctx.stdout.output(), /^ChengCode /);
+  assert.match(ctx.stdout.output(), /With no command, chengcode opens the full-screen TUI\./);
+  assert.match(ctx.stdout.output(), /zcode \[command\] \[options\].*Compatibility alias/);
   assert.match(ctx.stdout.output(), /Commands:/);
   assert.match(ctx.stdout.output(), /--force-mcs/);
   assert.match(ctx.stdout.output(), /--surface <surface>/);
@@ -4759,7 +4764,7 @@ test("rejects unknown skills subcommands", async () => {
 
   assert.equal(exitCode, 1);
   assert.match(ctx.stderr.output(), /Unknown skills command: missing/);
-  assert.match(ctx.stderr.output(), /Usage: zcode skills \[list\|inspect <name>\]/);
+  assert.match(ctx.stderr.output(), /Usage: chengcode skills \[list\|inspect <name>\]/);
   assert.equal(ctx.stdout.output(), "");
 });
 
@@ -5915,7 +5920,7 @@ test("prints human doctor details with verbose diagnostics", async () => {
     const output = ctx.stdout.output();
 
     assert.equal(exitCode, 0);
-    assert.match(output, /zcode doctor/);
+    assert.match(output, /ChengCode doctor/);
     assert.match(output, /process: zcode-cli/);
     assert.match(output, /execPath:/);
     assert.match(output, /cwd:/);
@@ -6612,7 +6617,7 @@ test("headless prompt reports exact Workspace Hook pretrust diagnostics without 
   assert.equal(ctx.stdout.output(), "ok\n");
   assert.match(ctx.stderr.output(), /Workspace Hooks skipped: workspace_hooks_pending_trust/);
   assert.match(ctx.stderr.output(), new RegExp("a{64}"));
-  assert.match(ctx.stderr.output(), /zcode hooks trust review/);
+  assert.match(ctx.stderr.output(), /chengcode hooks trust review/);
 });
 
 test("headless rollout-off diagnostics preserve the runtime feature-disabled reason", async () => {

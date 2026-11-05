@@ -1110,6 +1110,30 @@ describe("fileService", () => {
         expect(synced.content).toContain("my-private-assets/");
       });
 
+      it("migrates the legacy ZCode defaults marker without dropping custom rules", async () => {
+        const rootPath = makeTempDir("zcode-file-service-legacy-marker-");
+        writeFileSync(join(rootPath, ".gitignore"), "out/\n");
+        const legacyContent = [
+          "out/",
+          "# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====",
+          "node_modules/",
+          "# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----",
+          "my-private-assets/",
+          "",
+        ].join("\n");
+        writeFileSync(join(rootPath, ".zcodeignore"), legacyContent);
+
+        const service = createFileService();
+        const synced = await service.applyWorkspaceFileSearchIgnoreTransform({
+          rootPath,
+          transform: "sync-gitignore",
+        });
+        // 旧标记仍可定位分区：自定义规则保留，标记改写为当前品牌。
+        expect(synced.content).toContain("my-private-assets/");
+        expect(synced.content).toContain("ChengCode 默认排除规则");
+        expect(synced.content).not.toContain("以上为 ZCode 默认排除规则");
+      });
+
       it("resets only the defaults section while keeping gitignore and custom rules", async () => {
         const rootPath = makeTempDir("zcode-file-service-section-reset-");
         writeFileSync(join(rootPath, ".gitignore"), "out/\n");

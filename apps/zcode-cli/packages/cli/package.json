@@ -2,8 +2,9 @@
   "name": "@zcode/cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Main CLI application for zcode",
+  "description": "Main CLI application for ChengCode",
   "bin": {
+    "chengcode": "./dist/zcode.cjs",
     "zcode": "./dist/zcode.cjs"
   },
   "files": [

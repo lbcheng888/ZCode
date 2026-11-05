@@ -3,16 +3,16 @@
 ## 常用入口
 
 ```sh
-zcode
-zcode --prompt "任务说明" --cwd /absolute/path/to/project --mode yolo --json
-zcode doctor --json
-zcode skills list --json
-zcode commands list --json
-zcode plugins list --json
-zcode hooks trust status --workspace /absolute/path/to/project --json
+chengcode
+chengcode --prompt "任务说明" --cwd /absolute/path/to/project --mode yolo --json
+chengcode doctor --json
+chengcode skills list --json
+chengcode commands list --json
+chengcode plugins list --json
+chengcode hooks trust status --workspace /absolute/path/to/project --json
 ```
 
-无参数进入 TUI。`--prompt`/`-p` 必须带非空文本；不要把 `-p` 当作无需值的开关，也不要用裸位置参数替代 prompt。`app-server` 是协议服务入口，不是批量任务的普通问答命令。
+无参数进入 TUI（`zcode` 保留为兼容别名）。`--prompt`/`-p` 必须带非空文本；不要把 `-p` 当作无需值的开关，也不要用裸位置参数替代 prompt。`app-server` 是协议服务入口，不是批量任务的普通问答命令。
 
 ## 参数
 

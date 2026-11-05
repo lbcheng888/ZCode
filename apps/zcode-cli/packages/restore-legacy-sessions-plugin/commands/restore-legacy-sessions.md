@@ -1,5 +1,5 @@
 ---
-description: Select and restore a legacy ZCode session.
+description: Select and restore a legacy ChengCode session.
 argument-hint: "[agent/workspace/session filters]"
 skills: restore-legacy-sessions
 ---

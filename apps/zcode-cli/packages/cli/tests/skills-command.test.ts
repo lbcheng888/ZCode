@@ -109,7 +109,7 @@ test("rejects inspect without a skill name", async () => {
   });
 
   assert.equal(exitCode, 1);
-  assert.match(ctx.stderr.output(), /Usage: zcode skills \[list\|inspect <name>\]/);
+  assert.match(ctx.stderr.output(), /Usage: chengcode skills \[list\|inspect <name>\]/);
   assert.equal(ctx.stdout.output(), "");
 });
 

@@ -3,7 +3,7 @@
   "name": "@zcode/pdf-plugin",
   "version": "0.2.1",
   "private": true,
-  "description": "PDF production skills and a PDF viewer panel, published as an official ZCode plugin.",
+  "description": "PDF production skills and a PDF viewer panel, published as an official ChengCode plugin.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

@@ -347,7 +347,7 @@ export class ConversationShareHttpClient {
   }
 
   /**
-   * 版本高于本端认知时不猜语义，也不混进 invalid_contract：用户该看到「请升级 ZCode」，
+   * 版本高于本端认知时不猜语义，也不混进 invalid_contract：用户该看到「请升级 ChengCode」，
    * 不是「分享格式无效」。低于或等于本端版本一律继续——新增 kind/enum 由逐行降级消化。
    */
   private assertSupportedSchemaVersion(version: number, endpoint: string): void {
@@ -358,7 +358,7 @@ export class ConversationShareHttpClient {
     });
     throw new ConversationShareClientError({
       kind: "unsupported_schema_version",
-      message: "Conversation share payload requires a newer ZCode version",
+      message: "Conversation share payload requires a newer ChengCode version",
     });
   }
 

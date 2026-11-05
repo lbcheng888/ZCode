@@ -199,9 +199,11 @@ async function stageZCodePackage({ packageRoot, version }) {
   await mkdir(resolve(packageRoot, "bin"), {
     recursive: true,
   });
-  const runner = resolve(packageRoot, "bin", "zcode.mjs");
-  await cp(resolve(root, "scripts/zcode-distribution/runner.mjs"), runner);
-  await chmod(runner, 0o755);
+  for (const command of ["chengcode", "zcode"]) {
+    const runner = resolve(packageRoot, "bin", `${command}.mjs`);
+    await cp(resolve(root, "scripts/zcode-distribution/runner.mjs"), runner);
+    await chmod(runner, 0o755);
+  }
 
   await writeFile(
     resolve(packageRoot, "package.json"),

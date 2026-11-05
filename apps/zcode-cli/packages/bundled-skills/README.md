@@ -1,6 +1,6 @@
 # bundled-skills
 
-Skills that ship with the ZCode CLI as a built-in capability, outside the plugin system.
+Skills that ship with the ChengCode CLI as a built-in capability, outside the plugin system.
 
 A skill lives here when a product feature depends on it: the feature's tools are registered
 by the runtime, so the skill that teaches the model how to use them must be just as

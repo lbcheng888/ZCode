@@ -7,12 +7,13 @@ export const enUS: ZCodeCopy = {
       localeUnsupported: (value) =>
         `Unsupported --locale value: ${value}. Supported locales: en-US, zh-CN, auto.`,
     },
-    help: (version) => `zcode ${version}
+    help: (version) => `ChengCode ${version}
 
 Usage:
-  zcode [command] [options]
+  chengcode [command] [options]
+  zcode [command] [options]   Compatibility alias for \`chengcode\`
 
-With no command, zcode opens the full-screen TUI.
+With no command, chengcode opens the full-screen TUI.
 
 Commands:
   app-server Run the ChengCode Protocol stdio app server

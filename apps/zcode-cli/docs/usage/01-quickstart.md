@@ -21,7 +21,7 @@ pnpm --filter @zcode/cli sea --target linux-x64
 
 目标包括 `darwin-arm64`、`darwin-x64`、`linux-arm64`、`linux-x64`、`win-arm64`、`win-x64`。产物在 `apps/zcode-cli/packages/cli/dist/`；Windows 文件名使用 `zcode-windows-<arch>.exe`。交叉打包不等于目标平台运行验证。
 
-后文以 `zcode` 代表 CLI 命令。使用普通 Node bundle 时，替换为 `node /absolute/path/to/zcode.cjs`，并保留构建生成的相邻资源。SEA 内嵌 Node，不依赖系统 Node 版本；MCP、Hook 或插件启动的外部程序仍须单独安装。
+后文以 `chengcode` 代表 CLI 命令（`zcode` 保留为兼容别名）。使用普通 Node bundle 时，替换为 `node /absolute/path/to/zcode.cjs`，并保留构建生成的相邻资源。SEA 内嵌 Node，不依赖系统 Node 版本；MCP、Hook 或插件启动的外部程序仍须单独安装。
 
 ## 使用可执行文件
 
@@ -43,21 +43,21 @@ Windows PowerShell 示例：
 ## 自检与模型设置
 
 ```sh
-zcode --version
-zcode --help
-zcode doctor --json
-zcode plugins list --json
-zcode skills list --json
+chengcode --version
+chengcode --help
+chengcode doctor --json
+chengcode plugins list --json
+chengcode skills list --json
 ```
 
 `doctor` 用于检查版本、平台、CPU、Node、执行路径和 SEA 状态；它不证明模型凭据、网络或工具调用已经可用。插件清单可以独立查询，不要求先发一次付费模型请求。
 
-当前源码的个人模型设置保存在 `~/.zcode/v2/provider_config.json`；运行与扩展设置仍在 `~/.zcode/cli/config.json`。按[配置](03-config.md)建立个人 provider，或在受支持的账号路径上执行 `zcode login`。远程终端可用 `zcode login --no-browser` 显示登录 URL；浏览器回调仍可能要求与 CLI 位于同一机器。
+当前源码的个人模型设置保存在 `~/.zcode/v2/provider_config.json`；运行与扩展设置仍在 `~/.zcode/cli/config.json`。按[配置](03-config.md)建立个人 provider，或在受支持的账号路径上执行 `chengcode login`。远程终端可用 `chengcode login --no-browser` 显示登录 URL；浏览器回调仍可能要求与 CLI 位于同一机器。
 
 ## 第一次非交互调用
 
 ```sh
-zcode --prompt "只用一句话回复 ready，不调用工具" --cwd /absolute/path/to/project --mode plan --json --no-color
+chengcode --prompt "只用一句话回复 ready，不调用工具" --cwd /absolute/path/to/project --mode plan --json --no-color
 ```
 
 普通 prompt 成功时返回 `sessionId`、`response` 和相关运行信息。然后在一次性测试目录中验证所需工具，检查真实文件或命令结果。模型回复“成功”不等于工具已执行。

@@ -1,6 +1,6 @@
 ---
 name: diagnosing-plugins
-description: Use to diagnose and fix ZCode plugin and marketplace problems in the ZCode client. Applies when a plugin is not listed, adding a marketplace or installing a plugin fails, a plugin is enabled but its skills or commands are missing, a built-in plugin still appears after being disabled, a plugin is not enabled as expected, a plugin.json manifest has a parse error, a plugin name is invalid, a dependency is unresolved or blocked across marketplaces, or a sensitive configuration value cannot be entered in the interface. Provides the plugin lifecycle, manifest schema, how to manage plugins in the client, and a step-by-step localization and repair workflow.
+description: Use to diagnose and fix ChengCode plugin and marketplace problems in the ChengCode client. Applies when a plugin is not listed, adding a marketplace or installing a plugin fails, a plugin is enabled but its skills or commands are missing, a built-in plugin still appears after being disabled, a plugin is not enabled as expected, a plugin.json manifest has a parse error, a plugin name is invalid, a dependency is unresolved or blocked across marketplaces, or a sensitive configuration value cannot be entered in the interface. Provides the plugin lifecycle, manifest schema, how to manage plugins in the client, and a step-by-step localization and repair workflow.
 ---
 
 # Diagnosing Plugin Configuration
@@ -9,7 +9,7 @@ Goal: reduce any plugin problem to a single concrete fix.
 
 Plugins are managed in **Settings → Plugin Management** — the **Installed** tab (enable/disable, view details, configure, uninstall) and the **Discover** tab (browse, install, and add marketplaces via the **`+`** button).
 
-> Key facts: enable/disable state is stored under `plugins` in `~/.zcode/cli/config.json`; the official marketplace is `zcode-plugins-official`; and for cloning marketplace repositories behind a proxy, ZCode reads the proxy from `ZCODE_HTTP_PROXY` (a bare `http_proxy` is not used).
+> Key facts: enable/disable state is stored under `plugins` in `~/.zcode/cli/config.json`; the official marketplace is `zcode-plugins-official`; and for cloning marketplace repositories behind a proxy, ChengCode reads the proxy from `ZCODE_HTTP_PROXY` (a bare `http_proxy` is not used).
 
 ## 1. Plugin lifecycle and persistence
 
@@ -38,7 +38,7 @@ Plugins are managed in **Settings → Plugin Management** — the **Installed** 
 ## 4. Common pitfalls (symptom → cause → fix)
 
 1. **A plugin is not listed at all** — its marketplace was never added, so there is no installation record or cache; or `plugins.enabled` is false. → Add the marketplace on the Discover tab and install it, or set `plugins.enabled: true`.
-2. **Adding a marketplace or installing fails to clone** — an error such as `RPC failed`, `timed out`, or `early EOF` (after retries). The clone process did not inherit the shell proxy. → **Set `ZCODE_HTTP_PROXY=http://host:port`** (ZCode reads the proxy only from this variable; a bare `http_proxy` is ignored).
+2. **Adding a marketplace or installing fails to clone** — an error such as `RPC failed`, `timed out`, or `early EOF` (after retries). The clone process did not inherit the shell proxy. → **Set `ZCODE_HTTP_PROXY=http://host:port`** (ChengCode reads the proxy only from this variable; a bare `http_proxy` is ignored).
 3. **Enabled but its skills or commands are missing** — a component path escapes the plugin root, the plugin is actually disabled, or it is not being treated as enabled where the session reads it. → Open the plugin's detail view to see the invalid component, and make the manifest path relative and inside the plugin root.
 4. **A built-in plugin still appears after being disabled, or returns after uninstalling** — the suppression state was not applied where it was read. → Confirm the plugin id is in the suppressed-built-ins list in `~/.zcode/cli/config.json`; restoring it removes that entry and re-seeds.
 5. **Not enabled as expected — listed as enabled but a skill reports "not found" in the session** — the default-enabled set was not applied along the session's discovery path even though the listing shows it enabled. → Verify the plugin's skills are actually available in the session (via **Settings → Skills** and the `/` menu), not only that the plugin shows as enabled.

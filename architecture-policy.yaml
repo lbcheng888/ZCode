@@ -1133,3 +1133,10 @@ exceptions:
       - packages/desktop/src/host/capabilityTicketAuditStore.ts
       - packages/services/src/zcode-agent/capabilityTicketAdmissionRelay.ts
     reason: P6 收口三项接线（C2 工具执行票据上下文、Desktop→远端宿主 admission relay 通道、Services relay authority）各需一个职责单一的新文件；分别落在未受管的 core tool/desktop host/services zcode-agent 目录，沿用本表逐文件准入先例，不移动既有模块边界，接管整个包不在本次范围内。
+  - id: chengcode-content-post-fork-files
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/cli/src/plugins-command-shared.ts
+      - packages/services/src/feedback/feedbackLogArchive.ts
+      - packages/services/src/file/workspaceFileIgnore.ts
+    reason: 这三个文件是 fork 之后上游引入的既有文件，本次仅把用户可见 ZCode 文案改为 ChengCode（插件命令帮助、诊断日志归档、workspace ignore 模板），并保留旧标记识别；不改模块边界、不新增依赖、不移动文件。architecture 以 merge-base 判定为 new，沿用逐文件准入先例。

@@ -3,7 +3,7 @@
   "name": "@zcode/documents-plugin",
   "version": "0.2.0",
   "private": true,
-  "description": "DOCX document production skills and a Word viewer panel, published as an official ZCode plugin.",
+  "description": "DOCX document production skills and a Word viewer panel, published as an official ChengCode plugin.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

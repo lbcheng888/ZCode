@@ -18,7 +18,7 @@
 ## 非交互任务模板
 
 ```sh
-zcode --prompt "任务说明" --cwd /absolute/path/to/task --mode yolo --disallowed-tools "AskUserQuestion EnterPlanMode ExitPlanMode" --json --no-color
+chengcode --prompt "任务说明" --cwd /absolute/path/to/task --mode yolo --disallowed-tools "AskUserQuestion EnterPlanMode ExitPlanMode" --json --no-color
 ```
 
 普通 `--prompt` 没有交互式审批客户端。需要提问或审批的工具可能失败。对无需人工干预的任务，移除上述工具可避免进入计划或提问流程；这会改变实验条件，应记录在评测配置中。`yolo` 也不保证所有声明了强制确认的工具都能运行。

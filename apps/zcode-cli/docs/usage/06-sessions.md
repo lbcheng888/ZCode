@@ -5,7 +5,7 @@
 普通 `--prompt` 默认创建新会话。成功的 JSON 输出包含 `sessionId`；恢复时保存并显式传回它：
 
 ```sh
-zcode --prompt "继续检查上一步的文件" --resume sess_example --cwd /absolute/path/to/task --mode yolo --json
+chengcode --prompt "继续检查上一步的文件" --resume sess_example --cwd /absolute/path/to/task --mode yolo --json
 ```
 
 保持相同的数据目录和有效工作目录。`--continue`/`-c` 选择当前目录最近的会话，与 `--resume` 互斥；并发任务不要依赖“最近”来关联结果。

@@ -978,7 +978,7 @@ export class ZCodeAgentProcessManager {
       );
     }
     if (admissionSignal.aborted) {
-      throw admissionSignal.reason ?? new Error("ZCode agent process start was cancelled.");
+      throw admissionSignal.reason ?? new Error("ChengCode agent process start was cancelled.");
     }
     const effectiveCommand = wrapZCodeAgentCommandWithStdioTapDevProxy(command, workspaceKey);
     log("ZCode agent command resolved", {
@@ -1003,7 +1003,7 @@ export class ZCodeAgentProcessManager {
     if ((this.restartGenerationByWorkspaceKey.get(workspaceKey) ?? 0) !== startGeneration) {
       // 切模型会重启单个 workspace。旧启动请求如果在重启后才恢复，
       // 不能继续 spawn 并写回进程池，否则新配置会被旧 agent 覆盖。
-      throw new Error("ZCode agent process start was cancelled.");
+      throw new Error("ChengCode agent process start was cancelled.");
     }
     // cwd 探测也让出事件循环，必须放在最终 admission 与销毁/代际检查之前。
     const spawnPreflight = await buildZCodeAgentSpawnPreflight(
@@ -1019,7 +1019,7 @@ export class ZCodeAgentProcessManager {
       throw new Error("ZCode agent process manager is disposed.");
     }
     if ((this.restartGenerationByWorkspaceKey.get(workspaceKey) ?? 0) !== startGeneration) {
-      throw new Error("ZCode agent process start was cancelled.");
+      throw new Error("ChengCode agent process start was cancelled.");
     }
     // app 以本地开发方式启动时，让 agent 子进程也带上 ZCODE_RUNTIME_ENV=development；
     // 不再传 NODE_ENV，避免用户 shell/runtime 变量影响 ZCode 运行模式或泄漏到 Bash 工具。
@@ -1433,7 +1433,7 @@ export class ZCodeAgentProcessManager {
 
   private abortPendingStarts(
     workspaceKey: string,
-    reason = new Error("ZCode agent process start was cancelled."),
+    reason = new Error("ChengCode agent process start was cancelled."),
   ): void {
     const controllers = this.startAdmissionAbortControllersByWorkspaceKey.get(workspaceKey);
     if (!controllers) {

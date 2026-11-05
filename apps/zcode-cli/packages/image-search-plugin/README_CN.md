@@ -1,8 +1,8 @@
-# ZCode 搜图插件
+# ChengCode 搜图插件
 
 [English](./README.md)
 
-本插件注册 ZCode 官方搜图 MCP 服务，让 Agent 在制作文档、演示文稿、海报或网页时可以检索插图与参考配图。
+本插件注册 ChengCode 官方搜图 MCP 服务，让 Agent 在制作文档、演示文稿、海报或网页时可以检索插图与参考配图。
 
 ## 包含组件
 
@@ -10,9 +10,9 @@
 
 ## 使用前提
 
-- ZCode 会话已登录且可访问 `${ZCODE_BASE_URL}`；该服务使用 ZCode 官方 JWT 鉴权，无需手动配置 Token 或 API Key。
-- 可访问 ZCode API 的网络环境。
-- 安装或更新插件后需新建 ZCode 会话。
+- ChengCode 会话已登录且可访问 `${ZCODE_BASE_URL}`；该服务使用 ChengCode 官方 JWT 鉴权，无需手动配置 Token 或 API Key。
+- 可访问 ChengCode API 的网络环境。
+- 安装或更新插件后需新建 ChengCode 会话。
 
 ## 使用方式
 
@@ -23,4 +23,4 @@
 ## 说明
 
 - 本插件仅声明 MCP 服务，不包含命令、技能、Hooks 或 Agent。
-- 搜索结果经 ZCode 服务来自第三方图库，用于对外交付前请自行确认图片授权。
+- 搜索结果经 ChengCode 服务来自第三方图库，用于对外交付前请自行确认图片授权。

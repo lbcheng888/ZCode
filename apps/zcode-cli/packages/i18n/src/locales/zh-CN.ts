@@ -7,12 +7,13 @@ export const zhCN: ZCodeCopy = {
       localeUnsupported: (value) =>
         `不支持的 --locale 值：${value}。支持的语言：en-US、zh-CN、auto。`,
     },
-    help: (version) => `zcode ${version}
+    help: (version) => `ChengCode ${version}
 
 用法:
-  zcode [command] [options]
+  chengcode [command] [options]
+  zcode [command] [options]   \`chengcode\` 的兼容别名
 
-不传 command 时，zcode 会打开全屏 TUI。
+不传 command 时，chengcode 会打开全屏 TUI。
 
 命令:
   app-server 运行 ChengCode Protocol stdio app server

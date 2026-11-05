@@ -3,7 +3,7 @@
   "name": "@zcode/spreadsheets-plugin",
   "version": "0.2.0",
   "private": true,
-  "description": "XLSX spreadsheet production skills and an Excel viewer panel, published as an official ZCode plugin.",
+  "description": "XLSX spreadsheet production skills and an Excel viewer panel, published as an official ChengCode plugin.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

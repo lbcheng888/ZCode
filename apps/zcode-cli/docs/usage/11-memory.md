@@ -24,7 +24,7 @@
 ## 记忆实验
 
 ```sh
-zcode --prompt "执行本次记忆实验任务" --memory-bench --mode yolo --json
+chengcode --prompt "执行本次记忆实验任务" --memory-bench --mode yolo --json
 ```
 
 `--memory-bench` 仅用于 prompt，要求先启用记忆。它开启自动提取，并在返回结果前等待提取工作结束。默认没有固定的提取等待截止时间；实验启动器应设置自己的运行时限并记录取消状态。

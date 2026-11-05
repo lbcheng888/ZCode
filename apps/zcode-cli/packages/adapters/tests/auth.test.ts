@@ -192,11 +192,11 @@ describe("shared ZCode credentials", () => {
 
       await Promise.all(
         Array.from({ length: 8 }, () =>
-          expect(store.load("safe-key")).rejects.toThrow("Shared ZCode credentials are corrupt"),
+          expect(store.load("safe-key")).rejects.toThrow("Shared ChengCode credentials are corrupt"),
         ),
       );
       await expect(store.save("safe-key", "safe-value")).rejects.toThrow(
-        "Shared ZCode credentials are corrupt",
+        "Shared ChengCode credentials are corrupt",
       );
       await expect(readFile(credentialsPath, "utf-8")).resolves.toBe("{not-json");
       const backups = (await readdir(dir)).filter((file) =>

@@ -3,7 +3,7 @@
   "name": "@zcode/presentations-plugin",
   "version": "0.2.0",
   "private": true,
-  "description": "PPTX presentation production skills and a PowerPoint viewer panel, published as an official ZCode plugin.",
+  "description": "PPTX presentation production skills and a PowerPoint viewer panel, published as an official ChengCode plugin.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

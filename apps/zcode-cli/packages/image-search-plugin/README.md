@@ -1,8 +1,8 @@
-# Image Search for ZCode
+# Image Search for ChengCode
 
 [中文文档](./README_CN.md)
 
-This plugin registers the official ZCode image search MCP server, so the agent can look up
+This plugin registers the official ChengCode image search MCP server, so the agent can look up
 illustrations and reference images while producing documents, slides, posters, or web pages.
 
 ## Components
@@ -11,10 +11,10 @@ illustrations and reference images while producing documents, slides, posters, o
 
 ## Requirements
 
-- A ZCode session signed in to an account that can reach `${ZCODE_BASE_URL}`; the server uses
-  official ZCode JWT authentication, so no manual token or API key is needed.
-- Network access to the ZCode API endpoint.
-- Start a new ZCode session after installing or updating the plugin.
+- A ChengCode session signed in to an account that can reach `${ZCODE_BASE_URL}`; the server uses
+  official ChengCode JWT authentication, so no manual token or API key is needed.
+- Network access to the ChengCode API endpoint.
+- Start a new ChengCode session after installing or updating the plugin.
 
 ## Usage
 
@@ -26,5 +26,5 @@ them when you want image search available during document production.
 ## Notes
 
 - The plugin only declares an MCP server; it ships no commands, skills, hooks, or agents.
-- Search results come from a third-party image index through the ZCode service. Check the license of
+- Search results come from a third-party image index through the ChengCode service. Check the license of
   any image before using it in a published deliverable.

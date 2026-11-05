@@ -77,8 +77,8 @@ const BUILTIN_IGNORE_LINES = [
 ];
 
 const TEMPLATE_HEADER = [
-  "# ZCode 工作区文件搜索忽略规则（.zcodeignore）",
-  "# 语法与 .gitignore 一致，只影响 ZCode 的 @ 文件候选 / Command Center / 文件树搜索，",
+  "# ChengCode 工作区文件搜索忽略规则（.zcodeignore）",
+  "# 语法与 .gitignore 一致，只影响 ChengCode 的 @ 文件候选 / Command Center / 文件树搜索，",
   "# 不影响文件树浏览、上传或 Agent 文件访问。",
   "# 修改 .gitignore 不会自动同步到本文件；可在设置页「从 .gitignore 同步」。",
   "",
@@ -93,6 +93,12 @@ const TEMPLATE_HEADER = [
 export const WORKSPACE_FILE_SEARCH_IGNORE_SYNC_MARKER =
   "# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====";
 export const WORKSPACE_FILE_SEARCH_IGNORE_DEFAULTS_MARKER =
+  "# ----- ↑ 以上为 ChengCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----";
+/**
+ * 旧品牌标记：已落盘的 .zcodeignore 仍可能带此文本。解析时一并识别，
+ * 下次同步/恢复时自动重写为新标记，避免误判为标记缺失而整体重建、丢失自定义规则。
+ */
+const LEGACY_WORKSPACE_FILE_SEARCH_IGNORE_DEFAULTS_MARKER =
   "# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----";
 
 const CUSTOM_SECTION_HINT = "# 自定义规则写在下方（本行提示可删除）";
@@ -161,7 +167,9 @@ function splitWorkspaceFileSearchIgnoreSections(
     (line) => line.trim() === WORKSPACE_FILE_SEARCH_IGNORE_SYNC_MARKER,
   );
   const defaultsIndex = lines.findIndex(
-    (line) => line.trim() === WORKSPACE_FILE_SEARCH_IGNORE_DEFAULTS_MARKER,
+    (line) =>
+      line.trim() === WORKSPACE_FILE_SEARCH_IGNORE_DEFAULTS_MARKER ||
+      line.trim() === LEGACY_WORKSPACE_FILE_SEARCH_IGNORE_DEFAULTS_MARKER,
   );
   if (syncIndex === -1 || defaultsIndex === -1 || defaultsIndex <= syncIndex) {
     return null;

@@ -2500,7 +2500,7 @@ function pushManifestCompatibilityDiagnostics(input: {
     if (key in input.manifest) {
       input.diagnostics.push({
         code: "plugin_unsupported_component",
-        message: `Plugin component is diagnostic-only in this ZCode runtime: ${key}`,
+        message: `Plugin component is diagnostic-only in this ChengCode runtime: ${key}`,
         path: input.manifestPath,
         pluginId: input.pluginId,
         severity: "warning",

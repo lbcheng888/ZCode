@@ -279,7 +279,7 @@ test("plugins scope validation rejects local and unknown scopes", async () => {
     await runPluginsCommand(local, TEXT, {}, ["install", "hello@market"], { scope: "local" }),
     1,
   );
-  assert.match(local.stderr.output(), /Scope 'local' is not supported by zcode\. Use: user, project/);
+  assert.match(local.stderr.output(), /Scope 'local' is not supported by ChengCode\. Use: user, project/);
 
   const bogus = context([]);
   assert.equal(await runPluginsCommand(bogus, TEXT, {}, ["enable", "hello"], { scope: "team" }), 1);
@@ -430,7 +430,7 @@ test("plugins update reports version transitions and up-to-date state", async ()
     ["update", "hello@market"],
   );
   assert.equal(code, 0);
-  assert.match(changed.stdout.output(), /Updated plugin hello@market from 1\.2\.0 to 2\.0\.0\. Restart zcode to apply\./);
+  assert.match(changed.stdout.output(), /Updated plugin hello@market from 1\.2\.0 to 2\.0\.0\. Restart ChengCode to apply\./);
 
   const same = context([]);
   await runPluginsCommand(

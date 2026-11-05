@@ -1,6 +1,6 @@
 # debug
 
-Development-only trace and context viewer for ZCode.
+Development-only trace and context viewer for ChengCode.
 
 Run from the repository root:
 

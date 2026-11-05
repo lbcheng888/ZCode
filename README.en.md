@@ -80,28 +80,28 @@ After changing Agent source code, run `pnpm --filter @zcode/cli... build` and re
 
 ### ChengCode CLI distribution
 
-The command-line distribution includes the TUI, Web client, and Agent behind one `zcode` command. With no arguments it starts the TUI; a leading `--web` starts Web mode; all other arguments go to the existing Agent CLI. Both modes run locally without Electron.
+The command-line distribution includes the TUI, Web client, and Agent behind one `chengcode` command (`zcode` is kept as a compatibility alias). With no arguments it starts the TUI; a leading `--web` starts Web mode; all other arguments go to the existing Agent CLI. Both modes run locally without Electron.
 
 ```bash
 # Start the terminal UI by default
-zcode
+chengcode
 
 # Start the Web interface
-zcode --web
+chengcode --web
 
 # Set the project and port without opening a browser automatically
-zcode --web --workspace /path/to/project --port 3030 --no-open
+chengcode --web --workspace /path/to/project --port 3030 --no-open
 
 # Show CLI or Web options
-zcode --help
-zcode --web --help
+chengcode --help
+chengcode --web --help
 ```
 
 In Web mode, it uses the current directory as the workspace, listens on `127.0.0.1` without token authentication by default, selects an available port, and opens a browser. Use the URL printed in the terminal and press `Ctrl+C` to stop the service. For LAN access, use `--host 0.0.0.0`; listening on a non-local address generates an access token by default. Use the token-bearing URL printed in the terminal. Set a token with `--token`, or disable token authentication with `--no-token`.
 
 When starting the general Web service's HTTP entry directly, configure API/WebSocket authentication with `ZCODE_SERVER_AUTH_TOKEN`. When creating the service programmatically, use the `authToken` option.
 
-See Packaging below for build instructions. `pnpm build:zcode` only creates the distribution; it does not replace an existing `zcode` on `PATH`. If the command still points to an older installation or another checkout, check it with `command -v zcode` on macOS / Linux or `where.exe zcode` on Windows.
+See Packaging below for build instructions. `pnpm build:zcode` only creates the distribution; it does not replace an existing `chengcode` on `PATH`. If the command still points to an older installation or another checkout, check it with `command -v chengcode` on macOS / Linux or `where.exe chengcode` on Windows.
 
 ### CLI Source Development
 
@@ -118,7 +118,7 @@ pnpm --filter @zcode/cli... build
 node apps/zcode-cli/packages/cli/dist/zcode.cjs --help
 ```
 
-This entry runs the Agent CLI directly and does not handle the distribution's `--web` switch. Use `pnpm dev:web` for Web development, or the extracted `bin/zcode.mjs` shown below to test the unified command.
+This entry runs the Agent CLI directly and does not handle the distribution's `--web` switch. Use `pnpm dev:web` for Web development, or the extracted `bin/zcode.mjs` shown below to test the unified `chengcode` command.
 
 ### UI Plugin development
 
@@ -181,7 +181,7 @@ The version defaults to the root `package.json` version. Output is written to `d
 - `releases/<version>/sha256.txt`: checksum file.
 - `latest.json` and `install.sh`: version index and installer.
 
-Upload the entire directory to the configured download base URL. The installer downloads the runtime package from that URL, installs it to `~/.zcode/runtime` by default, and creates the `zcode` command in `~/.local/bin`. Override these directories with `ZCODE_DIST_HOME` and `ZCODE_DIST_BIN_DIR`, respectively.
+Upload the entire directory to the configured download base URL. The installer downloads the runtime package from that URL, installs it to `~/.zcode/runtime` by default, and creates the `chengcode` command in `~/.local/bin` (`zcode` is kept as a compatibility alias). Override these directories with `ZCODE_DIST_HOME` and `ZCODE_DIST_BIN_DIR`, respectively.
 
 Existing Lite users should switch to the new build command, environment variables, and installer. Installation does not remove old Lite directories or migrate/delete session data.
 
