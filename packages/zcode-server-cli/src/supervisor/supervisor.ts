@@ -13,6 +13,7 @@ import {
   CORE_KILL_TIMEOUT_MS,
   CORE_READY_TIMEOUT_MS,
   CORE_STOP_GRACE_TIMEOUT_MS,
+  controlPlaneCoreStateMessageSchema,
   controlPlaneHealthFieldsSchema,
   controlPlaneMessageSchema,
   controlPlaneStatusSchema,
@@ -97,6 +98,12 @@ export class Supervisor {
   // 本 Supervisor 生命周期（= daemon 代际）内首次 ready；child 重启只是新 generation，
   // 不会清零。它是「本代际曾 ready」的持久证据，供 §3.6 状态判断与排障。
   private controlPlaneFirstReadyAt: number | null = null;
+  /**
+   * §3.6「本 daemon 代际内已观测到 ready/exit/close/spawn error」：一旦置 true 不再回落。
+   * Core 用它与 state/firstReadyAt 一起关闭 legacy 启动窗口；不能从 lastExitReason 推导
+   * （重启时 launchControlPlane 会清空该原因）。
+   */
+  private controlPlaneCrashSignalObserved = false;
   private controlPlaneLastExitReason: string | null = null;
   private controlPlaneHealth: ControlPlaneStatus["health"] = null;
   private controlPlaneReadyTimer: NodeJS.Timeout | undefined;
@@ -387,11 +394,13 @@ export class Supervisor {
     if (!this.controlPlane) {
       this.controlPlaneState = "stopped";
       this.clearControlPlaneScopedStatus();
+      this.publishControlPlaneStateToCore();
       return;
     }
     this.controlPlaneState = "stopping";
     this.controlPlaneLastExitReason = reason;
     log.info("stopping super-agent control plane", { reason, pid: this.controlPlane.pid });
+    this.publishControlPlaneStateToCore();
     const controlPlane = this.controlPlane;
     try {
       await new Promise<void>((resolve, reject) => {
@@ -459,6 +468,7 @@ export class Supervisor {
         this.controlPlaneLastExitReason = error instanceof Error ? error.message : String(error);
         this.state = "stop-failed";
         this.lastExitReason = this.controlPlaneLastExitReason;
+        this.publishControlPlaneStateToCore();
         await this.persistStatusSnapshot();
       }
       throw error;
@@ -468,6 +478,7 @@ export class Supervisor {
       this.controlPlane = undefined;
       this.controlPlaneState = "stopped";
       this.clearControlPlaneScopedStatus();
+      this.publishControlPlaneStateToCore();
     }
   }
 
@@ -592,6 +603,32 @@ export class Supervisor {
       crashBudget: this.crashBudget.snapshot(),
       updatedAt: Date.now(),
     };
+  }
+
+  /**
+   * 把 §3.6 代际判据推给 Core（Supervisor 内存状态是唯一权威；Core 不能读 control socket）。
+   * 发送失败只可能是 Core IPC 已断（Core 正在退出/重启），新 Core 的 ready 会触发一次重发。
+   */
+  private publishControlPlaneStateToCore(): void {
+    const core = this.core;
+    if (!core || !this.options.controlPlane || core.connected === false) return;
+    const status = this.controlPlaneStatus();
+    if (!status) return;
+    const message = controlPlaneCoreStateMessageSchema.parse({
+      type: "control-plane-state",
+      state: status.state,
+      generation: status.generation,
+      firstReadyAt: status.firstReadyAt,
+      crashSignalObserved: this.controlPlaneCrashSignalObserved,
+      crashBudgetExhausted: status.crashBudget.exhausted,
+    });
+    try {
+      core.send(message, () => undefined);
+    } catch {
+      log.debug("failed to publish control-plane state to core (IPC closed)", {
+        state: status.state,
+      });
+    }
   }
 
   /**
@@ -723,6 +760,8 @@ export class Supervisor {
         port: this.port,
         generation: this.generation,
       });
+      // Core 可能错过启动期的状态推送（尤其在 Core 崩溃重启后）；ready 时强制重发当前投影。
+      this.publishControlPlaneStateToCore();
     } else if (message.type === "heartbeat" || message.type === "task-activity") {
       this.runningTaskCount = message.runningTaskCount;
       this.runningTasks = message.runningTasks;
@@ -747,9 +786,11 @@ export class Supervisor {
   private recordControlPlaneLaunchFailure(error: unknown): void {
     const reason = `control plane launch failed: ${error instanceof Error ? error.message : String(error)}`;
     this.controlPlaneState = "crashed";
+    this.controlPlaneCrashSignalObserved = true;
     this.controlPlaneLastExitReason = reason;
     this.lastExitReason = reason;
     log.error("super-agent control plane launch failed", { reason });
+    this.publishControlPlaneStateToCore();
   }
 
   /**
@@ -762,6 +803,8 @@ export class Supervisor {
       this.controlPlaneRestartTimer = undefined;
       if (this.controlPlaneState !== "crashed") return;
       this.controlPlaneState = "starting";
+      // 重启后的 starting 不是新的 legacy 窗口：crashSignalObserved 已在本代际内置 true。
+      this.publishControlPlaneStateToCore();
       try {
         this.launchControlPlane();
       } catch (error) {
@@ -776,6 +819,7 @@ export class Supervisor {
           log.error("super-agent control plane crash budget exhausted after launch failure", {
             lastExitReason: this.controlPlaneLastExitReason,
           });
+          this.publishControlPlaneStateToCore();
           void this.persistStatusSnapshot();
           return;
         }
@@ -812,6 +856,8 @@ export class Supervisor {
     this.controlPlaneHealth = null;
     this.controlPlaneLastExitReason = null;
     log.info("launching super-agent control plane", { generation, pid: child.pid });
+    // 新 child 进入 starting：§3.6 启动窗口从哪里开始，Core 必须收到同一投影。
+    this.publishControlPlaneStateToCore();
 
     // ready 门：只接受当前 child + 当前 generation + 同源协议的 ready；超时则强杀，
     // 由统一崩溃路径计数/重启，避免一个永远不 ready 的子进程被当成健康。
@@ -847,14 +893,18 @@ export class Supervisor {
         // SIGKILL 后 kill 预算内仍未观察到终态时已显式失败；迟到的 exit/close 只证明进程
         // 确实收口并清除引用，不得据此拉起替代进程（未观察终态前禁止重启）。
         this.controlPlaneLastExitReason = reason;
+        this.publishControlPlaneStateToCore();
         return;
       }
       if (this.state === "stopping" || this.state === "stopped" || this.state === "stop-failed") {
         // Supervisor 正在收口/已处于不可恢复终态时不得再拉起替代进程；用户重试 stop 后再收口。
         this.controlPlaneState = "stopped";
         this.controlPlaneLastExitReason = reason;
+        this.publishControlPlaneStateToCore();
         return;
       }
+      // exit/close 是 §3.6 的一等崩溃信号，无论此前是否 ready；Core 必须立即关闭 legacy 窗口。
+      this.controlPlaneCrashSignalObserved = true;
       this.controlPlaneState = "crashed";
       this.controlPlaneLastExitReason = reason;
       const decision = this.controlPlaneCrashBudget?.recordCrash() ?? {
@@ -867,18 +917,23 @@ export class Supervisor {
         log.error("super-agent control plane crash budget exhausted", {
           lastExitReason: reason,
         });
+        this.publishControlPlaneStateToCore();
         return;
       }
       log.warn("super-agent control plane crashed, scheduling restart", {
         lastExitReason: reason,
         delayMs: decision.delayMs,
       });
+      this.publishControlPlaneStateToCore();
       this.scheduleControlPlaneRestart(decision.delayMs);
     };
     child.once("error", (error: Error & { code?: string }) => {
       spawnErrorReason = `control plane spawn error code=${error.code ?? "unknown"}: ${error.message}`;
       this.controlPlaneLastExitReason = spawnErrorReason;
+      // spawn error 是 §3.6 明列的崩溃信号，即使 exit 还没到也必须先关 legacy 窗口。
+      this.controlPlaneCrashSignalObserved = true;
       log.error("super-agent control plane process error", error);
+      this.publishControlPlaneStateToCore();
     });
     // 终态原因优先级：spawn error > 本代际已记录的描述性原因（ready 超时 / 协议不匹配 /
     // fatal / stopped 上报）> 通用 exit/close 串。否则描述性原因会被退出串覆盖，
@@ -927,11 +982,14 @@ export class Supervisor {
       this.controlPlaneState = "ready";
       this.controlPlaneStartedAt = Date.now();
       this.controlPlaneFirstReadyAt ??= this.controlPlaneStartedAt;
+      // 首个 ready 本身就是崩溃/重启信号的反面证据：legacy 启动窗口自此永久关闭。
+      this.controlPlaneCrashSignalObserved = true;
       this.clearControlPlaneReadyTimer();
       log.info("super-agent control plane ready", {
         generation: message.generation,
         ...(message.version ? { version: message.version } : {}),
       });
+      this.publishControlPlaneStateToCore();
     } else if (message.type === "health") {
       // 严格 schema 已在 shared 统一：B 期扩展字段（leader/pending/degraded/
       // workspaceErrors/peer/protocol 计数）原样进入 control-plane-status，不丢字段。
@@ -977,6 +1035,9 @@ export class Supervisor {
   ): void {
     if (this.controlPlane !== child) return;
     this.controlPlaneLastExitReason = reason;
+    // ready 超时/协议不匹配/fatal 都已被判定为不可接受的 child：从这一刻起不得再回 legacy。
+    this.controlPlaneCrashSignalObserved = true;
+    this.publishControlPlaneStateToCore();
     this.clearControlPlaneReadyTimer();
     this.clearControlPlaneKillTimer();
     child.kill("SIGKILL");
@@ -989,6 +1050,7 @@ export class Supervisor {
         generation,
         pid: child.pid,
       });
+      this.publishControlPlaneStateToCore();
     }, this.options.controlPlane?.killTimeoutMs ?? CONTROL_PLANE_KILL_TIMEOUT_MS);
     killTimer.unref();
     this.controlPlaneKillTimer = killTimer;

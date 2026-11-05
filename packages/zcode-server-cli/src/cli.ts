@@ -8,6 +8,7 @@ import { isPublicZCodeErrorCode, ZCODE_VERSION } from "@zcode/shared";
 import { resolveControlPlaneAuthTokenPath } from "@zcode/shared/super-agent-control-plane-protocol";
 import { SourceServerWorkspaceAliasRepo } from "@zcode/services/node";
 import {
+  CONTROL_PLANE_CORE_ENABLED_ENV,
   CONTROL_PLANE_KILL_TIMEOUT_MS,
   CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS,
   CORE_KILL_TIMEOUT_MS,
@@ -25,6 +26,7 @@ import {
   createControlPlaneClient,
   resolveControlPlaneEndpoint,
   type ControlPlaneClient,
+  type ControlPlaneClientOptions,
 } from "./supervisor/controlPlaneClient.js";
 import {
   resolveCanonicalServerLayout,
@@ -103,10 +105,13 @@ export function createDefaultControlPlaneOptions(
 export function createCoreControlPlaneClient(
   serverRoot: string,
   platform: NodeJS.Platform = process.platform,
+  options: Pick<ControlPlaneClientOptions, "onInboundRequest" | "timeoutMsByMethod"> = {},
 ): ControlPlaneClient {
   return createControlPlaneClient({
     endpoint: resolveControlPlaneEndpoint(serverRoot, platform),
     authTokenFile: resolveControlPlaneAuthTokenPath(serverRoot),
+    ...(options.onInboundRequest ? { onInboundRequest: options.onInboundRequest } : {}),
+    ...(options.timeoutMsByMethod ? { timeoutMsByMethod: options.timeoutMsByMethod } : {}),
   });
 }
 
@@ -450,11 +455,15 @@ async function runServe(
         const runtimeNode = runtimeRoot
           ? join(runtimeRoot, process.platform === "win32" ? "node.exe" : "node")
           : process.execPath;
-        const inheritedEnv = {
+        const inheritedEnv: NodeJS.ProcessEnv = {
           ...process.env,
           ZCODE_DATA_BASE_DIR: layout.dataBaseDir,
           ZCODE_SERVER_ROOT: layout.serverRoot,
         };
+        // §2.3 启动期单一投影：Supervisor 与 Core 同源拿同一个 ControlPlaneOptions 门禁。
+        // 显式清掉父进程可能残留的值，门禁关时 Core 绝不构造 RPC 客户端。
+        if (runtimeOptions.controlPlane) inheritedEnv[CONTROL_PLANE_CORE_ENABLED_ENV] = "1";
+        else delete inheritedEnv[CONTROL_PLANE_CORE_ENABLED_ENV];
         const releaseWiring = runtimeRoot
           ? createReleaseAgentWiring(runtimeRoot, runtimeNode, inheritedEnv)
           : runtimeOptions.bundledAgentWiring;

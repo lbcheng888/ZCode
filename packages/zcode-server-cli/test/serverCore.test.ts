@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONTROL_PLANE_CORE_ENABLED_ENV } from "../src/contracts.js";
 import { resolveServerLayout } from "../src/runtime/paths.js";
 
 const createServerHostServices = vi.fn();
@@ -15,6 +16,12 @@ const environmentConfigRoot = "/tmp/zcode-server-core-test/.zcode/v2";
 vi.mock("@zcode/services/node", () => ({
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV: "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
   createServerHostServices,
+  createServiceLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
   createTopicResourcePeers: () => ({ getChannel: vi.fn() }),
   disposeServiceResourcesAndWait,
   getAppConfigDir: () => environmentConfigRoot,
@@ -33,6 +40,7 @@ const ENV_KEYS = [
   "ZCODE_SERVER_RUNTIME_ROOT",
   "ZCODE_SERVER_RELEASE_ID",
   "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
+  CONTROL_PLANE_CORE_ENABLED_ENV,
 ] as const;
 const PROCESS_EVENTS = ["message", "SIGTERM", "SIGINT"] as const;
 // 以通用 EventEmitter 视角操作 process，绕开 process.on/listeners 针对具体事件名的重载。
@@ -122,6 +130,21 @@ describe("runServerCore startup wiring", () => {
       topicResourceRelayChannel: expect.any(Function),
     });
     expect(createIngressToken).toHaveBeenCalledWith(layout);
+  });
+
+  it("deployment gate on: injects the production RPC port into host services", async () => {
+    process.env[CONTROL_PLANE_CORE_ENABLED_ENV] = "1";
+
+    await runServerCore(1);
+
+    expect(createServerHostServices).toHaveBeenCalledWith(
+      expect.objectContaining({
+        superAgentControlPlaneRpcPort: expect.objectContaining({
+          triggerIngest: expect.any(Function),
+          scheduleAudit: expect.any(Function),
+        }),
+      }),
+    );
   });
 
   it("waits for owner host initialization before opening RPC", async () => {

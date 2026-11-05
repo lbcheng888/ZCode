@@ -9,10 +9,22 @@ import {
 } from "@zcode/services/node";
 import { IZCodeAgentService } from "@zcode/services";
 import { ZCODE_VERSION } from "@zcode/shared";
+import { getTasksIndexDatabasePath } from "@zcode/services/storage-startup";
+import { CONTROL_PLANE_CORE_ENABLED_ENV } from "../contracts.js";
+import {
+  createControlPlaneClient,
+  type ControlPlaneClient,
+} from "../supervisor/controlPlaneClient.js";
 import { createCoreHttpServer } from "./http.js";
 import { createIngressToken } from "./ingressToken.js";
 import { installParentDisconnectHandler } from "./parentDisconnect.js";
 import { resolveCoreServerId } from "./serverIdentity.js";
+import {
+  createSuperAgentControlPlaneCorePort,
+  handleSuperAgentControlPlaneInboundRequest,
+  SuperAgentControlPlaneGenerationGate,
+  type SuperAgentControlPlaneCorePort,
+} from "./superAgentControlPlanePort.js";
 import { createTaskActivityTracker } from "./taskActivityTracker.js";
 import { resolveServerLayout } from "../runtime/paths.js";
 
@@ -27,6 +39,37 @@ export async function runServerCore(generation: number): Promise<void> {
     else parentDisconnected = true;
   });
   const layout = resolveServerLayout(process.env.ZCODE_SERVER_ROOT?.trim());
+  // §2.3/§4.2 启动期单一投影：只有 CLI launcher 在部署门禁打开时才写该 env。
+  // 门禁关 = 不构造客户端/端口，createServerHostServices 收到的 options 与现状逐字段相同。
+  const controlPlaneEnabled = process.env[CONTROL_PLANE_CORE_ENABLED_ENV] === "1";
+  let controlPlaneClient: ControlPlaneClient | undefined;
+  let controlPlaneCorePort: SuperAgentControlPlaneCorePort | undefined;
+  if (controlPlaneEnabled) {
+    const gate = new SuperAgentControlPlaneGenerationGate();
+    // Supervisor 是唯一代际事实来源；消息可能早于 services 初始化到达，所以监听器先注册。
+    process.on("message", (raw: unknown) => {
+      if (
+        typeof raw === "object" &&
+        raw !== null &&
+        "type" in raw &&
+        (raw as { type?: unknown }).type === "control-plane-state"
+      ) {
+        gate.update(raw);
+      }
+    });
+    const client = createControlPlaneClient({
+      serverRoot: layout.serverRoot,
+      onInboundRequest: handleSuperAgentControlPlaneInboundRequest,
+    });
+    controlPlaneClient = client;
+    controlPlaneCorePort = createSuperAgentControlPlaneCorePort({
+      client,
+      gate,
+      // createServerHostServices 在返回前完成 tasks-index 迁移；首次 ingest 必然在其之后。
+      tasksIndexReady: true,
+      tasksIndexDatabasePath: getTasksIndexDatabasePath(),
+    });
+  }
   const topicResourcePeers = createTopicResourcePeers();
   const explicitZCodeBuiltinProviderConfigFilePath =
     process.env[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]?.trim();
@@ -52,7 +95,10 @@ export async function runServerCore(generation: number): Promise<void> {
       sourceServerId,
       zcodeBuiltinProviderConfigFilePath,
       providerProvisioningTargetEnabled: true,
-    topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
+      topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
+      ...(controlPlaneCorePort
+        ? { superAgentControlPlaneRpcPort: controlPlaneCorePort.port }
+        : {}),
     });
   const taskActivityTracker = createTaskActivityTracker(services.getOptional(IZCodeAgentService));
   const ingressToken = await createIngressToken(layout);
@@ -139,6 +185,8 @@ export async function runServerCore(generation: number): Promise<void> {
     taskActivityTracker.dispose();
     await http.close().catch(() => undefined);
     await disposeServiceResourcesAndWait(services).catch(() => undefined);
+    // services 已停止后再关 RPC，避免 sink 在收口过程中拿到半关闭连接以外的行为。
+    await controlPlaneClient?.close().catch(() => undefined);
     await send({ type: "shutdown-ack" });
     await send({ type: "exit", reason });
     try {

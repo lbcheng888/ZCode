@@ -16,8 +16,18 @@ class FakeCore extends EventEmitter {
   public readonly pid = 42;
   public shutdownRequested = false;
   public killRequested = false;
+  public readonly controlPlaneStateMessages: Array<Record<string, unknown>> = [];
 
   public send(message: unknown): boolean {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "control-plane-state"
+    ) {
+      this.controlPlaneStateMessages.push(message as Record<string, unknown>);
+      return true;
+    }
     if (
       typeof message === "object" &&
       message !== null &&
@@ -280,6 +290,46 @@ describe("Supervisor control-plane child", () => {
     // 关键不变量：control-plane 熔断后 Core 仍 ready，daemon 本体不受牵连。
     expect(supervisor.status().state).toBe("ready");
     expect(supervisor.status().pid).toBe(42);
+
+    await supervisor.stop();
+  });
+
+  it("publishes the §3.6 generation gate to Core and never reopens legacy after a crash", async () => {
+    const root = await makeRoot();
+    const { supervisor, core } = await createSupervisor(root, {
+      launcher: controlPlaneLauncherFor(CRASHING_CHILD_SCRIPT),
+    });
+
+    await supervisor.start();
+    await waitForSupervisorReady(supervisor);
+    await waitFor(
+      () => core.controlPlaneStateMessages.some((message) => message.state === "ready"),
+      "ready state projection",
+    );
+    const ready = core.controlPlaneStateMessages.find((message) => message.state === "ready");
+    expect(ready).toMatchObject({
+      firstReadyAt: expect.any(Number),
+      crashSignalObserved: true,
+      crashBudgetExhausted: false,
+    });
+
+    await waitFor(
+      () =>
+        core.controlPlaneStateMessages.some(
+          (message) =>
+            message.state === "starting" &&
+            message.crashSignalObserved === true &&
+            message.firstReadyAt !== null,
+        ),
+      "post-crash starting projection stays closed",
+    );
+    const reopened = core.controlPlaneStateMessages.find(
+      (message) => message.state === "starting" && message.crashSignalObserved === true,
+    );
+    expect(reopened).toMatchObject({
+      firstReadyAt: expect.any(Number),
+      crashSignalObserved: true,
+    });
 
     await supervisor.stop();
   });

@@ -1063,6 +1063,8 @@ exceptions:
       - packages/zcode-server-cli/src/supervisor/controlPlaneAuth.ts
       - packages/shared/src/super-agent-control-plane-protocol.ts
       - apps/zcode-cli/packages/bootstrap/src/app/super-agent-daemon-entry.ts
+      - packages/zcode-server-cli/src/server-core/superAgentControlPlanePort.ts
+      - packages/services/src/bots/superAgentControlPlaneSink.ts
     reason: 里程碑 B（super-agent-milestone-b-spec）的 daemon control-plane 生命周期、JSONL RPC 客户端/认证、共享协议契约与 headless entry 装配面（launcher 与 Supervisor 现有 CoreLauncher 同目录同模式；shared 协议模块为跨包共享子路径；headless entry 在 app 组合根同层）。接管整个 zcode-server-cli/shared/zcode-cli legacy 模块不在本次范围内。
   - id: super-agent-phase2-misc-unmanaged-new-file
     rule: unmanaged-new-file

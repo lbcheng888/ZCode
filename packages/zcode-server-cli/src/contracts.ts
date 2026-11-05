@@ -21,6 +21,11 @@ export const CONTROL_CLOSE_TIMEOUT_MS = 2_000;
 export const CONTROL_PLANE_READY_TIMEOUT_MS = 15_000;
 export const CONTROL_PLANE_STOP_GRACE_TIMEOUT_MS = 5_000;
 export const CONTROL_PLANE_KILL_TIMEOUT_MS = 10_000;
+/**
+ * §2.3/§4.2 启动期单一投影：部署门禁（`ControlPlaneOptions`）是否启用随 Core spawn env
+ * 下发。缺省不写，Core 不构造 RPC 客户端并保持 legacy 逐字节行为。
+ */
+export const CONTROL_PLANE_CORE_ENABLED_ENV = "ZCODE_CONTROL_PLANE_CORE_ENABLED";
 // stopInternal 串行收口 Core 与 control-plane 两个独立子进程；等待方预算必须覆盖
 // 「Core 宽限 + 强杀」「control-plane 宽限 + 强杀」以及 control socket 关闭，
 // 另留状态落盘和锁释放余量。control-plane flag 关闭时多留的余量不改变行为。
@@ -248,6 +253,24 @@ export const controlPlaneStatusSchema = z
   })
   .strict();
 export type ControlPlaneStatus = z.infer<typeof controlPlaneStatusSchema>;
+
+/**
+ * Supervisor → Core 的代际状态推送（§3.6 legacy/失败判据的唯一 Core 侧来源）。
+ * Core 进程无法读 Supervisor 内存，也不能直接访问运维 control socket，所以由 Supervisor
+ * 在状态变化时经既有 Core IPC 下发。`crashSignalObserved` 一旦为 true 在本 daemon 代际内
+ * 不再回落（`firstReadyAt` 同理），Core 据此永久关闭 legacy 启动窗口。
+ */
+export const controlPlaneCoreStateMessageSchema = z
+  .object({
+    type: z.literal("control-plane-state"),
+    state: controlPlaneStateSchema,
+    generation: z.number().int().nonnegative(),
+    firstReadyAt: z.number().int().nonnegative().nullable(),
+    crashSignalObserved: z.boolean(),
+    crashBudgetExhausted: z.boolean(),
+  })
+  .strict();
+export type ControlPlaneCoreStateMessage = z.infer<typeof controlPlaneCoreStateMessageSchema>;
 
 export const releaseManifestSchema = z
   .object({

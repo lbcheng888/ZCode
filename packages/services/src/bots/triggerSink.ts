@@ -38,13 +38,25 @@ export interface TriggerSinkEnvelope {
 export type TriggerSinkRoute = "owned" | "human_explicit" | "unowned_candidate" | "rejected";
 
 /**
+ * §3.4 owned 投递结果（additive）：routed=host.command 已受理；
+ * delivery_failed=host 拒绝/未受理，trigger_events.final_disposition 保持 NULL，
+ * 启动重放扫描会重试；两种都仍返回 handled=true 防止 legacy 双跑。
+ */
+export type TriggerSinkDeliveryState = "routed" | "delivery_failed";
+
+/**
  * 摄取结果二分：
  * - handled=false：sink 未接管（no-op 直通 = kill-switch），调用方继续 legacy 直路；
  * - handled=true：事件已归新链路（含幂等短路与 rejected 终态），调用方必须跳过
  *   legacy 直路，避免同一条消息双跑（路由动作由组合根注入的实现侧负责）。
  */
 export type TriggerSinkOutcome =
-  | { handled: true; triggerId: string; route: TriggerSinkRoute }
+  | {
+      handled: true;
+      triggerId: string;
+      route: TriggerSinkRoute;
+      delivery?: TriggerSinkDeliveryState;
+    }
   | { handled: false };
 
 export interface TriggerSink {

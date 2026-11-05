@@ -172,6 +172,13 @@ export type {
 } from "./cua-permission-broker/index.js";
 export { createProjectWorkspaceNavigation } from "#src/project-workspace-navigation/index.js";
 export { createBotsService } from "./bots/botsService.js";
+export {
+  createSuperAgentControlPlaneScheduleAuditor,
+  createSuperAgentControlPlaneTriggerSink,
+  type SuperAgentControlPlaneRpcPort,
+  type SuperAgentScheduleAuditInput,
+  type SuperAgentScheduleAuditor,
+} from "./bots/superAgentControlPlaneSink.js";
 export { createFileWatcherService } from "./fileWatcher/fileWatcherService.js";
 export { createOAuthService } from "./oauth/oauthService.js";
 export { createOAuthProviderLogoutHandler } from "./oauth/oauthProviderLogout.js";
@@ -434,6 +441,11 @@ import { TaskIndexRepo } from "./session/taskIndexRepo.js";
 import { AutomationRepo } from "#src/session/automationRepo.js";
 import type { AppSettings } from "@zcode/shared";
 import { createBotsService } from "./bots/botsService.js";
+import type { TriggerSink } from "./bots/triggerSink.js";
+import {
+  createSuperAgentControlPlaneTriggerSink,
+  type SuperAgentControlPlaneRpcPort,
+} from "./bots/superAgentControlPlaneSink.js";
 import { BotsRepo } from "#src/bots/repo.js";
 import {
   createBotProjectRuntime,
@@ -1253,6 +1265,12 @@ export function createLocalServices(options: {
   resolveProjectHostService?: (hostId: string) => Promise<IProjectService>;
   /** Bot 复用窗口已有 Source 连接；不经 main 创建 workspace attachment。 */
   resolveBotProjectConnection?: (hostId: string) => BotProjectConnection | undefined;
+  /**
+   * Phase 2 触发出口（milestone-b-spec §4.2）：宿主装配层注入的 TriggerSink。
+   * 缺省 undefined = 现有 legacy 直路（desktop/bootstrap host 现状）；只有 Core 宿主
+   * 注入 RPC sink。bot 维度是否进入还要求 BotConfig.eventRouterEnabled=true。
+   */
+  triggerSink?: TriggerSink;
   remoteProjectConnection?: Pick<
     Parameters<typeof createRemoteProjectService>[0],
     "connectHost" | "readConnectionStates"
@@ -2696,6 +2714,7 @@ export function createLocalServices(options: {
         // 远端与本地 Bot 都读取所属 Environment 的 Model Selection View。
         // 远端启动期不再轮询旧 Preset，避免重新制造一套模型候选事实。
         runStartupBackgroundTasks: !isDesktopAttachedRemote,
+        ...(options?.triggerSink ? { triggerSink: options.triggerSink } : {}),
       }),
     )
     .register(IFileWatcherService, createFileWatcherService())
@@ -3223,6 +3242,12 @@ export async function createServerHostServices(options: {
   sourceServerId: string;
   zcodeBuiltinProviderConfigFilePath: string;
   providerProvisioningTargetEnabled?: boolean;
+  /**
+   * milestone-b-spec §4.2：Core 装配层构造的 control-plane RPC 窄端口（真实客户端
+   * `createControlPlaneClient({ serverRoot })` + §3.8 凭据在 server-core 内组装）。
+   * 缺省 undefined = 不注入 TriggerSink，botsService 走 legacy 直路（现状）。
+   */
+  superAgentControlPlaneRpcPort?: SuperAgentControlPlaneRpcPort;
 }) {
   const projectStorageHostId = remoteHostIdFromWorkspaceIdentity(
     buildServerRemoteWorkspaceIdentity({ serverId: options.sourceServerId, workspacePath: "/" }),
@@ -3245,6 +3270,9 @@ export async function createServerHostServices(options: {
     },
   });
   const migrationFailedPathCount = await workspaceAliasRepo.getFailedPathCount();
+  const triggerSink = options.superAgentControlPlaneRpcPort
+    ? createSuperAgentControlPlaneTriggerSink(options.superAgentControlPlaneRpcPort)
+    : undefined;
   const services = createLocalServices({
     zcodeBuiltinProviderConfigFilePath: options.zcodeBuiltinProviderConfigFilePath,
     providerProvisioningTargetEnabled: options.providerProvisioningTargetEnabled,
@@ -3252,6 +3280,7 @@ export async function createServerHostServices(options: {
     topicResourceRelayChannel: options.topicResourceRelayChannel,
     projectStorageHostId,
     sourceServerWorkspaceService,
+    ...(triggerSink ? { triggerSink } : {}),
   });
   return { services, workspaceIdentityMapper, migrationFailedPathCount };
 }
