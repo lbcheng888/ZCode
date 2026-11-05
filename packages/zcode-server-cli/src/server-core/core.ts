@@ -100,6 +100,12 @@ export async function runServerCore(generation: number): Promise<void> {
         ? { superAgentControlPlaneRpcPort: controlPlaneCorePort.port }
         : {}),
     });
+  // B3 daemon scheduler 延后启动（B-SPEC §4.4.3 原子切换门禁）：scheduler 的 push/sweep
+  // 循环与 Core 侧 `host.command` 尚未生产接线（§3.3 实现缺口）。此时启动 scheduler 会
+  // claim + 审计 + 写 pending_dispatch，却无消费者 push/settle；Desktop Main fork 又因
+  // per-workspace 租约让位释放认领（manual/off-peak 同样让位），定时任务立即静默停摆、
+  // pending 行无 TTL 无限增长。故桥循环接线批之前不构造/不启动 scheduler，保持 Desktop
+  // 全权直派（与 trigger-subsystem-spec §5.2 ws7「桥行延后」裁定同款）。
   const taskActivityTracker = createTaskActivityTracker(services.getOptional(IZCodeAgentService));
   const ingressToken = await createIngressToken(layout);
   const http = await createCoreHttpServer(services, {

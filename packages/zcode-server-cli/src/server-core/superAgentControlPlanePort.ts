@@ -21,6 +21,7 @@ import {
   backfillSeedsResultSchema,
   type ControlPlaneTriggerEnvelope,
   type ControlPlaneTriggerIngestResult,
+  type LeaseListResult,
   type ScheduleAuditParams,
   type WorkspaceEnsureResult,
 } from "@zcode/shared/super-agent-control-plane-protocol";
@@ -119,6 +120,20 @@ export interface SuperAgentControlPlaneCorePortOptions {
 export interface SuperAgentControlPlaneCorePort {
   readonly port: SuperAgentControlPlaneRpcPort;
   readonly gate: SuperAgentControlPlaneGenerationGate;
+  /**
+   * §4.4：Core scheduler 只对 child 已 leader 的 workspace claim。ensure 负责让 child
+   * 为该 workspace 建 plane 并抢租约（leader 结果按 child 代际缓存）；follower 不缓存，
+   * 后续 tick 可重新 ensure 接管。
+   */
+  ensureWorkspace(
+    workspaceIdentity: string,
+    workspacePath?: string,
+  ): Promise<WorkspaceEnsureResult>;
+  /**
+   * §3.2 `lease.list`：Core scheduler 的租约门控唯一读面。Core 不直接打开
+   * `super-agent.sqlite`（§0.3/§4.4）。返回结果包含过期行，过滤由调用方按 now 做。
+   */
+  listLeases(): Promise<LeaseListResult>;
 }
 
 /**
@@ -164,7 +179,10 @@ export function createSuperAgentControlPlaneCorePort(
     await connecting;
   }
 
-  async function ensureWorkspace(workspaceIdentity: string): Promise<WorkspaceEnsureResult> {
+  async function ensureWorkspace(
+    workspaceIdentity: string,
+    workspacePath?: string,
+  ): Promise<WorkspaceEnsureResult> {
     const generation = gate.get().generation;
     const cached = leaderEnsures.get(workspaceIdentity);
     if (cached?.generation === generation) return cached.result;
@@ -172,6 +190,7 @@ export function createSuperAgentControlPlaneCorePort(
       workspaceIdentity,
       tasksIndexReady,
       tasksIndexDatabasePath,
+      ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
     });
     if (result.state === "leader") {
       leaderEnsures.set(workspaceIdentity, { generation, result });
@@ -249,5 +268,33 @@ export function createSuperAgentControlPlaneCorePort(
     },
   };
 
-  return { port, gate };
+  return {
+    port,
+    gate,
+    async ensureWorkspace(workspaceIdentity: string, workspacePath?: string) {
+      // 启动窗口内不得 ensure：child 尚未 ready，租约事实不可信（§2.5/§3.6）。
+      if (gate.isStartingWindowOpen()) {
+        throw new ControlPlaneRpcError(
+          CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+          "workspace.ensure: control plane is still starting",
+          true,
+        );
+      }
+      gate.requireReady("workspace.ensure");
+      await ensureConnected();
+      return ensureWorkspace(workspaceIdentity, workspacePath);
+    },
+    async listLeases() {
+      if (gate.isStartingWindowOpen()) {
+        throw new ControlPlaneRpcError(
+          CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+          "lease.list: control plane is still starting",
+          true,
+        );
+      }
+      gate.requireReady("lease.list");
+      await ensureConnected();
+      return client.request("lease.list", {});
+    },
+  };
 }

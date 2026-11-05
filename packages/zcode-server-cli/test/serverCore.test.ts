@@ -132,7 +132,7 @@ describe("runServerCore startup wiring", () => {
     expect(createIngressToken).toHaveBeenCalledWith(layout);
   });
 
-  it("deployment gate on: injects the production RPC port into host services", async () => {
+  it("deployment gate on: injects the production RPC port but defers the daemon scheduler", async () => {
     process.env[CONTROL_PLANE_CORE_ENABLED_ENV] = "1";
 
     await runServerCore(1);
@@ -144,6 +144,16 @@ describe("runServerCore startup wiring", () => {
           scheduleAudit: expect.any(Function),
         }),
       }),
+    );
+    // B-SPEC §4.4.3：push/sweep 与 Core host.command 未接线前不启动 scheduler，
+    // 保持 Desktop Main fork 全权直派（见 core.ts 门禁注释）。
+  });
+
+  it("deployment gate off: does not inject the production RPC port", async () => {
+    await runServerCore(1);
+
+    expect(createServerHostServices).toHaveBeenCalledWith(
+      expect.not.objectContaining({ superAgentControlPlaneRpcPort: expect.anything() }),
     );
   });
 
