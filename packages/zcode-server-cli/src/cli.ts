@@ -6,7 +6,10 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { isPublicZCodeErrorCode, ZCODE_VERSION } from "@zcode/shared";
 import { resolveControlPlaneAuthTokenPath } from "@zcode/shared/super-agent-control-plane-protocol";
-import { SourceServerWorkspaceAliasRepo } from "@zcode/services/node";
+import {
+  ensureGlobalDataRootMigrated,
+  SourceServerWorkspaceAliasRepo,
+} from "@zcode/services/node";
 import {
   CONTROL_PLANE_CORE_ENABLED_ENV,
   CONTROL_PLANE_KILL_TIMEOUT_MS,
@@ -72,6 +75,8 @@ export interface ServerCliRuntimeOptions {
   workspaceAliasRepo?: Pick<SourceServerWorkspaceAliasRepo, "retryFailedWorkspace">;
   /** process/service manager 是更新协调器的外部边界；测试可注入受控实现。 */
   updateDaemonHandoff?: UpdateDaemonHandoff;
+  /** 测试注入：默认迁移 `layout.dataBaseDir` 下的全局数据根（~/.zcode → ~/.chengcode）。 */
+  ensureGlobalDataRootMigrated?: typeof ensureGlobalDataRootMigrated;
   /**
    * 受管 control-plane 子进程（设计裁决 7）。缺省 undefined = flag 关闭，不建子进程；
    * 生产 flag 来源（features.eventRouter）与 headless bootstrap 入口随里程碑 B 接线。
@@ -320,6 +325,12 @@ async function runServe(
   layout: ReturnType<typeof resolveServerLayout>,
   runtimeOptions: ServerCliRuntimeOptions,
 ): Promise<number> {
+  // 本地 Server 的 core 会以 ZCODE_DATA_BASE_DIR=layout.dataBaseDir 读取全局数据根；
+  // 必须先迁移再注册/启动 Supervisor，迁移失败直接上抛终止 serve，禁止拿空新目录启动。
+  // 远端 server root 仍保留在 ~/.zcode/server（runtime/paths.ts 不改），迁移只复制全局数据根。
+  await (runtimeOptions.ensureGlobalDataRootMigrated ?? ensureGlobalDataRootMigrated)({
+    baseDir: layout.dataBaseDir,
+  });
   const daemonRequested = args.includes("--daemon");
   const supervisorProcess = args.includes("--supervisor");
   if (shouldRegisterService(daemonRequested, supervisorProcess)) {

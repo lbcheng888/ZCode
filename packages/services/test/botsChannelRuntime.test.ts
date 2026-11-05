@@ -829,7 +829,7 @@ describe("bot channel runtime lock", () => {
     const lockHash = createHash("sha256").update(token).digest("hex");
     const lockPath = join(
       tempDir,
-      ".zcode",
+      ".chengcode",
       "v2",
       "bots-runtime-locks",
       "telegram-polling",

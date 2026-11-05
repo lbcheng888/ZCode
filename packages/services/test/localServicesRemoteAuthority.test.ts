@@ -17,7 +17,7 @@ function makeTempHome(): string {
 }
 
 function writeLegacyZapiConfig(home: string): void {
-  const configDir = join(home, ".zcode", "v2");
+  const configDir = join(home, ".chengcode", "v2");
   mkdirSync(configDir, { recursive: true });
   writeFileSync(
     join(configDir, "config.json"),
@@ -224,7 +224,7 @@ describe("createLocalServices remote authority", () => {
   it("只在本进程成功持久化 Provisioning Source 事实后通知 Host", async () => {
     const home = makeTempHome();
     process.env.HOME = home;
-    mkdirSync(join(home, ".zcode", "v2"), { recursive: true });
+    mkdirSync(join(home, ".chengcode", "v2"), { recursive: true });
     const onProviderProvisioningSourceChanged = vi.fn();
     const [{ createLocalServices, disposeServiceResources }, serviceDescriptors] =
       await Promise.all([import("../src/node.js"), import("../src/index.js")]);

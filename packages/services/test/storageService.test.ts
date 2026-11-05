@@ -8,12 +8,12 @@ import type {
 } from "../src/storage/app/ports.js";
 import type { StorageRootSpec, StorageUsageSnapshot } from "@zcode/shared";
 
-const homeRoot: StorageRootSpec = { id: "home", path: "/h/.zcode", hasCustomDataBaseDir: false };
+const homeRoot: StorageRootSpec = { id: "home", path: "/h/.chengcode", hasCustomDataBaseDir: false };
 
 function rootUsage(bytes: number) {
   return {
     id: "home" as const,
-    path: "/h/.zcode",
+    path: "/h/.chengcode",
     volume: null,
     bytes,
     fileCount: 1,
@@ -148,12 +148,12 @@ describe("createStorageService", () => {
     await flush();
     const result = await service.clean({ rootId: "home", categoryId: "modelTrajectory" });
     expect(runs[0]!.request.signal.aborted).toBe(true);
-    expect(listCandidates).toHaveBeenCalledWith("/h/.zcode", [
+    expect(listCandidates).toHaveBeenCalledWith("/h/.chengcode", [
       { prefix: "cli/debug", recursive: true },
       { prefix: "cli/rollout", recursive: true },
     ]);
     expect(deleteFiles).toHaveBeenCalledWith(
-      "/h/.zcode",
+      "/h/.chengcode",
       expect.arrayContaining([
         expect.objectContaining({ relativePath: "cli/debug/model-io-a.jsonl" }),
         expect.objectContaining({ relativePath: "cli/rollout/model-io-b.jsonl" }),

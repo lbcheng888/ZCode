@@ -85,7 +85,7 @@ describe("ensureDesktopDeviceMidSync", () => {
     // telemetryCore 用 homeDir 定位 state 文件：{homeDir}/.zcode/v2/telemetry-state.json
     // 让该路径正好等于本测试的 configDir，验证两侧读同一字段。
     const home = makeTempDir();
-    const sharedDir = join(home, ".zcode", "v2");
+    const sharedDir = join(home, ".chengcode", "v2");
     mkdirSync(sharedDir, { recursive: true });
     writeFileSync(
       join(sharedDir, "telemetry-state.json"),

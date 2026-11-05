@@ -18,7 +18,7 @@ import type { SuperAgentControlPlaneRpcPort } from "../../src/bots/superAgentCon
  * server-cli 的 superAgentControlPlanePort 测试里用生产 client 覆盖）。
  */
 const home = process.env.HOME!;
-const configDir = join(home, ".zcode", "v2");
+const configDir = join(home, ".chengcode", "v2");
 await mkdir(configDir, { recursive: true, mode: 0o700 });
 const workspacePath = join(home, "repo");
 await mkdir(workspacePath, { recursive: true });

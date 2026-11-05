@@ -383,7 +383,7 @@ export function resolveHeadlessProviderRuntimeEnv(
 ): Record<string, string | undefined> {
   const explicitBuiltin = env[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]?.trim();
   const explicitPersonal = env[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]?.trim();
-  const configRoot = join(dataBaseDir, ".zcode", "v2");
+  const configRoot = join(dataBaseDir, ".chengcode", "v2");
   return {
     ...env,
     ZCODE_DATA_BASE_DIR: dataBaseDir,

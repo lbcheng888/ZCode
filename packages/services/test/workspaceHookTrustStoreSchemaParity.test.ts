@@ -54,7 +54,7 @@ function setupWorkspaceWithHook(): { home: string; workspace: string } {
 }
 
 function trustStorePath(home: string): string {
-  return join(home, ".zcode", "security", "workspace-hook-trust-v1.json");
+  return join(home, ".chengcode", "security", "workspace-hook-trust-v1.json");
 }
 
 const VALID_DIGEST = "a".repeat(64);

@@ -59,7 +59,7 @@ test("resolves the development ZCode Built-in Config and shared Personal Config"
   assertActiveConfigPath(prepared[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV], join(root, "home"));
   assert.equal(
     prepared[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV],
-    join(root, "home/.zcode/v2/provider_config.json"),
+    join(root, "home/.chengcode/v2/provider_config.json"),
   );
   const activeFilePath = prepared[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV];
 
@@ -120,7 +120,7 @@ test("materializes the SEA config in the fixed environment resource path, separa
   assert.equal(reads, 1);
   const resource = join(
     root,
-    ".zcode",
+    ".chengcode",
     "v2",
     "runtime",
     "provider",
@@ -163,7 +163,7 @@ function assertActiveConfigPath(filePath: string | undefined, dataBaseDir: strin
   // 不能用斜杠正则误拒绝 Windows；逐层校验仍包含环境、平台、版本和 Endpoint。
   assert.equal(
     dirname(dirname(filePath)),
-    join(dataBaseDir, ".zcode", "v2", "runtime", "provider", "test-platform", "test-version"),
+    join(dataBaseDir, ".chengcode", "v2", "runtime", "provider", "test-platform", "test-version"),
   );
   assert.match(basename(dirname(filePath)), /^endpoint-[a-f0-9]{32}$/u);
   assert.equal(basename(filePath), "zcode-builtin.json");

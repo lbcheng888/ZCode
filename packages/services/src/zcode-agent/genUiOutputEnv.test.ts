@@ -28,7 +28,7 @@ it("passes the executor data directory to the spawned Agent over environment ove
   try {
     const client = await manager.getClient({ workspacePath: root });
     const outputRoot = await client.request("session/list", {}, z.string());
-    expect(outputRoot).toBe(join(root, ".zcode", "v2", "visualizations"));
+    expect(outputRoot).toBe(join(root, ".chengcode", "v2", "visualizations"));
   } finally {
     await manager.disposeAllAndWait();
     setDataBaseDir(previous);

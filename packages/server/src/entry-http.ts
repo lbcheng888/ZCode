@@ -7,9 +7,13 @@ import {
   materializeBundledZCodeBuiltinProviderConfig,
   readBundledZCodeBuiltinProviderConfig,
 } from "./bundledZCodeBuiltinProviderConfig.js";
+import { migrateServerGlobalDataRoots } from "./global-data-root-migration.js";
 import { createHttpServer, resolveHttpServerId } from "./http.js";
 
 async function main(): Promise<void> {
+  // 先迁移旧全局数据根（home 根与自定义 dataBaseDir），再读取任何 config / 打开数据库；
+  // 失败由外层 catch 直接退出。
+  await migrateServerGlobalDataRoots();
   const zcodeBuiltinProviderConfigFilePath = await materializeBundledZCodeBuiltinProviderConfig({
     environmentConfigRoot: getAppConfigDir(),
     content: readBundledZCodeBuiltinProviderConfig(),

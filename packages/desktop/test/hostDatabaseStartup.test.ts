@@ -1,9 +1,19 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
+import {
+  ensureGlobalDataRootMigrated,
+  setDataBaseDir,
+} from "../../services/src/paths.js";
 
-const fixtures = vi.hoisted(() => ({ host: vi.fn(), session: vi.fn(), mark: vi.fn() }));
+const fixtures = vi.hoisted(() => ({
+  host: vi.fn(),
+  session: vi.fn(),
+  mark: vi.fn(),
+  migrate: vi.fn(),
+}));
 vi.mock("@zcode/services/storage-startup", () => ({
   getTasksIndexDatabasePath: () => "/isolated/tasks.sqlite",
   resolveZCodeAgentSpawnCwd: async (...args: unknown[]) =>
@@ -17,6 +27,14 @@ vi.mock("../src/host/database-startup/storagePreparationProcesses.js", () => ({
   prepareSessionStorage: fixtures.session,
 }));
 import { createHostDatabaseStartup } from "../src/host/database-startup/hostDatabaseStartup.js";
+
+beforeEach(() => {
+  fixtures.host.mockReset();
+  fixtures.session.mockReset();
+  fixtures.mark.mockReset();
+  fixtures.migrate.mockReset();
+  fixtures.migrate.mockResolvedValue({ status: "fresh", targetDir: "/isolated/.chengcode" });
+});
 
 it("prepares actual restored working directories before publishing services, without a fake workspace", async () => {
   const dir = await mkdtemp(join(tmpdir(), "zcode-startup-cwd-"));
@@ -36,9 +54,13 @@ it("prepares actual restored working directories before publishing services, wit
     },
     publish: () => {},
     onFailure: () => {},
+    ensureGlobalDataRootMigrated: fixtures.migrate,
   });
   try {
     await startup.coordinator.start();
+    expect(fixtures.migrate.mock.invocationCallOrder[0]).toBeLessThan(
+      fixtures.host.mock.invocationCallOrder[0]!,
+    );
     expect(sequence).toEqual(["host", dir, "services"]);
     expect(startup.coordinator.snapshot.startupId).toBe("host-startup-test");
     expect(startup.coordinator.snapshot.phase).toBe("ready");
@@ -64,6 +86,7 @@ it("uses the normal Agent fallback for ENOTDIR and preserves actual database fai
     initializeServices: initialized,
     publish: () => {},
     onFailure: failure,
+    ensureGlobalDataRootMigrated: fixtures.migrate,
   });
   try {
     await startup.coordinator.start();
@@ -88,6 +111,98 @@ it("uses the normal Agent fallback for ENOTDIR and preserves actual database fai
   }
 });
 
+it("在打开任何数据库之前完成旧数据根迁移，旧目录保留", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-startup-migration-"));
+  await mkdir(join(base, ".zcode", "v2"), { recursive: true });
+  await writeFile(join(base, ".zcode", "v2", "seed.txt"), "legacy");
+  const sequence: string[] = [];
+  fixtures.host.mockImplementation(async () => {
+    sequence.push("host");
+  });
+  fixtures.session.mockImplementation(async () => {
+    sequence.push("session");
+  });
+  const startup = createHostDatabaseStartup({
+    cwd: base,
+    workingDirectories: [base],
+    initializeServices: async () => {
+      sequence.push("services");
+    },
+    publish: () => {},
+    onFailure: () => {},
+    ensureGlobalDataRootMigrated: async () => await ensureGlobalDataRootMigrated({ baseDir: base }),
+  });
+  try {
+    await startup.coordinator.start();
+    expect(sequence).toEqual(["host", "session", "services"]);
+    expect(existsSync(join(base, ".chengcode", "v2", "seed.txt"))).toBe(true);
+    expect(existsSync(join(base, ".zcode", "v2", "seed.txt"))).toBe(true);
+    expect(startup.coordinator.snapshot.phase).toBe("ready");
+  } finally {
+    startup.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+it("迁移失败时直接失败启动，不打开数据库也不初始化服务", async () => {
+  const failure = new Error("migration copy failed");
+  fixtures.migrate.mockRejectedValue(failure);
+  const initialized = vi.fn();
+  const onFailure = vi.fn();
+  const states: import("@zcode/shared").DatabaseStartupState[] = [];
+  const startup = createHostDatabaseStartup({
+    cwd: tmpdir(),
+    initializeServices: initialized,
+    publish: (state) => states.push(state),
+    onFailure,
+    ensureGlobalDataRootMigrated: fixtures.migrate,
+  });
+  try {
+    await startup.coordinator.start();
+    expect(fixtures.host).not.toHaveBeenCalled();
+    expect(fixtures.session).not.toHaveBeenCalled();
+    expect(initialized).not.toHaveBeenCalled();
+    expect(onFailure).toHaveBeenCalledWith(failure);
+    expect(states.at(-1)).toMatchObject({ phase: "failed", failedPhase: "starting" });
+  } finally {
+    startup.dispose();
+  }
+});
+
+it("迁移 home 根与自定义 dataBaseDir 两个数据根，避免 setting.json 落在旧根", async () => {
+  const home = await mkdtemp(join(tmpdir(), "zcode-startup-home-"));
+  const custom = await mkdtemp(join(tmpdir(), "zcode-startup-custom-"));
+  const originalDesktopHome = process.env.ZCODE_DESKTOP_HOME_DIR;
+  const calls: Array<string | undefined> = [];
+  process.env.ZCODE_DESKTOP_HOME_DIR = home;
+  setDataBaseDir(custom);
+  const startup = createHostDatabaseStartup({
+    cwd: home,
+    workingDirectories: [home],
+    initializeServices: async () => {},
+    publish: () => {},
+    onFailure: () => {},
+    ensureGlobalDataRootMigrated: async (options) => {
+      calls.push(options?.baseDir);
+      return { status: "fresh", targetDir: join(options?.baseDir ?? "", ".chengcode") };
+    },
+  });
+  try {
+    await startup.coordinator.start();
+    expect(calls).toEqual([home, custom]);
+  } finally {
+    startup.dispose();
+    setDataBaseDir(null);
+    if (originalDesktopHome === undefined) {
+      delete process.env.ZCODE_DESKTOP_HOME_DIR;
+    } else {
+      process.env.ZCODE_DESKTOP_HOME_DIR = originalDesktopHome;
+    }
+    await rm(home, { recursive: true, force: true });
+    await rm(custom, { recursive: true, force: true });
+  }
+});
+
 it("only marks the last session database as eligible for global saving/finishing", async () => {
   const dir = await mkdtemp(join(tmpdir(), "zcode-startup-final-db-"));
   const states: import("@zcode/shared").DatabaseStartupState[] = [];
@@ -103,6 +218,7 @@ it("only marks the last session database as eligible for global saving/finishing
     initializeServices: async () => {},
     publish: (state) => states.push(state),
     onFailure: () => {},
+    ensureGlobalDataRootMigrated: fixtures.migrate,
   });
   try {
     await startup.coordinator.start();

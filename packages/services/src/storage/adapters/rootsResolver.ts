@@ -1,12 +1,13 @@
 /**
- * 数据根解析：R1 = 家目录下的 .zcode（永远存在），R2 = 自定义数据存储路径下的 .zcode（仅当设置了且 ≠ 家目录）。
+ * 数据根解析：R1 = 家目录下的 .chengcode（永远存在），R2 = 自定义数据存储路径下的 .chengcode（仅当设置了且 ≠ 家目录）。
  * 路径来源由调用方注入（desktop host 传 homedir 与 getDataBaseDir），模块内不读环境变量。
+ * 旧 .zcode 目录只作为迁移备份，不再是活跃存储根。
  */
 import { join, resolve } from "node:path";
 import type { RootsResolverPort } from "../app/ports.js";
 import type { StorageRootSpec } from "@zcode/shared";
 
-export const ZCODE_DATA_DIR_NAME = ".zcode";
+export const ZCODE_DATA_DIR_NAME = ".chengcode";
 
 export function resolveStorageRoots(params: {
   homeDir: string;

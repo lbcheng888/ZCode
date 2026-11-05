@@ -13,18 +13,24 @@ function getLogDir() {
   return join(getAppConfigDir(), "logs");
 }
 
-// 启动时确保日志目录存在
-const LOG_DIR = getLogDir();
-mkdirSync(LOG_DIR, { recursive: true });
-
-const logRetentionResult = cleanupExpiredLogFiles(LOG_DIR);
-if (logRetentionResult.failedFiles.length > 0) {
-  safeConsoleWrite(
-    "warn",
-    `[log-retention] failed to delete expired logs from ${LOG_DIR}:`,
-    logRetentionResult.failedFiles,
-    `retentionDays=${LOG_RETENTION_DAYS}`,
-  );
+// 日志目录延迟到首次写日志时创建：main 的全局数据根迁移必须先于任何目录写入，
+// 否则 ~/.chengcode/v2/logs 会在迁移前出现，迁移器会把它当成“新根已存在”而拒绝复制旧数据。
+let logDirInitialized = false;
+function ensureLogDirInitialized(): string {
+  const logDir = getLogDir();
+  if (logDirInitialized) return logDir;
+  logDirInitialized = true;
+  mkdirSync(logDir, { recursive: true });
+  const logRetentionResult = cleanupExpiredLogFiles(logDir);
+  if (logRetentionResult.failedFiles.length > 0) {
+    safeConsoleWrite(
+      "warn",
+      `[log-retention] failed to delete expired logs from ${logDir}:`,
+      logRetentionResult.failedFiles,
+      `retentionDays=${LOG_RETENTION_DAYS}`,
+    );
+  }
+  return logDir;
 }
 
 type LogLevel = "debug" | "info" | "warn" | "error";
@@ -76,8 +82,7 @@ function write(level: LogLevel, source: string, ...args: unknown[]) {
   const pid = process.pid;
   const message = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
   const line = `[${ts}] [${level}] [pid:${pid}] [${source}] ${message}\n`;
-  const logDir = getLogDir();
-  mkdirSync(logDir, { recursive: true });
+  const logDir = ensureLogDirInitialized();
   const filePath = join(logDir, `${formatDate(now)}.log`);
 
   // 同时保留 console 输出，方便开发调试；console 也加时间戳和 PID，与文件格式对齐
@@ -97,8 +102,7 @@ function writeDedicated(filePrefix: string, level: LogLevel, source: string, ...
   const pid = process.pid;
   const message = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
   const line = `[${ts}] [${level}] [pid:${pid}] [${source}] ${message}\n`;
-  const logDir = getLogDir();
-  mkdirSync(logDir, { recursive: true });
+  const logDir = ensureLogDirInitialized();
   // Bugfix: 远控 relay trace 与主日志混放时，目录内文件会快速增多，人工排查不直观。
   // 这里把高频 trace 分流到 logs 子目录，避免影响主日志浏览与导出定位。
   const dedicatedDir = join(logDir, "web-remote-control");

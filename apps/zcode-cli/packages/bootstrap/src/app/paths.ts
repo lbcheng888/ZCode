@@ -42,7 +42,7 @@ export function getSuperAgentDatabasePath(baseDir?: string): string {
     process.env.ZCODE_DATA_BASE_DIR?.trim() ||
     process.env.HOME?.trim() ||
     homedir();
-  return join(dataBaseDir, ".zcode", "v2", "super-agent.sqlite");
+  return join(dataBaseDir, ".chengcode", "v2", "super-agent.sqlite");
 }
 
 export function projectIdFromDirectory(directory: string): ProjectId {

@@ -274,12 +274,12 @@ async function createTemporaryRoot(): Promise<string> {
 }
 
 function telemetryStateFile(root: string): string {
-  return join(root, ".zcode", "v2", "telemetry-state.json");
+  return join(root, ".chengcode", "v2", "telemetry-state.json");
 }
 
 async function writeTelemetryState(root: string, state: Record<string, unknown>): Promise<string> {
   const stateFile = telemetryStateFile(root);
-  await mkdir(join(root, ".zcode", "v2"), { recursive: true });
+  await mkdir(join(root, ".chengcode", "v2"), { recursive: true });
   await writeFile(stateFile, JSON.stringify(state, null, 2), "utf-8");
   return stateFile;
 }

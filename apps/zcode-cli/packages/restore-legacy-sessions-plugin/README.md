@@ -24,9 +24,9 @@ Changes apply to new sessions. After enabling, use:
 
 ## Data Boundaries
 
-- Default source: `~/.zcode/v2/sessions`
-- Task index destination: `~/.zcode/v2/tasks-index.sqlite`
-- CLI session DB destination: `~/.zcode/cli/db/db.sqlite`
+- Default source (read-only legacy backup): `~/.zcode/v2/sessions`
+- Task index destination: `~/.chengcode/v2/tasks-index.sqlite`
+- CLI session DB destination: `~/.chengcode/cli/db/db.sqlite`
 
 The restore scripts create timestamped DB backups before writing. Restored ACP-era conversations are persisted as normal `glm` ChengCode Agent history and do not write `migration_source`.
 

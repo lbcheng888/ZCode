@@ -18,7 +18,10 @@ import {
 } from "#src/project/index.js";
 export { createLegacySingleRootProjectService } from "#src/project/index.js";
 export { createRemoteProjectService } from "#src/remote-projects/index.js";
-import { getZCodeDataRootDir as projectDataRoot } from "#src/paths.js";
+import {
+  getZCodeDataRootDir as projectDataRoot,
+  GLOBAL_DATA_DIR_NAME,
+} from "#src/paths.js";
 import { createTaskGroupService, ITaskGroupService, groupTaskKey } from "#src/task-groups/index.js";
 import { IGenUiService } from "./gen-ui/contract.js";
 import { createGenUiService } from "./gen-ui/node.js";
@@ -113,6 +116,8 @@ export {
   getZCodeDataRootDir,
   getConversationWorkspaceDir,
   getAppConfigDir,
+  getGlobalDataRootMigrationBaseDirs,
+  resolveUserHomeDir,
   getExportLogStageDir,
   getExportLogDir,
   getFeedbackRootDir,
@@ -120,8 +125,16 @@ export {
   getFeedbackLogArchiveDir,
   getGitCheckpointIndexRootDir,
   copyDataDirectory,
+  ensureGlobalDataRootMigrated,
   validateDataBaseDirTarget,
+  GLOBAL_DATA_DIR_NAME,
+  LEGACY_GLOBAL_DATA_DIR_NAME,
+  GLOBAL_DATA_ROOT_MIGRATION_LOCK_FILE_NAME,
   ZCODE_WINDOWS_APP_INSTALL_DIR_ENV,
+} from "./paths.js";
+export type {
+  EnsureGlobalDataRootMigrationOptions,
+  EnsureGlobalDataRootMigrationResult,
 } from "./paths.js";
 export { createGitService } from "./git/gitService.js";
 export { GitCommitMessageGenerator } from "./git/gitCommitMessageGenerator.js";
@@ -1152,7 +1165,7 @@ export { isOfficialCuaPluginEnabledForWorkspace };
 
 export function hasGlobalCliZCodeCuaServer(env: NodeJS.ProcessEnv = process.env): boolean {
   const home = env.HOME?.trim() || homedir();
-  const configPath = join(home, ".zcode", "cli", "config.json");
+  const configPath = join(home, GLOBAL_DATA_DIR_NAME, "cli", "config.json");
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, "utf8"));

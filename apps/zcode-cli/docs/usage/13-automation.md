@@ -86,7 +86,7 @@ pnpm --filter @zcode/prompt-trajectory model-io -- --input /absolute/path/to/mod
 
 转换器默认关注主轮次，展开可恢复的增量并按连续片段处理；它无法补回已裁剪、覆盖或缺失的请求。非增量请求也不能直接解释为 provider 缓存未命中。输出格式及记录工具说明见[轨迹工具](../../tools/prompt-trajectory/README.md)。
 
-本次对当前源码生成的默认日志执行上述命令，得到 `model-io request.body must contain a messages array.`：记录中的 `request.body.messages` 已被裁掉，转换器要求该字段。此路径未通过实际转换验收，不能直接用作训练数据流水线。保留原始日志和错误；不要把内部 `request.messages` 强行填回 provider 请求体来伪造完整记录。默认日志在本次运行中位于隔离数据目录的 `.zcode/cli/rollout/`。
+本次对当前源码生成的默认日志执行上述命令，得到 `model-io request.body must contain a messages array.`：记录中的 `request.body.messages` 已被裁掉，转换器要求该字段。此路径未通过实际转换验收，不能直接用作训练数据流水线。保留原始日志和错误；不要把内部 `request.messages` 强行填回 provider 请求体来伪造完整记录。默认日志在本次运行中位于隔离数据目录的 `.zcode/cli/rollout/`（迁移后默认全局路径为 `~/.chengcode/cli/rollout/`）。
 
 同一辅助包的 `record:prompt` 在本次源码基线上也未通过：启动时报 `createModelAdapter requires executionConfig`，尚未发出模型请求。它需要单独修复后再验收，不能作为当前可用的采集命令交付。
 

@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -38,7 +39,7 @@ describe("paths", () => {
     vi.resetModules();
 
     const { copyDataDirectory } = await import("../src/paths.js");
-    const oldV2Dir = join(oldBase, ".zcode", "v2");
+    const oldV2Dir = join(oldBase, ".chengcode", "v2");
     const oldSharedSkillRoot = join(oldV2Dir, "agent-config", "claude", "skills");
     const oldSharedPluginRoot = join(oldV2Dir, "agent-config", "claude", "plugins");
     const oldWorkspaceRoot = join(oldV2Dir, "agent-config", "claude", "workspace-hash-1");
@@ -54,21 +55,26 @@ describe("paths", () => {
 
     await copyDataDirectory(oldBase, newBase);
 
-    const newV2Dir = join(newBase, ".zcode", "v2");
+    const newV2Dir = join(newBase, ".chengcode", "v2");
     const newWorkspaceRoot = join(newV2Dir, "agent-config", "claude", "workspace-hash-1");
     const newSkillLink = join(newWorkspaceRoot, "skills");
     const newPluginLink = join(newWorkspaceRoot, "plugins");
 
     expect(readFileSync(join(newWorkspaceRoot, "settings.json"), "utf-8")).toBe('{"model":"demo"}');
-    expect(existsSync(newSkillLink)).toBe(false);
-    expect(existsSync(newPluginLink)).toBe(false);
+    if (process.platform === "win32") {
+      expect(existsSync(newSkillLink)).toBe(false);
+      expect(existsSync(newPluginLink)).toBe(false);
+    } else {
+      expect(lstatSync(newSkillLink).isSymbolicLink()).toBe(true);
+      expect(lstatSync(newPluginLink).isSymbolicLink()).toBe(true);
+    }
   });
 
   it("copyDataDirectory 会跳过 setting.json 及其原子写入瞬时文件", async () => {
     const oldBase = makeTempHome();
     const newBase = makeTempHome();
-    const oldV2Dir = join(oldBase, ".zcode", "v2");
-    const newV2Dir = join(newBase, ".zcode", "v2");
+    const oldV2Dir = join(oldBase, ".chengcode", "v2");
+    const newV2Dir = join(newBase, ".chengcode", "v2");
     mkdirSync(oldV2Dir, { recursive: true });
     writeFileSync(join(oldV2Dir, "setting.json"), '{"dataBaseDir":"/old"}', "utf-8");
     writeFileSync(join(oldV2Dir, "setting.json.lock"), "lock", "utf-8");
@@ -83,6 +89,51 @@ describe("paths", () => {
     expect(existsSync(join(newV2Dir, "setting.json"))).toBe(false);
     expect(existsSync(join(newV2Dir, "setting.json.lock"))).toBe(false);
     expect(existsSync(join(newV2Dir, "setting.json.123.tmp"))).toBe(false);
+  });
+
+  it("copyDataDirectory 在旧源只有 .zcode/v2 时回退复制到 .chengcode/v2", async () => {
+    const oldBase = makeTempHome();
+    const newBase = makeTempHome();
+    const oldLegacyV2Dir = join(oldBase, ".zcode", "v2");
+    mkdirSync(oldLegacyV2Dir, { recursive: true });
+    writeFileSync(join(oldLegacyV2Dir, "app-canary.txt"), "legacy-source", "utf-8");
+
+    vi.resetModules();
+    const { copyDataDirectory } = await import("../src/paths.js");
+    await copyDataDirectory(oldBase, newBase);
+
+    expect(readFileSync(join(newBase, ".chengcode", "v2", "app-canary.txt"), "utf-8")).toBe(
+      "legacy-source",
+    );
+  });
+
+  it("copyDataDirectory 同时存在新旧源时优先复制 .chengcode/v2", async () => {
+    const oldBase = makeTempHome();
+    const newBase = makeTempHome();
+    mkdirSync(join(oldBase, ".chengcode", "v2"), { recursive: true });
+    mkdirSync(join(oldBase, ".zcode", "v2"), { recursive: true });
+    writeFileSync(join(oldBase, ".chengcode", "v2", "source.txt"), "current", "utf-8");
+    writeFileSync(join(oldBase, ".zcode", "v2", "source.txt"), "legacy", "utf-8");
+
+    vi.resetModules();
+    const { copyDataDirectory } = await import("../src/paths.js");
+    await copyDataDirectory(oldBase, newBase);
+
+    expect(readFileSync(join(newBase, ".chengcode", "v2", "source.txt"), "utf-8")).toBe(
+      "current",
+    );
+  });
+
+  it("全局数据根与 provider 配置目录落在 .chengcode", async () => {
+    vi.resetModules();
+    const { getAppConfigDir, getProviderWorkspaceConfigDir, setDataBaseDir } = await import(
+      "../src/paths.js"
+    );
+    const base = makeTempHome();
+    setDataBaseDir(base);
+
+    expect(getAppConfigDir()).toBe(join(base, ".chengcode", "v2"));
+    expect(getProviderWorkspaceConfigDir()).toBe(join(base, ".chengcode", "cli"));
   });
 
   it("Windows 数据目录不能选择 ZCode 安装目录或其子目录", async () => {

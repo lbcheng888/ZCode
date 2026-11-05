@@ -52,7 +52,7 @@ chengcode skills list --json
 
 `doctor` 用于检查版本、平台、CPU、Node、执行路径和 SEA 状态；它不证明模型凭据、网络或工具调用已经可用。插件清单可以独立查询，不要求先发一次付费模型请求。
 
-当前源码的个人模型设置保存在 `~/.zcode/v2/provider_config.json`；运行与扩展设置仍在 `~/.zcode/cli/config.json`。按[配置](03-config.md)建立个人 provider，或在受支持的账号路径上执行 `chengcode login`。远程终端可用 `chengcode login --no-browser` 显示登录 URL；浏览器回调仍可能要求与 CLI 位于同一机器。
+当前源码的个人模型设置保存在 `~/.chengcode/v2/provider_config.json`；运行与扩展设置仍在 `~/.chengcode/cli/config.json`。首次启动会把旧 `~/.zcode` 原子移动到 `~/.chengcode`，旧路径保留为软链；建议迁移前自行备份。按[配置](03-config.md)建立个人 provider，或在受支持的账号路径上执行 `chengcode login`。远程终端可用 `chengcode login --no-browser` 显示登录 URL；浏览器回调仍可能要求与 CLI 位于同一机器。
 
 ## 第一次非交互调用
 

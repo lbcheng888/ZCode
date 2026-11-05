@@ -373,6 +373,7 @@ modules:
       - project-storage
       - shared
       - desktop
+      - services
     publicEntrypoints:
       - packages/desktop/src/host/database-startup/contract.ts
       - packages/desktop/src/host/database-startup/tasksStorageWorker.ts
@@ -1140,3 +1141,12 @@ exceptions:
       - packages/services/src/feedback/feedbackLogArchive.ts
       - packages/services/src/file/workspaceFileIgnore.ts
     reason: 这三个文件是 fork 之后上游引入的既有文件，本次仅把用户可见 ZCode 文案改为 ChengCode（插件命令帮助、诊断日志归档、workspace ignore 模板），并保留旧标记识别；不改模块边界、不新增依赖、不移动文件。architecture 以 merge-base 判定为 new，沿用逐文件准入先例。
+  - id: chengcode-data-root-migration-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/cli/src/cli-global-data-root-startup.ts
+      - apps/zcode-cli/packages/cli/src/global-data-root-migration.ts
+      - packages/desktop/src/main/desktopEarlyGlobalDataRootMigration.ts
+      - packages/server/src/global-data-root-migration.ts
+      - packages/shared/src/onboardingRecord.ts
+    reason: ChengCode 全局数据根迁移（~/.zcode → ~/.chengcode，原子移动 + 旧路径软链）在 CLI/desktop main/server 入口各需一个职责单一的启动迁移 helper；onboardingRecord.ts 是 fork 后上游既有文件，仅随路径根名调整。逐文件准入，不移动既有模块边界。

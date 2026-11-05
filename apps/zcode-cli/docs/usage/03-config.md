@@ -5,13 +5,15 @@
 当前源码把模型配置和运行配置分开管理：
 
 ```text
-个人 provider、模型选择 → ~/.zcode/v2/provider_config.json
-运行、权限、MCP、Hook、插件 → ~/.zcode/cli/config.json
+个人 provider、模型选择 → ~/.chengcode/v2/provider_config.json
+运行、权限、MCP、Hook、插件 → ~/.chengcode/cli/config.json
 项目运行设置 → <project>/zcode.json、<project>/.zcode/config.json
 账号登录凭据 → 凭据存储，不作为普通模型配置公开
 ```
 
 `ZCODE_DATA_BASE_DIR` 改变 provider/凭据等数据基目录。个人模型文件可显式用 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 指定。不同构建的路径和兼容入口可能不同，先核对本次 CLI 的行为。
+
+首次启动会把旧全局应用数据从 `~/.zcode` **原子移动**到 `~/.chengcode`，旧路径替换为指向新根的软链（同一份数据，不占双倍磁盘）；迁移前请自行备份。迁移完成后应用数据根是 `~/.chengcode`，旧路径仍可访问；迁移失败时启动会直接报错，不会用空的新目录继续运行。
 
 运行配置一般按内置默认、用户、项目、环境变量及入口参数叠加。同名 MCP server 的用户配置具有更高优先级；项目 Hook 还必须通过独立的工作区信任。不能用一条“后写覆盖前写”规则概括所有字段。
 

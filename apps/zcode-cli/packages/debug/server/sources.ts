@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 
 export function defaultLogDir(): string {
-  return join(homedir(), ".zcode", "cli", "log");
+  return join(homedir(), ".chengcode", "cli", "log");
 }
 
 export function defaultDbPath(): string {

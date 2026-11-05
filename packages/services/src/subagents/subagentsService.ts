@@ -37,6 +37,7 @@ import {
 } from "./subagentStorage.js";
 import type { ISubagentsService } from "./subagents.js";
 import { atomicWriteText } from "#src/fs/atomicFileUtils.js";
+import { GLOBAL_DATA_DIR_NAME } from "#src/paths.js";
 import {
   migrateUserSubagentMarkdown,
   migrateSubagentStateFile,
@@ -407,7 +408,12 @@ async function discoverPluginAgents(params: {
 
 async function readPluginConfig(options?: SubagentStorageOptions): Promise<PluginConfigSummary> {
   try {
-    const configPath = join(resolveUserHomeDir(options), ".zcode", "cli", "config.json");
+    const configPath = join(
+      resolveUserHomeDir(options),
+      GLOBAL_DATA_DIR_NAME,
+      "cli",
+      "config.json",
+    );
     const raw = await readFile(configPath, "utf-8");
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return { enabledPlugins: {}, suppressedBuiltins: [] };

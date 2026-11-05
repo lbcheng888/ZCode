@@ -9,6 +9,8 @@ interface ChromiumHardwareAccelerationApp {
 export function resolveChromiumHardwareAccelerationSettingsFile(
   homePath: string = homedir(),
 ): string {
+  const current = join(homePath, ".chengcode", "v2", "setting.json");
+  if (existsSync(current)) return current;
   return join(homePath, ".zcode", "v2", "setting.json");
 }
 

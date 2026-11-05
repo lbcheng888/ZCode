@@ -1,4 +1,10 @@
 import {
+  ensureGlobalDataRootMigrated as ensureGlobalDataRootMigratedFromServices,
+  getGlobalDataRootMigrationBaseDirs,
+  type EnsureGlobalDataRootMigrationOptions,
+  type EnsureGlobalDataRootMigrationResult,
+} from "@zcode/services/node";
+import {
   getTasksIndexDatabasePath,
   markTasksStoragePrepared,
   resolveZCodeAgentSpawnCwd,
@@ -17,7 +23,13 @@ export function createHostDatabaseStartup(options: {
   publish: (state: DatabaseStartupState) => void;
   initializeServices: () => Promise<void>;
   onFailure: (error: unknown) => void;
+  /** 测试注入：默认迁移真实全局数据根。 */
+  ensureGlobalDataRootMigrated?: (
+    options?: EnsureGlobalDataRootMigrationOptions,
+  ) => Promise<EnsureGlobalDataRootMigrationResult>;
 }) {
+  const ensureMigrated =
+    options.ensureGlobalDataRootMigrated ?? ensureGlobalDataRootMigratedFromServices;
   const abort = new AbortController();
   let sampler: StartupDiskSampler | undefined;
   const coordinator = new DatabaseStartupCoordinator({
@@ -43,6 +55,13 @@ export function createHostDatabaseStartup(options: {
         coordinator.updateDisk(currentSampler.snapshot());
       };
       try {
+        // 全局数据根迁移必须先于任何数据库/配置读取：旧 ~/.zcode 复制到 ~/.chengcode 后，
+        // 后续 getTasksIndexDatabasePath() 才会落在新根；迁移失败由下方 catch 上报并阻止启动。
+        // setting.json / 全局技能 / subagent 用户根走 home 根，业务库走 dataBaseDir；
+        // 自定义 dataBaseDir 时两者不同，必须按 helper 返回的全部 base 逐个迁移。
+        for (const baseDir of getGlobalDataRootMigrationBaseDirs()) {
+          await ensureMigrated({ baseDir });
+        }
         report("preparing_host_storage", "checking");
         const tasksPath = getTasksIndexDatabasePath();
         await observePath(tasksPath);

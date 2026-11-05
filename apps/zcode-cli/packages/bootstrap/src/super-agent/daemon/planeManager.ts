@@ -60,7 +60,7 @@ import { ControlPlaneRpcCallError as RpcError } from "./rpcServer.js";
 import type { ControlPlanePeerChannel } from "./rpcServer.js";
 
 /** dispatch bridge 只认已迁移的 tasks-index；路径由 dataBaseDir 同根推导（§2.3）。 */
-export const TASKS_INDEX_RELATIVE_PATH = join(".zcode", "v2", "tasks-index.sqlite");
+export const TASKS_INDEX_RELATIVE_PATH = join(".chengcode", "v2", "tasks-index.sqlite");
 
 export function resolveTasksIndexDatabasePath(dataBaseDir: string): string {
   return join(dataBaseDir, TASKS_INDEX_RELATIVE_PATH);

@@ -161,6 +161,7 @@ import {
 import {
   getLegacyDeletedTaskSessionSnapshotPath,
   getLegacyTaskSessionSnapshotPath,
+  GLOBAL_DATA_DIR_NAME,
 } from "#src/paths.js";
 import { claudeNativeSessionImportRepo } from "#src/session/claude-native/claudeNativeSessionImportRepo.js";
 import { importClaudeNativeSessions } from "#src/session/claude-native/claudeNativeSessionImportService.js";
@@ -239,7 +240,7 @@ function formatZCodeAgentLogDate(now: Date): string {
 
 function resolveZCodeAgentCurrentLogFilePath(now = new Date()): string {
   const configuredLogDir = process.env.ZCODE_LOG_DIR?.trim();
-  const logDir = configuredLogDir || join(homedir(), ".zcode", "cli", "log");
+  const logDir = configuredLogDir || join(homedir(), GLOBAL_DATA_DIR_NAME, "cli", "log");
   return join(logDir, `zcode-${formatZCodeAgentLogDate(now)}.jsonl`);
 }
 
@@ -1209,7 +1210,7 @@ export function createZCodeTaskServiceAdapter(
       const indexedMeta = await taskIndexRepo.getTaskMeta(params).catch(() => null);
       const legacyMeta: ZCodeTaskMeta = {
         ...legacyFile.meta,
-        // Bugfix: 旧 ACP task 只落在 ~/.zcode/v2/sessions/*.json，没有写入
+        // Bugfix: 旧 ACP task 只落在 ~/.chengcode/v2/sessions/*.json，没有写入
         // zcode-cli 的 sqlite session 表。新协议 resume 会把 taskId 当 sessionId
         // 直接报 Session not found；这里按旧快照恢复只读历史内容，并用 task index
         // 补齐用户改名、归档状态和终态 status，避免把旧 task 误当成可订阅的新 session。

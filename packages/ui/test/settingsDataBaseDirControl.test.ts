@@ -1,6 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import enUS from "../src/i18n/locales/en-US.js";
+import zhCN from "../src/i18n/locales/zh-CN.js";
 
 const capturedButtons: Array<Record<string, unknown>> = [];
 const capturedInputs: Array<Record<string, unknown>> = [];
@@ -209,6 +211,19 @@ async function renderGeneralSection(
     }),
   );
 }
+
+describe("data directory copy", () => {
+  it("指向新的 .chengcode/v2 数据根并说明旧 ~/.zcode 备份迁移", () => {
+    for (const messages of [zhCN, enUS]) {
+      expect(messages["settings.dataBaseDirDescription"]).toContain(".chengcode/v2");
+      expect(messages["settings.dataBaseDirDescription"]).not.toContain(".zcode/v2");
+      expect(messages["settings.dataBaseDirDescription"]).toContain("~/.zcode");
+      expect(messages["settings.dataBaseDirDescription"]).toContain("~/.chengcode");
+    }
+    expect(zhCN["settings.dataBaseDirDescription"]).toContain("备份迁移");
+    expect(enUS["settings.dataBaseDirDescription"]).toMatch(/backed up and migrated/i);
+  });
+});
 
 describe("GeneralSectionContent data directory control", () => {
   beforeEach(() => {

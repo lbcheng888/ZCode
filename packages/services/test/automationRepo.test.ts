@@ -45,7 +45,7 @@ function makeParams(
 
 // 修复原因：此前测试用 setDataBaseDir(tempDir) 把全局 _dataBaseDir 重定向到临时目录，
 // 但 vitest threads 池并发跑测试文件时，全局值会被其它文件的 setDataBaseDir 互相覆盖，
-// 导致 repo 与裸 SQL 操作在并发窗口内写进真实库 ~/.zcode/v2（/tmp/ws 系列脏数据即因此产生）。
+// 导致 repo 与裸 SQL 操作在并发窗口内写进真实库 ~/.chengcode/v2（/tmp/ws 系列脏数据即因此产生）。
 // 改为依赖注入：每个 describe 持有独立 tempDir，repo 通过构造参数接收 dbPath，
 // 裸 SQL 用同一 dbPath，彻底脱离全局单例。
 function buildTempDbPath(tempDir: string): string {

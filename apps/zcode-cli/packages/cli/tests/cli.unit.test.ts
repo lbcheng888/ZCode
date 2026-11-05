@@ -24,6 +24,12 @@ import {
 import type { RunContext } from "@zcode/shared-types";
 import type { TuiOptions } from "@zcode/tui";
 import { run } from "../src/run.js";
+import {
+  ensureCliGlobalDataRootMigrated,
+  ensureCliGlobalDataRootsMigrated,
+  type CliGlobalDataRootMigrator,
+} from "../src/global-data-root-migration.js";
+import { skipsCliGlobalDataRootStartup } from "../src/cli-global-data-root-startup.js";
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
 import {
   buildManualSkillPrompt,
@@ -995,8 +1001,8 @@ test("zcode login runs OAuth flow and prints the authorization URL", async () =>
         poll_token: "poll-token",
       });
       return {
-        configPath: "/home/test/.zcode/v2/model-selection.json",
-        credentialsPath: "/home/test/.zcode/v2/credentials.json",
+        configPath: "/home/test/.chengcode/v2/model-selection.json",
+        credentialsPath: "/home/test/.chengcode/v2/credentials.json",
         model: "zai/glm-5.1",
         providerId: "zai",
         user: {
@@ -1015,7 +1021,7 @@ test("zcode login runs OAuth flow and prints the authorization URL", async () =>
   assert.match(ctx.stdout.output(), /Login successful as Alice/);
   assert.match(
     ctx.stdout.output(),
-    /Model selection: \/home\/test\/\.zcode\/v2\/model-selection\.json/,
+    /Model selection: \/home\/test\/\.chengcode\/v2\/model-selection\.json/,
   );
 });
 
@@ -1027,7 +1033,7 @@ test("zcode logout clears shared OAuth credentials", async () => {
     logoutZCodeCli: async () => {
       logoutCalled = true;
       return {
-        credentialsPath: "/home/test/.zcode/v2/credentials.json",
+        credentialsPath: "/home/test/.chengcode/v2/credentials.json",
       };
     },
   });
@@ -1089,8 +1095,8 @@ test("command center handles login and logout locally", async () => {
         poll_interval_sec: 2,
       });
       return {
-        configPath: "/home/test/.zcode/v2/model-selection.json",
-        credentialsPath: "/home/test/.zcode/v2/credentials.json",
+        configPath: "/home/test/.chengcode/v2/model-selection.json",
+        credentialsPath: "/home/test/.chengcode/v2/credentials.json",
         model: "zai/glm-5.1",
         providerId: "zai",
         user: {
@@ -1103,7 +1109,7 @@ test("command center handles login and logout locally", async () => {
     configureApiKey: async (options) => {
       apiKeyCalled = options.providerId === "bigmodel" && options.apiKey === "manual-key";
       return {
-        configPath: "/home/test/.zcode/v2/model-selection.json",
+        configPath: "/home/test/.chengcode/v2/model-selection.json",
         model: "bigmodel/glm-5.1",
         providerId: "bigmodel",
       };
@@ -1111,7 +1117,7 @@ test("command center handles login and logout locally", async () => {
     logout: async () => {
       logoutCalled = true;
       return {
-        credentialsPath: "/home/test/.zcode/v2/credentials.json",
+        credentialsPath: "/home/test/.chengcode/v2/credentials.json",
       };
     },
     resumeApp: async () => {
@@ -1152,7 +1158,7 @@ test("command center handles login and logout locally", async () => {
   assert.match(loginResult.response, /Configured Z\.AI Coding Plan as Alice/);
   assert.match(
     loginResult.response,
-    /Model selection: \/home\/test\/\.zcode\/v2\/model-selection\.json/,
+    /Model selection: \/home\/test\/\.chengcode\/v2\/model-selection\.json/,
   );
   assert.match(apiKeyResult.response, /Configured BigModel Coding Plan/);
   assert.match(logoutResult.response, /Logged out from Coding Plan accounts/);
@@ -3180,7 +3186,7 @@ test("command center toggles plugins and refreshes the picker", async () => {
           enabled = nextEnabled;
           return {
             enabled,
-            path: "/home/test/.zcode/cli/config.json",
+            path: "/home/test/.chengcode/cli/config.json",
             plugin: {
               commandRootCount: 1,
               dataPath: "/tmp/zcode/plugins/data/ios-simulator@zcode-plugins-official",
@@ -4584,7 +4590,7 @@ test("zcode plugins enable persists the selected plugin", async () => {
       assert.equal(options.workingDirectory, "/workspace/project");
       return {
         enabled: true,
-        path: "/home/test/.zcode/cli/config.json",
+        path: "/home/test/.chengcode/cli/config.json",
         plugin: {
           commandRootCount: 1,
           dataPath: "/tmp/zcode/plugins/data/ios-dev@zcode-plugins-official",
@@ -4606,7 +4612,7 @@ test("zcode plugins enable persists the selected plugin", async () => {
   assert.equal(exitCode, 0);
   assert.match(
     ctx.stdout.output(),
-    /Enabled plugin ios-dev@zcode-plugins-official in \/home\/test\/.zcode\/cli\/config\.json/,
+    /Enabled plugin ios-dev@zcode-plugins-official in \/home\/test\/.chengcode\/cli\/config\.json/,
   );
 });
 
@@ -7000,5 +7006,82 @@ test("storage-migrate real entrypoint honors an isolated custom database and rej
     assert.match(failed.stderr, /checksum mismatch/i);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI 全局数据根迁移在临时根完成复制并保留旧目录", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-cli-global-root-"));
+  await mkdir(join(base, ".zcode", "v2"), { recursive: true });
+  await writeFile(join(base, ".zcode", "v2", "seed.txt"), "legacy");
+  try {
+    const result = await ensureCliGlobalDataRootMigrated({ baseDir: base });
+    assert.equal(result.status, "migrated");
+    assert.equal(await readFile(join(base, ".chengcode", "v2", "seed.txt"), "utf8"), "legacy");
+    assert.equal(await readFile(join(base, ".zcode", "v2", "seed.txt"), "utf8"), "legacy");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("CLI 全局数据根迁移失败原样上抛", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-cli-global-root-fail-"));
+  await writeFile(join(base, ".zcode"), "not a directory");
+  try {
+    await assert.rejects(
+      ensureCliGlobalDataRootMigrated({ baseDir: base }),
+      /legacy data root is not a directory/,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("CLI 全局数据根迁移覆盖 home 根与自定义 dataBaseDir，路径相同时只迁移一次", async () => {
+  const seen: string[] = [];
+  const migrate: CliGlobalDataRootMigrator = async (options) => {
+    const baseDir = options?.baseDir as string;
+    seen.push(baseDir);
+    return { status: "fresh", targetDir: join(baseDir, ".chengcode") };
+  };
+  const homeDir = join(tmpdir(), "cli-home-root");
+  const dataBaseDir = join(tmpdir(), "cli-custom-data-root");
+
+  const results = await ensureCliGlobalDataRootsMigrated(migrate, { homeDir, dataBaseDir });
+  assert.equal(results.length, 2);
+  assert.deepEqual(seen, [homeDir, dataBaseDir]);
+
+  seen.length = 0;
+  await ensureCliGlobalDataRootsMigrated(migrate, { homeDir, dataBaseDir: homeDir });
+  assert.deepEqual(seen, [homeDir]);
+});
+
+test("CLI 入口在任何 config / session DB 读取或 SEA 工具解包之前 await 全局数据根迁移", async () => {
+  const source = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const migrationIndex = source.indexOf("await ensureCliGlobalDataRootsMigrated()");
+  const providerRuntimeIndex = source.indexOf('await import("./provider-runtime-env.js")');
+  const runImportIndex = source.indexOf('await import("./run.js")');
+  const seaToolsIndex = source.indexOf("await ensureSeaRuntimeTools()");
+  assert.ok(migrationIndex >= 0, "main.ts must await the global data root migration");
+  assert.ok(seaToolsIndex >= 0, "main.ts must await ensureSeaRuntimeTools");
+  assert.ok(
+    migrationIndex < seaToolsIndex,
+    "SEA runtime tools create ~/.chengcode/cache before migration and must run after it",
+  );
+  assert.ok(migrationIndex < providerRuntimeIndex);
+  assert.ok(migrationIndex < runImportIndex);
+});
+
+test("help/version/plugin-host/internal-search 跳过迁移且不创建数据根", () => {
+  assert.equal(skipsCliGlobalDataRootStartup([]), false);
+  assert.equal(skipsCliGlobalDataRootStartup(["tui"]), false);
+  assert.equal(skipsCliGlobalDataRootStartup(["storage-migrate"]), false);
+  for (const argv of [
+    ["--help"],
+    ["-h"],
+    ["tui", "--version"],
+    [ZCODE_PLUGIN_HOST_COMMAND, "/tmp/server.mjs"],
+    ["__internal-search", "grep", "needle"],
+  ]) {
+    assert.equal(skipsCliGlobalDataRootStartup(argv), true, argv.join(" "));
   }
 });

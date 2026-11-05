@@ -16,7 +16,12 @@ import {
   type SourceServerMigrationReport,
   type SourceServerMigrationReportRow,
 } from "@zcode/shared";
-import { getDataBaseDir, getTasksIndexDatabasePath, getWorkspaceHash } from "#src/paths.js";
+import {
+  getDataBaseDir,
+  getTasksIndexDatabasePath,
+  getWorkspaceHash,
+  GLOBAL_DATA_DIR_NAME,
+} from "#src/paths.js";
 
 type Database = InstanceType<typeof DatabaseSync>;
 const require = createRequire(import.meta.url);
@@ -299,9 +304,11 @@ export class SourceServerWorkspaceAliasRepo {
   public constructor(options: SourceServerWorkspaceAliasRepoOptions = {}) {
     this.taskDbPath = options.taskDbPath ?? getTasksIndexDatabasePath();
     this.sessionDbPath =
-      options.sessionDbPath ?? join(getDataBaseDir(), ".zcode", "cli", "db", "db.sqlite");
+      options.sessionDbPath ??
+      join(getDataBaseDir(), GLOBAL_DATA_DIR_NAME, "cli", "db", "db.sqlite");
     this.backupRoot =
-      options.backupRoot ?? join(getDataBaseDir(), ".zcode", "server", "migration-backups");
+      options.backupRoot ??
+      join(getDataBaseDir(), GLOBAL_DATA_DIR_NAME, "server", "migration-backups");
     this.now = options.now ?? Date.now;
     this.createMigrationId = options.migrationId ?? randomUUID;
     this.afterPhaseCommitted = options.afterPhaseCommitted;

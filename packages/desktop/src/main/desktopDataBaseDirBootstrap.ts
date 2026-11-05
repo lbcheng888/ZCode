@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { setDataBaseDir } from "@zcode/services/node";
 
 export function resolveBootstrapSettingsFile(homePath: string = homedir()): string {
+  const current = join(homePath, ".chengcode", "v2", "setting.json");
+  if (existsSync(current)) return current;
+  // 迁移前的只读回退：迁移模块应先完成复制；这里只在极端升级窗口内读旧设置。
   return join(homePath, ".zcode", "v2", "setting.json");
 }
 

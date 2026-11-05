@@ -1,6 +1,6 @@
 ---
 name: restore-legacy-sessions
-description: Use when ChengCode needs to inspect, plan, or execute restoration of old ACP-era ChengCode sessions from ~/.zcode/v2/sessions into the new ChengCode task/session stores. Trigger when the user wants to choose a previous agent, select a workspace to restore, pick a specific historical conversation, dry-run legacy session migration, or reason about tasks-index.sqlite and ~/.zcode/cli/db/db.sqlite consistency.
+description: Use when ChengCode needs to inspect, plan, or execute restoration of old ACP-era ChengCode sessions from the legacy ~/.zcode/v2/sessions backup into the new ChengCode task/session stores. Trigger when the user wants to choose a previous agent, select a workspace to restore, pick a specific historical conversation, dry-run legacy session migration, or reason about tasks-index.sqlite and ~/.chengcode/cli/db/db.sqlite consistency.
 ---
 
 # Restore Legacy Sessions
@@ -11,13 +11,13 @@ Use this skill to guide old ACP-era ChengCode session restoration. The first job
 
 ## Stores
 
-- Legacy snapshots: `~/.zcode/v2/sessions/{workspaceHash}/{legacyTaskId}.json`
-- Task index: `~/.zcode/v2/tasks-index.sqlite`
-- New ChengCode session DB: `~/.zcode/cli/db/db.sqlite`
+- Legacy snapshots (read-only backup): `~/.zcode/v2/sessions/{workspaceHash}/{legacyTaskId}.json`
+- Task index: `~/.chengcode/v2/tasks-index.sqlite`
+- New ChengCode session DB: `~/.chengcode/cli/db/db.sqlite`
 
 Use `restoredTaskId = meta.acpSessionId || meta.taskId`. The legacy snapshot filename and `meta.taskId` are historical IDs; the app task list often uses `meta.acpSessionId` as the real task/session ID.
 
-The scan script defaults to the live legacy source `~/.zcode/v2/sessions`; pass `--legacy-dir <path>` only when the user explicitly asks to inspect another source directory.
+The scan script defaults to the preserved legacy source `~/.zcode/v2/sessions`, which is never written after the one-time migration to `~/.chengcode`; pass `--legacy-dir <path>` only when the user explicitly asks to inspect another source directory.
 
 Restored ACP-era conversations are normal ChengCode Agent history, so persisted provider fields must be `glm`. Treat the snapshot provider as legacy source context only; do not write task-index `migration_source` or `meta_json.migrationSource` for these restores. The `migrationSource` enum is reserved for the existing Claude Code native import path (`claudeCode`).
 
@@ -70,7 +70,7 @@ node scripts/restore-conversation.mjs --snapshot ~/.zcode/v2/sessions/<workspace
 ## Restore States
 
 - `ready`: CLI DB and task-index both already contain the restored task id.
-- `needs-cli-db`: task-index exists, but `~/.zcode/cli/db/db.sqlite` has no session row; rebuild the real session from the legacy snapshot.
+- `needs-cli-db`: task-index exists, but `~/.chengcode/cli/db/db.sqlite` has no session row; rebuild the real session from the legacy snapshot.
 - `needs-task-index`: CLI DB exists, but task-index is missing; backfill task-index only.
 - `needs-full-import`: both stores are missing; import session history and then index it.
 

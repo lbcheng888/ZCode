@@ -1,5 +1,9 @@
-import { migrateApplicationStorage, createSettingService } from "@zcode/services/node";
-import { disposeServiceResourcesAndWait, getAppConfigDir } from "@zcode/services/node";
+import {
+  disposeServiceResourcesAndWait,
+  createSettingService,
+  getAppConfigDir,
+  migrateApplicationStorage,
+} from "@zcode/services/node";
 import type { IChannel } from "@zcode/rpc";
 import {
   ZCODE_VERSION,
@@ -14,6 +18,7 @@ import { createStdioServer } from "./stdio.js";
 import { registerStdioProcessLifecycle } from "./stdio-lifecycle.js";
 import { createStdioServices } from "./stdioServices.js";
 import { ensureRemoteServerDeviceMid } from "./stdioDeviceMid.js";
+import { migrateServerGlobalDataRoots } from "./global-data-root-migration.js";
 import {
   materializeBundledZCodeBuiltinProviderConfig,
   readBundledZCodeBuiltinProviderConfig,
@@ -53,6 +58,11 @@ async function main() {
   // Phase 2: Wait for hello-ack
   const ack = await waitForAck();
   log(`client connected: ${ack.clientId} (v${ack.version})`);
+
+  // deviceMid / setting / session DB 都位于全局数据根；握手完成后、任何路径读取之前迁移，
+  // 失败由 main().catch 直接终止启动，禁止用空的新目录继续。默认 home 根承载 setting.json，
+  // 自定义 dataBaseDir 承载会话/DB，两者都迁移；相同时只迁移一次。
+  await migrateServerGlobalDataRoots();
 
   // 远端主机没有 Desktop main，没人写 telemetry-state.json，services 发往 ZCode endpoint
   // 的请求缺 X-Device-Mid，Start Plan 的 billing/balance 被拒。远端 server 是本机设备身份的

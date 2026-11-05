@@ -102,6 +102,13 @@
 - 票据审计持久化：宿主级 `capability-tickets.sqlite` 只记公开字段（无 secret），broker 重启把上一进程未终态行标记 expired 并告警；审计写失败让签发/兑换 fail-loud ✅
 - 测试：core attachment-permission 27、desktop ticket broker+audit 21 通过；双 scope typecheck/lint/architecture 待收口 ✅
 
+## ChengCode 全局数据根迁移批次（2026-11-06）✅
+- 全局应用数据根从 ~/.zcode 迁到 ~/.chengcode：同父目录原子 rename + 旧路径 symlink，不复制 40GB；旧路径仍可访问同一份数据（非双份备份）✅
+- 迁移器带 O_EXCL 锁/stale 回收/崩溃恢复 marker；target 无 marker 且 legacy 仍在时 fail-loud，禁止空新根启动 ✅
+- CLI/desktop main/host/server 入口在任何 config/DB/日志写入前迁移；自定义 dataBaseDir 与默认 home 根都覆盖 ✅
+- 设置页文案改为 .chengcode/v2；多模型配置 provider_config.json/setting.json/credentials.json 已迁移；旧路径 server runtime 经软链继续可用 ✅
+- 验证：CLI 真机迁移 smoke（移动+软链+marker）、旧路径读取、迁移后 doctor；services/desktop/CLI 定向测试；类型检查/lint/architecture ✅
+
 ## 已知接缝（登记、非阻塞）
 - 能力票据吊销只在下一条命令 admission 生效（CLI turn 内无宿主控制面通道复核 epoch；`revocationEpoch` 只是签发快照）
 - 能力票据 `web-remote-replayable` relay 形态不投递 secret（只转发 `Uint8Array`，控制帧不可达）；该形态不签发票据、保留无票据旧路径（desktop-continuous renderer 信封已自动携带 `capabilityTicketId`）

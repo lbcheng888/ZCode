@@ -81,6 +81,7 @@ import {
   buildTaskChangeSummary,
   createHostApiNetworkTransport,
   createSettingServiceWithMigrations,
+  getAppConfigDir,
   getDataBaseDir,
   OffPeakModelUnavailableError,
   OffPeakPermanentDispatchError,
@@ -174,6 +175,10 @@ import {
   createWindowHostAttachmentRegistry,
   type WindowHostCapabilityTickets,
 } from "./windowHostAttachmentRegistry.js";
+import {
+  ensureGlobalDataRootMigrated,
+  getGlobalDataRootMigrationBaseDirs,
+} from "@zcode/services/node";
 import { createCapabilityTicketBroker } from "./capabilityTicketBroker.js";
 import { createCapabilityTicketAuditStore } from "./capabilityTicketAuditStore.js";
 import { createWindowCapabilityTicketAdmissionChannel } from "./capabilityTicketAdmissionChannel.js";
@@ -247,6 +252,12 @@ interface HostRemoteConnectionCapabilities {
     legacyRouteHint?: string;
     signal?: AbortSignal;
   }) => Promise<void>;
+}
+
+// 迁移必须先于任何 host 级路径写入（audit DB、日志、反馈归档等）。main 进程通常已迁移；
+// 这里是 host 独立启动/测试的兜底，且幂等。失败即让 host 启动失败，绝不读空新根。
+for (const baseDir of getGlobalDataRootMigrationBaseDirs()) {
+  await ensureGlobalDataRootMigrated({ baseDir });
 }
 
 let activeRemoteMediaRequests = 0;
@@ -2783,7 +2794,7 @@ function exposeServicesOnMessagePort(
 const p6CapabilityTicketsEnabled = process.env["ZCODE_P6_CAPABILITY_TICKETS"] === "1";
 const capabilityTicketAuditStore = p6CapabilityTicketsEnabled
   ? createCapabilityTicketAuditStore({
-      databasePath: join(getDataBaseDir(), ".zcode", "v2", "capability-tickets.sqlite"),
+      databasePath: join(getAppConfigDir(), "capability-tickets.sqlite"),
     })
   : undefined;
 const capabilityTicketBroker = p6CapabilityTicketsEnabled

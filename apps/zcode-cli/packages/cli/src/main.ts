@@ -11,6 +11,8 @@ import { installCliProcessErrorBoundary } from "./process-errors.js";
 import { installProtocolStderrBoundary } from "./protocol-stderr.js";
 import { createProtocolProcessLifecycle } from "./protocol-lifecycle.js";
 import { isControlPlaneInvocation, isProtocolServerInvocation } from "./arguments.js";
+import { ensureCliGlobalDataRootsMigrated } from "./global-data-root-migration.js";
+import { skipsCliGlobalDataRootStartup } from "./cli-global-data-root-startup.js";
 
 void main();
 
@@ -49,9 +51,22 @@ async function main(): Promise<void> {
     : undefined;
 
   try {
-    if (argv[0] !== STORAGE_MIGRATION_COMMAND && !argv.includes("--prepare-storage"))
-      Object.assign(process.env, await ensureSeaRuntimeTools());
+    // 必须早于任何 config / provider config / session DB 读取，也早于 SEA 运行时工具解包：
+    // SEA 工具缓存默认写在 ~/.chengcode/cache/runtime_tools，先解包会把目标根提前创建出来，
+    // 迁移随后会误判“已迁移”并静默跳过旧数据复制。失败直接抛到下方 catch，禁止用空的新
+    // 目录继续启动。plugin-host / __internal-search 只加载插件或做纯文件搜索，help/version
+    // 不读数据根：这些入口连工具解包一起跳过，避免测试进程或 help 触发任何数据根创建。
+    const skipsDataRootStartup = skipsCliGlobalDataRootStartup(argv);
+    // 默认 home 根（setting.json 固定落点）与自定义 dataBaseDir 都要迁移：只迁移当前
+    // dataBaseDir 会在自定义目录生效时漏掉 ~/.zcode/v2/setting.json，升级后设置丢失。
+    if (!skipsDataRootStartup) await ensureCliGlobalDataRootsMigrated();
     lifecycle?.signal.throwIfAborted();
+    if (
+      !skipsDataRootStartup &&
+      argv[0] !== STORAGE_MIGRATION_COMMAND &&
+      !argv.includes("--prepare-storage")
+    )
+      Object.assign(process.env, await ensureSeaRuntimeTools());
     const context = {
       argv,
       stderr,

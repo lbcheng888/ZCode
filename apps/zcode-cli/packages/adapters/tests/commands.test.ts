@@ -113,7 +113,7 @@ describe("NodeCustomCommandAdapter", () => {
   it("keeps the higher-priority duplicate command", async () => {
     const dir = await mkdtemp(join(tmpdir(), "zcode-commands-"));
     const projectDir = join(dir, ".zcode", "commands");
-    const userDir = join(dir, "home", ".zcode", "commands");
+    const userDir = join(dir, "home", ".chengcode", "commands");
 
     try {
       await mkdir(projectDir, { recursive: true });

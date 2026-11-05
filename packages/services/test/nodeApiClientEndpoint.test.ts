@@ -154,7 +154,7 @@ describe("NodeApiClient endpoint rewriting", () => {
     const dataBaseDir = mkdtempSync(join(tmpdir(), "zcode-device-mid-"));
     tempDirs.push(dataBaseDir);
     setDataBaseDir(dataBaseDir);
-    const configDir = join(dataBaseDir, ".zcode", "v2");
+    const configDir = join(dataBaseDir, ".chengcode", "v2");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(
       join(configDir, "telemetry-state.json"),
@@ -183,7 +183,7 @@ describe("NodeApiClient endpoint rewriting", () => {
     const dataBaseDir = mkdtempSync(join(tmpdir(), "zcode-device-mid-invalid-"));
     tempDirs.push(dataBaseDir);
     setDataBaseDir(dataBaseDir);
-    const configDir = join(dataBaseDir, ".zcode", "v2");
+    const configDir = join(dataBaseDir, ".chengcode", "v2");
     mkdirSync(configDir, { recursive: true });
     if (content !== null) {
       writeFileSync(join(configDir, "telemetry-state.json"), content, "utf-8");

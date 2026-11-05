@@ -15,7 +15,7 @@ description: 用户要求问候时使用，用一句话问候。
 请用一句话问候用户，并在末尾加上 READY。
 ```
 
-当前默认发现路径包括用户及项目的 `.zcode/skills` 和 `.agents/skills`。Git 工作区中会向工作树根查找技能目录；同级 `.zcode` 优先于 `.agents`。启用的插件也可贡献技能。重复名称和 metadata 预算会影响最终可见集合，使用清单核对来源：
+当前默认发现路径包括用户级 `~/.chengcode/skills`、项目级 `<project>/.zcode/skills`，以及对应层级的 `.agents/skills`。Git 工作区中会向工作树根查找技能目录；项目同级 `.zcode` 优先于 `.agents`。旧 `~/.zcode/skills` 会随旧全局目录原子移动到 `~/.chengcode`，旧路径保留为软链。启用的插件也可贡献技能。重复名称和 metadata 预算会影响最终可见集合，使用清单核对来源：
 
 ```sh
 chengcode skills list --cwd /absolute/path/to/project --json
