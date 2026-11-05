@@ -65,6 +65,13 @@
 - 测试：裁决 6 例（真 fake-provider）+ scheduler 8 单测 + 3 真 child 集成；server-cli 266 / bootstrap 242 全绿
 - 验证：双 scope typecheck、architecture 0、lint 0 errors；累计 30 提交
 
+## 派发桥闭环 + 结算批次（2026-11-05）✅
+- child dispatchLoop（push/sweep/resume）+ Core host.command/worker.find/resume 处理器 ✅
+- daemon scheduler 生产启动（门禁开即 start）+ ACK→settleDispatchResult/settleRunTerminal 回灌 ✅
+- manual/off-peak 迁移（off-peak 只审计+顺延不进桥）✅
+- 测试：server-cli 288 / bootstrap 12226 / 真 child 集成（ACK 丢失重推、kill -9 续推、宽限 skipped）✅
+- 验证：双 scope typecheck、architecture 0（planeManager 存量行数例外）、lint 0 errors；累计 33 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
