@@ -52,6 +52,8 @@ import {
   type SuperAgentMandateContract,
   type SuperAgentMandateRepo,
 } from "../super-agent/mandate/index.js";
+import { getTriggerEvent } from "../super-agent/trigger/trigger-events-access.js";
+import type { SuperAgentAdmissionMandateResolution } from "./super-agent-admission-facts.js";
 import {
   createSuperAgentIntake,
   runSubscriptionBackfill,
@@ -81,6 +83,7 @@ import {
 } from "../super-agent/trigger/index.js";
 import {
   createAdjudicationDriver,
+  type AdjudicationDeliveryPort,
   type AdjudicationModelSessionPort,
   type SuperAgentAdjudicationContract,
 } from "../super-agent/adjudication/index.js";
@@ -112,6 +115,12 @@ export interface SuperAgentHostPorts {
   worker?: TriggerWorkerPort;
   /** tasks-index 库路径（宿主经 services getTasksIndexDatabasePath 解析后传入）；注入才建派发桥。 */
   tasksIndexDatabasePath?: string;
+  /**
+   * would-accept 权威投影变化通知（裁决产出卡片 / 批转成功）。宿主据此刷新 v4 快照
+   * 投影（delta 生产者），已订阅的 desktop/web 收件箱无需重订阅即可收敛。缺席 = 宿主
+   * 无该表面（纯 CLI），不影响控制面行为。
+   */
+  onWouldAcceptChanged?: () => void;
   /** §5.1 存量订阅回填种子（宿主枚举既有 bot conversation）；缺省空表零新增。 */
   backfillSeeds?: readonly SubscriptionBackfillSeed[];
   /** 宿主调用过 setDataBaseDir() 时注入（spec §1.1 实施偏差），否则缺省 getSuperAgentDatabasePath()。 */
@@ -184,6 +193,20 @@ export interface SuperAgentControlPlane {
    * 卡不存在 / 非本 workspace / 非待批卡：响亮抛错。
    */
   promoteWouldAccept(cardId: string): Promise<void>;
+  /**
+   * M4 mandateFacts 生产者：按 triggerId 读 trigger_events 行 → 推导 trigger_class →
+   * `mandate.resolveFor` 真契约 → 本回合 admission 需要的 typed 结论。
+   *
+   * - `features.mandateGate=false`（缺省）：恒返回 undefined = 不绑定事件来源，M4 门不激活，
+   *   flag 关字节兼容（spec §0）。
+   * - flag 开：按 fast_path 分类。`human_explicit` 是人类显式直通，design M2 明定
+   *   「免 Mandate、免攒批」⇒ 返回 exempt（按 user-origin 执行）；owned / unowned_candidate
+   *   走 resolveFor 真契约，未命中显式行时返回隐式 record_only（expiresAt=null）。
+   * - trigger 行缺失 / 跨 workspace / Fast Path 未收敛：原样抛错（fail-closed）。
+   */
+  resolveAdmissionMandateFacts(
+    triggerId: string,
+  ): SuperAgentAdmissionMandateResolution | undefined;
   /** leader 竞争 + 清过期 + 回填 + 驱动器启动 + 桥续推；幂等。 */
   start(): Promise<void>;
   /** 对称停止：心跳/驱动器/短窗会话 + 关库；幂等。在途裁决批不取消（自然收尾，spec §8-12）。 */
@@ -192,6 +215,9 @@ export interface SuperAgentControlPlane {
 
 const SUPER_AGENT_CLIENT_ID = "super-agent-trigger";
 const DISPATCH_CLIENT_ID = "super-agent-dispatch";
+
+/** trigger_events.fast_path 三态之一（spec §1.2）；human-explicit 免 Mandate（design M2:118）。 */
+const HUMAN_EXPLICIT_FAST_PATH = "human_explicit";
 
 /** would-accept 卡片摘要上限：与投递文本同预算（常量单点，payload-text 同源）。 */
 const WOULD_ACCEPT_SUMMARY_MAX_CHARS = TRIGGER_DISPATCH_TEXT_MAX_CHARS;
@@ -539,6 +565,32 @@ export async function createSuperAgentControlPlane(
     handleCommand: hostPorts.handleCommand,
     now,
   });
+  // M4 guide 车道 fail-closed：事件回合的 mandateFacts 在 admission 边界绑定到本输入的
+  // queryId/turnId，而 guide 行内投递进入的是 active turn——工具判定只读 active turn
+  // 自己的回合事实，绑定永远不命中，事件写操作会按 active turn 的 user-origin 执行，
+  // 绕过 mandate 门。mandateGate 开时只允许 human-explicit（免 Mandate）走 guide；
+  // 其余事件拒绝该车道，由派发方按 followup/新回合重投（响亮失败，不静默改车道）。
+  const mandateGuardedDelivery: TriggerHostDeliveryPort = mandateGate
+    ? {
+        async deliver(input) {
+          if (input.lane === "guide") {
+            const event = getTriggerEvent(db, input.triggerId);
+            if (!event) {
+              throw new Error(
+                `mandateGate guide 投递缺少 trigger 行: triggerId=${input.triggerId}（装配错误，fail-closed）`,
+              );
+            }
+            if (event.fastPath !== HUMAN_EXPLICIT_FAST_PATH) {
+              return {
+                status: "rejected",
+                reasonCode: "proto.eventGuideLaneRequiresUserOrigin",
+              };
+            }
+          }
+          return delivery.deliver(input);
+        },
+      }
+    : delivery;
   const intake = createSuperAgentIntake({
     db,
     decisionLog,
@@ -555,7 +607,7 @@ export async function createSuperAgentControlPlane(
     });
   const trigger = createTriggerSubsystem({
     db,
-    delivery,
+    delivery: mandateGuardedDelivery,
     worker,
     decisionLog,
     now,
@@ -564,10 +616,28 @@ export async function createSuperAgentControlPlane(
     proposalGate: mandateGate,
     onError: options.onError,
   });
+  // would-accept 权威投影变化通知：卡片产出/批转后由宿主刷新已订阅客户端的投影。
+  // 宿主回调失败不能反向破坏已提交的裁决/批转事实（事务已 commit）；只走 onError 告警。
+  const notifyWouldAcceptChanged = (): void => {
+    if (!hostPorts.onWouldAcceptChanged) return;
+    try {
+      hostPorts.onWouldAcceptChanged();
+    } catch (error) {
+      options.onError(error, "super_agent.would_accept.notify");
+    }
+  };
+  // 裁决交付 = trigger.applyVerdicts 精确接缝；同步落库成功后通知投影刷新。reject-only
+  // 批也通知，但投影无变化时发布端不发 delta（幂等，不制造空帧）。
+  const adjudicationDelivery: AdjudicationDeliveryPort = {
+    applyVerdicts(batchId, decisions) {
+      trigger.applyVerdicts(batchId, decisions);
+      notifyWouldAcceptChanged();
+    },
+  };
   const adjudication = createAdjudicationDriver({
     db,
     session: options.adjudicationSession,
-    delivery: trigger,
+    delivery: adjudicationDelivery,
     mandate,
     onError: options.onError,
   });
@@ -841,6 +911,52 @@ export async function createSuperAgentControlPlane(
       }
       throw error;
     }
+    // 事务已提交：卡片从权威读面消失，通知宿主刷新已订阅投影（幂等重复批转折返早退
+    // 路径不通知，因为没有状态变化）。
+    notifyWouldAcceptChanged();
+  };
+
+  /**
+   * M4 解析契约（spec §1.4 / §8-15②）：flag 关恒 undefined；flag 开按 trigger 行推导
+   * trigger_class 后调 `resolveFor`。tier/mandateId/expiresAt 全部来自 resolveFor 的同一次
+   * getActive 读快照——不得为补过期时间再查一次（两次读之间可能被 revoke/换行）。
+   */
+  const resolveAdmissionMandateFacts = (
+    triggerId: string,
+  ): SuperAgentAdmissionMandateResolution | undefined => {
+    if (!mandateGate) return undefined;
+    const trigger = getTriggerEvent(db, triggerId);
+    if (!trigger) {
+      throw new Error(
+        `事件回合 mandate 解析缺少 trigger 行: triggerId=${triggerId}（intake 未落行 = 装配错误，fail-closed）`,
+      );
+    }
+    if (trigger.workspaceIdentity !== workspaceIdentity) {
+      throw new Error(
+        `事件回合 mandate 解析跨 workspace: triggerId=${triggerId}（${trigger.workspaceIdentity} ≠ ${workspaceIdentity}，fail-closed）`,
+      );
+    }
+    // design M2：human-explicit 是人类显式直通，免 Mandate；按既有 user-origin 执行，
+    // 否则人类直接对话会被未配置的隐式 record_only 判成只读。
+    if (trigger.fastPath === HUMAN_EXPLICIT_FAST_PATH) {
+      return { kind: "human_explicit_exempt" };
+    }
+    if (trigger.fastPath === null) {
+      throw new Error(
+        `事件回合 mandate 解析遇到未路由 trigger 行: triggerId=${triggerId}（Fast Path 未收敛，fail-closed）`,
+      );
+    }
+    const triggerClass = deriveTriggerClass(trigger.threadKey, trigger.source);
+    const verdict = mandate.resolveFor(triggerClass);
+    return {
+      kind: "mandate",
+      facts: {
+        triggerId,
+        tier: verdict.tier,
+        ...(verdict.mandateId ? { mandateId: verdict.mandateId } : {}),
+        expiresAt: verdict.source === "explicit" ? (verdict.expiresAt ?? null) : null,
+      },
+    };
   };
 
   return {
@@ -859,6 +975,7 @@ export async function createSuperAgentControlPlane(
     isLeader: () => leader,
     listPendingWouldAccept,
     promoteWouldAccept,
+    resolveAdmissionMandateFacts,
     async start() {
       if (started || closed) return;
       started = true;

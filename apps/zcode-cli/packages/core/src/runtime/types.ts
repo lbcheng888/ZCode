@@ -1,5 +1,7 @@
 import type { ToolSearchExecutionContext, ToolSearchMode } from "@zcode/contracts";
 import type { RequestVerificationReason } from "@zcode/shared";
+import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
+import type { PermissionMandateFacts } from "../permission/service.js";
 import type { GetAgentDefinitions, LoadAgentDefinitions } from "../subagent/definitions.js";
 import type { RuntimeInputPresentation, TurnExecutionModelFallbackReason } from "@zcode/contracts";
 /* eslint-disable max-lines -- Runtime 类型集中承载 core/runtime 对外结构，拆分需要单独迁移。 */
@@ -539,6 +541,15 @@ export type ExecuteTurnOptions = ExecuteTurnOptionsBase &
   import("@zcode/contracts").TurnBackgroundAttribution;
 
 /**
+ * M4：控制面在准入前解析出的 mandate 结论（`mandate.resolveFor` 真契约的投影）。
+ * 比 PermissionContext 的事实多一个 triggerId：它既是溯源键，也是本回合事件的权威身份。
+ */
+export interface PromptAdmissionMandateFacts extends PermissionMandateFacts {
+  /** 触发本回合的 triggerId（wire envelope.triggerId）。 */
+  triggerId: string;
+}
+
+/**
  * Core prompt admission 的调用参数。Bootstrap 只提供输入事实和期望投递语义，
  * start/queue 的选择由持有该 session 状态的 AgentRuntime 原子完成。
  */
@@ -552,6 +563,16 @@ export type PromptAdmissionOptions = ExecuteTurnOptions & {
   requireQueue?: boolean;
   /** queue promotion 等内部调用要求 admission 必须 idle,否则直接拒绝。 */
   requireIdle?: boolean;
+  /**
+   * M4：wire envelope.triggerId 推导的触发来源（`promptTriggerSourceOf`）。
+   * 缺省 = 宿主/用户直接输入（既有 user-origin 语义）。
+   */
+  triggerSource?: PromptTriggerSource;
+  /**
+   * M4：事件回合的 mandate 结论。trigger 回合必填（缺席 = flag-on 注入缺失，
+   * admission 响亮失败、绝不静默按 user 回合放行）；user 回合必须缺席。
+   */
+  mandateFacts?: PromptAdmissionMandateFacts;
 };
 
 export type PromptAdmissionReceipt =

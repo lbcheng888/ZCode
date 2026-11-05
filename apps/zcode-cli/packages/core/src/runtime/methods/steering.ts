@@ -379,6 +379,8 @@ export function reserveTurnStart(
 }
 
 export function releaseTurnStart(this: AgentRuntimeInternal, turnId: TurnId): void {
+  // M4：回合结束后删除该回合的 mandate 绑定（turnId 作键，不会误删他轮）。
+  this.permissionService.releaseTurnPermissionFacts({ sessionId: this.sessionId, turnId });
   if (this.activeTurnStartReservation?.turnId === turnId) {
     this.activeTurnStartReservation = undefined;
   }

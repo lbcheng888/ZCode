@@ -140,6 +140,9 @@ export type { PermissionConfig } from "./permission/index.js";
 
 // Runtime
 export { AgentRuntime } from "./runtime.js";
+// M4：信封 → prompt-admission 触发来源的唯一推导函数（组合根接线必须经它，
+// 禁止各宿主自行判断 triggerId 字符串，spec §8-17①）。
+export { promptTriggerSourceOf } from "./runtime/methods/prompt-admission.js";
 export { createExternalTurnFaultError } from "./runtime/helpers/turn-errors.js";
 export { repairPersistedRemoteSessionPaths } from "./runtime/helpers/persisted-remote-session-path-repair.js";
 // 「按值把一段转录复制进另一个会话」的克隆器。fork 之外的第二个消费者是 dwf 的 amend-resume

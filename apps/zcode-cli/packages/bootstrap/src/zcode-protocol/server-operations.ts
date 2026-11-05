@@ -3461,6 +3461,11 @@ function buildProtocolSuperAgentHostPorts(
     },
     superAgentDatabasePath,
     tasksIndexDatabasePath,
+    // 控制面裁决产出卡片 / 批转成功后刷新已订阅会话的权威投影（delta 生产者）。
+    // 旧快照（含陈旧 pendingWouldAccept）不再只能靠组件内抑制；第二个客户端也能收敛。
+    onWouldAcceptChanged: () => {
+      context.v4Gateway?.refreshWouldAcceptPublishers();
+    },
   };
 }
 

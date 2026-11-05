@@ -131,7 +131,9 @@ export function createMandateContract(options?: {
       if (!active) {
         return { tier: "record_only", source: "implicit" };
       }
-      return { tier: active.tier, source: "explicit", mandateId: active.id };
+      // expiresAt 与 tier/mandateId 出自同一次 getActive 读：调用方不得再查一次补过期时间
+      // （两次读之间可能被 revoke，会把已撤销 mandate 当成不设过期）。
+      return { tier: active.tier, source: "explicit", mandateId: active.id, expiresAt: active.expiresAt };
     },
   };
 }

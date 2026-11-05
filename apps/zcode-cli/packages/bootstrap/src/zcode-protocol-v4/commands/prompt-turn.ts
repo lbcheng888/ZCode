@@ -7,6 +7,7 @@ import { OFF_PEAK_EXECUTION_TOOL_DENYLIST } from "@zcode/shared";
 import { type TurnBackgroundAttribution, type TurnInputIntentMetadata } from "@zcode/contracts";
 import type { TurnAttachment } from "@zcode/core";
 import type { ZCodeAutomationBotDeliveryTarget } from "@zcode/shared";
+import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
 import type { SendInputOptions, SendInputResult } from "../../app/types.js";
 import { runWithSessionResidencyFinalization } from "../../session-execution/index.js";
 import type { V4CommandCoreHost, V4SessionRecordView } from "./types.js";
@@ -30,6 +31,8 @@ export interface StartPromptTurnParamsBase {
   requireIdle?: boolean;
   /** Bot 入站 turn 的稳定回推地址；仅在本 turn 内暴露给 CronCreate。 */
   botDeliveryTarget?: ZCodeAutomationBotDeliveryTarget;
+  /** M4：wire envelope.triggerId 推导的输入来源，随 sendInput 进入 Core admission。 */
+  triggerSource?: PromptTriggerSource;
 }
 
 export type StartPromptTurnParams = StartPromptTurnParamsBase & TurnBackgroundAttribution;
@@ -223,6 +226,7 @@ async function startPromptTurnAfterPreflight(
         ...(turnToolDisallowlist ? { toolDisallowlist: turnToolDisallowlist } : {}),
         ...(params.requireQueue ? { requireQueue: true } : {}),
         ...(params.requireIdle ? { requireIdle: true } : {}),
+        ...(params.triggerSource ? { triggerSource: params.triggerSource } : {}),
         queryId: params.inputId as SendInputOptions["queryId"],
       },
     );

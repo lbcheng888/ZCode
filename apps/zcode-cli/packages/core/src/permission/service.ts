@@ -17,6 +17,7 @@ import {
   type RiskLevel,
   type ToolPermissionSpec,
 } from "@zcode/contracts";
+import { getCurrentTraceContext } from "@zcode/contracts";
 import { OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME } from "@zcode/shared";
 import { resolvePlanModeTransitionPermission } from "./plan-mode-policy.js";
 import { webFetchRuleSubjects, wildcardToRegExp } from "./rule-matching.js";
@@ -31,6 +32,13 @@ import type { ToolPermissionRulePolicy } from "../tool/types.js";
 
 /** 草稿免确认的规则号。 */
 const WORKFLOW_DRAFT_PREAPPROVED_RULE_ID = "tool.workflowDraft.preapproved";
+
+/**
+ * M4 回合权限绑定的进程内上限。正常回合按唯一 turnId 建键、回合结束即删；上限只兜住
+ * 异常未释放路径，避免进程生命周期内无界增长。达到上限按插入顺序淘汰最旧项
+ * （仍在执行的回合极难触顶：1024 个未完成准入）。
+ */
+const MAX_BOUND_TURN_PERMISSION_FACTS = 1024;
 
 /** M4 例外①：控制面自会话（裁决 / watchdog-llm）的基础设施 mandateId。 */
 export const INFRASTRUCTURE_MANDATE_ID = "infrastructure";
@@ -52,6 +60,15 @@ export interface PermissionMandateFacts {
  * 工具调用受 mandate fail-closed 门约束。缺省按 user 处理（flag 关字节兼容）。
  */
 export type PermissionOrigin = "user" | "event";
+
+/**
+ * M4：一个回合的权限事实。由 prompt admission 在准入边界绑定，回合内所有工具判定复用
+ * 同一份结论（turn 内不重新解析；下一 admission 边界自然拿到新结论）。
+ */
+export interface TurnPermissionFacts {
+  mandate: PermissionMandateFacts;
+  origin: PermissionOrigin;
+}
 
 export interface PermissionContext {
   toolName: string;
@@ -117,10 +134,58 @@ export class PermissionService {
    */
   private sessionRules: PermissionRuleset = { version: 1 };
 
+  /**
+   * M4：admission 边界绑定、回合内复用的权限事实。键 = `<sessionId>\0<turnId>`。
+   * turnId 由运行时每次真正起轮时新建，客户端无法复用（queryId/commandId 可被客户端
+   * 重复使用，不能作为权威身份）；回合结束在 releaseTurnStart 显式删除。
+   * 上限只是进程内守卫，防止异常路径下未释放的条目无限积累。
+   */
+  private readonly turnPermissionFacts = new Map<string, TurnPermissionFacts>();
+
   constructor(private config: PermissionConfig = defaultPermissionConfig) {}
 
   grantSessionPermission(updates: PermissionUpdate[]): void {
     this.sessionRules = applyPermissionUpdates(this.sessionRules, updates);
+  }
+
+  /**
+   * prompt admission 的唯一写入点（M4）：把本回合解析出的 mandate 结论与来源绑定到
+   * 该回合的 trace 作用域。flag 关 / user 回合从不调用，零行为变化。
+   */
+  bindTurnPermissionFacts(input: {
+    sessionId: string;
+    turnId: string;
+    facts: TurnPermissionFacts;
+  }): void {
+    const key = turnPermissionFactsKey(input.sessionId, input.turnId);
+    if (!this.turnPermissionFacts.has(key)) {
+      while (this.turnPermissionFacts.size >= MAX_BOUND_TURN_PERMISSION_FACTS) {
+        const oldest = this.turnPermissionFacts.keys().next().value;
+        if (oldest === undefined) break;
+        this.turnPermissionFacts.delete(oldest);
+      }
+    }
+    this.turnPermissionFacts.set(key, input.facts);
+  }
+
+  /**
+   * M4：回合结束时删除该回合绑定，防止事实跨回合残留。turnId 不可复用，
+   * 即使删除遗漏也不会被后续回合命中；删除只是收敛内存。
+   */
+  releaseTurnPermissionFacts(input: { sessionId: string; turnId: string }): void {
+    this.turnPermissionFacts.delete(turnPermissionFactsKey(input.sessionId, input.turnId));
+  }
+
+  /**
+   * 当前回合绑定的事实（没有绑定时 undefined = 既有 user-origin 语义）。
+   * 直接读 trace 的 async-local 作用域，调用方不需要把 mandate 逐层搬运。
+   */
+  private currentTurnPermissionFacts(): TurnPermissionFacts | undefined {
+    const trace = getCurrentTraceContext();
+    if (!trace?.turnId) return undefined;
+    return this.turnPermissionFacts.get(
+      turnPermissionFactsKey(String(trace.sessionId ?? ""), String(trace.turnId)),
+    );
   }
 
   checkPermission(
@@ -129,43 +194,67 @@ export class PermissionService {
     projectRules?: PermissionRuleset | null,
     rulePolicy?: ToolPermissionRulePolicy,
   ): PermissionDecisionResult {
-    const capability = this.resolveCapability(context, toolCapability);
+    // M4：显式字段优先（hook recheck 等已拿到同一份事实的调用方）；缺省取 admission
+    // 绑定的回合事实。flag 关时从未绑定，两个字段保持缺席 = 字节兼容。
+    const bound = this.currentTurnPermissionFacts();
+    const permissionContext: PermissionContext = bound
+      ? {
+          ...context,
+          ...(context.mandate === undefined ? { mandate: bound.mandate } : {}),
+          ...(context.origin === undefined ? { origin: bound.origin } : {}),
+        }
+      : context;
+    const capability = this.resolveCapability(permissionContext, toolCapability);
     // M4：mandate 同步 fail-closed 门——插入点必须在 plan-transition 解析之前（管线最前端）。
     // 只认 admission 注入的 typed 结论，本层不查库（同步管线无法查库）。
-    const mandateGate = this.resolveMandateGate(context, capability);
+    const mandateGate = this.resolveMandateGate(permissionContext, capability);
     if (mandateGate) return mandateGate;
-    const planModeTransition = resolvePlanModeTransitionPermission(context);
+    const planModeTransition = resolvePlanModeTransitionPermission(permissionContext);
 
     if (planModeTransition) {
       return planModeTransition.behavior === "allow"
-        ? this.allow(context, capability, planModeTransition.ruleId, planModeTransition.reason)
-        : this.deny(context, capability, planModeTransition.ruleId, planModeTransition.reason);
+        ? this.allow(
+            permissionContext,
+            capability,
+            planModeTransition.ruleId,
+            planModeTransition.reason,
+          )
+        : this.deny(
+            permissionContext,
+            capability,
+            planModeTransition.ruleId,
+            planModeTransition.reason,
+          );
     }
 
     if (capability.requiresUserInteraction) {
-      if (this.config.disallowedTools.has(context.toolName)) {
+      if (this.config.disallowedTools.has(permissionContext.toolName)) {
         return this.deny(
-          context,
+          permissionContext,
           capability,
           "rule.disallowedTools",
-          `Tool ${context.toolName} is explicitly disallowed`,
+          `Tool ${permissionContext.toolName} is explicitly disallowed`,
         );
       }
 
       return this.ask(
-        context,
+        permissionContext,
         capability,
         "tool.userInteraction",
-        `Tool ${context.toolName} requires user interaction`,
+        `Tool ${permissionContext.toolName} requires user interaction`,
       );
     }
 
     // 独立 Plan 优先于 Guarded 的 YOLO 基础策略，审批不能解除 Plan 的执行限制。
-    const planEnabled = context.planEnabled ?? context.mode === "plan";
-    if (!planEnabled && context.mode === "guarded" && toolCapability?.userApprovalRule) {
+    const planEnabled = permissionContext.planEnabled ?? permissionContext.mode === "plan";
+    if (
+      !planEnabled &&
+      permissionContext.mode === "guarded" &&
+      toolCapability?.userApprovalRule
+    ) {
       return {
         ...this.ask(
-          context,
+          permissionContext,
           capability,
           toolCapability.userApprovalRule,
           "Dangerous command requires your approval for this execution",
@@ -176,53 +265,58 @@ export class PermissionService {
 
     // 保留 staging 的工具级确认，不被 Guarded 普通调用的 YOLO 基础策略跳过。
     if (capability.alwaysAsk) {
-      return this.checkAlwaysAsk(context, capability, projectRules, rulePolicy);
+      return this.checkAlwaysAsk(permissionContext, capability, projectRules, rulePolicy);
     }
 
-    if ((context.mode === "yolo" || context.mode === "guarded") && !planEnabled) {
-      return this.allow(context, capability, "mode.yolo", "Yolo mode bypasses permission prompts");
+    if ((permissionContext.mode === "yolo" || permissionContext.mode === "guarded") && !planEnabled) {
+      return this.allow(
+        permissionContext,
+        capability,
+        "mode.yolo",
+        "Yolo mode bypasses permission prompts",
+      );
     }
 
-    if (context.mode === "auto") {
+    if (permissionContext.mode === "auto") {
       return this.deny(
-        context,
+        permissionContext,
         capability,
         "mode.auto.unimplemented",
         "Auto mode is reserved but not implemented yet",
       );
     }
 
-    if (this.config.disallowedTools.has(context.toolName)) {
+    if (this.config.disallowedTools.has(permissionContext.toolName)) {
       return this.deny(
-        context,
+        permissionContext,
         capability,
         "rule.disallowedTools",
-        `Tool ${context.toolName} is explicitly disallowed`,
+        `Tool ${permissionContext.toolName} is explicitly disallowed`,
       );
     }
 
-    if (this.matchesProjectRules(projectRules, "deny", context, capability, rulePolicy)) {
+    if (this.matchesProjectRules(projectRules, "deny", permissionContext, capability, rulePolicy)) {
       return this.deny(
-        context,
+        permissionContext,
         capability,
         "rule.project.deny",
-        `Tool ${context.toolName} is denied by project permission rules`,
+        `Tool ${permissionContext.toolName} is denied by project permission rules`,
       );
     }
 
-    if (this.matchesProjectRules(projectRules, "ask", context, capability, rulePolicy)) {
+    if (this.matchesProjectRules(projectRules, "ask", permissionContext, capability, rulePolicy)) {
       return this.ask(
-        context,
+        permissionContext,
         capability,
         "rule.project.ask",
-        `Tool ${context.toolName} requires approval by project permission rules`,
+        `Tool ${permissionContext.toolName} requires approval by project permission rules`,
       );
     }
 
     // 原会话回复的接收范围由 Host 再次校验；network 副作用不能让这个免审批契约重新弹窗。
     // 放在显式 deny/ask 之后，且同时匹配内置工具名和能力，不能扩大其他网络工具的权限。
     if (
-      context.toolName === "ReplyToChannel" &&
+      permissionContext.toolName === "ReplyToChannel" &&
       capability.permissionName === "channel.reply" &&
       capability.sideEffectScope === "network" &&
       capability.riskLevel === "medium" &&
@@ -230,7 +324,7 @@ export class PermissionService {
       !capability.needsApproval
     ) {
       return this.allow(
-        context,
+        permissionContext,
         capability,
         "tool.channelReply.preapproved",
         "The originating bot conversation is already authorized",
@@ -238,21 +332,21 @@ export class PermissionService {
     }
 
     if (planEnabled) {
-      return this.checkPlanMode(context, capability);
+      return this.checkPlanMode(permissionContext, capability);
     }
 
-    if (this.matchesProjectRules(projectRules, "allow", context, capability, rulePolicy)) {
+    if (this.matchesProjectRules(projectRules, "allow", permissionContext, capability, rulePolicy)) {
       return this.allow(
-        context,
+        permissionContext,
         capability,
         "rule.project.allow",
-        `Tool ${context.toolName} is allowed by project permission rules`,
+        `Tool ${permissionContext.toolName} is allowed by project permission rules`,
       );
     }
 
-    if (this.isPreapprovedWebFetchRequest(context)) {
+    if (this.isPreapprovedWebFetchRequest(permissionContext)) {
       return this.allow(
-        context,
+        permissionContext,
         capability,
         "tool.webfetch.preapproved",
         "WebFetch URL is preapproved",
@@ -265,33 +359,33 @@ export class PermissionService {
     // workflow-draft-path.ts（含"为什么这样放行是安全的"）。
     if (
       isPreapprovedWorkflowDraftWrite({
-        input: context.input,
-        toolName: context.toolName,
-        workingDirectory: context.workingDirectory,
+        input: permissionContext.input,
+        toolName: permissionContext.toolName,
+        workingDirectory: permissionContext.workingDirectory,
       })
     ) {
       return this.allow(
-        context,
+        permissionContext,
         capability,
         WORKFLOW_DRAFT_PREAPPROVED_RULE_ID,
         "Workflow draft file is preapproved",
       );
     }
 
-    if (this.config.allowedTools.has(context.toolName)) {
+    if (this.config.allowedTools.has(permissionContext.toolName)) {
       return this.allow(
-        context,
+        permissionContext,
         capability,
         "rule.allowedTools",
-        `Tool ${context.toolName} is explicitly allowed`,
+        `Tool ${permissionContext.toolName} is explicitly allowed`,
       );
     }
 
-    if (context.mode === "edit") {
-      return this.checkEditMode(context, capability);
+    if (permissionContext.mode === "edit") {
+      return this.checkEditMode(permissionContext, capability);
     }
 
-    return this.checkBuildMode(context, capability);
+    return this.checkBuildMode(permissionContext, capability);
   }
 
   /**
@@ -783,6 +877,10 @@ export class PermissionService {
       ...(capability.alwaysAsk ? { alwaysAsk: true } : {}),
     };
   }
+}
+
+function turnPermissionFactsKey(sessionId: string, turnId: string): string {
+  return `${sessionId}\u0000${turnId}`;
 }
 
 interface ResolvedPermissionCapability {

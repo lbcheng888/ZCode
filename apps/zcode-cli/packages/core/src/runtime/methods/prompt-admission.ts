@@ -6,6 +6,7 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
 import { acceptSubmissionModelSelection, captureHighspeedFallbackSelection } from "./turn-model.js";
+import type { TurnPermissionFacts } from "../../permission/service.js";
 import type {
   ActiveTurnStartReservation,
   ExecuteTurnOptions,
@@ -13,6 +14,15 @@ import type {
   PromptAdmissionReceipt,
   TurnResult,
 } from "../types.js";
+
+const EVENT_ADMISSION_MISSING_MANDATE_FACTS =
+  "事件回合 admission 缺少 mandateFacts：flag-on 必须由控制面注入 mandate.resolveFor 结论（spec §8-15②），禁止静默降级为 user-origin";
+const EVENT_ADMISSION_USER_WITH_FACTS =
+  "user 回合 admission 不得携带 mandateFacts：mandate 门只作用于事件驱动回合（M4 例外②）";
+const EVENT_ADMISSION_MISSING_QUERY_ID =
+  "事件回合 admission 缺少 queryId/inputId：无法把 mandate 结论绑定到回合作用域";
+const EVENT_ADMISSION_MISSING_TRIGGER_ID =
+  "事件回合 mandateFacts 缺少 triggerId：无法证明本回合的事件权威";
 
 // 触发来源枚举与 wire schema 同源（设计 §7 Upgrade / spec §2.2「三处合同同步」）：
 // 枚举定义在 shared command.ts 的 promptTriggerSourceSchema，本文件只再导出 + 提供
@@ -33,6 +43,47 @@ export function promptTriggerSourceOf(envelope: {
 }
 
 /**
+ * M4 admission 边界解析：把控制面注入的 mandate 结论落成回合作用域的权限事实。
+ *
+ * - `mandateFacts` 在场 ⇒ 事件回合；来源必须推导为 trigger，否则是宿主接线错误（响亮失败）。
+ * - `triggerSource=trigger` 而 facts 缺席 ⇒ flag-on 注入缺失，直接抛错；绝不静默按
+ *   user-origin 放行（那会让 M4 门在生产路径上假死）。
+ * - 两者都缺席 ⇒ 既有 user 回合，返回 undefined（字节兼容）。
+ */
+function resolveAdmissionPermissionFacts(
+  options: PromptAdmissionOptions | undefined,
+): TurnPermissionFacts | undefined {
+  const mandateFacts = options?.mandateFacts;
+  if (mandateFacts) {
+    if (
+      typeof mandateFacts.triggerId !== "string" ||
+      mandateFacts.triggerId.trim().length === 0
+    ) {
+      throw new Error(EVENT_ADMISSION_MISSING_TRIGGER_ID);
+    }
+    const triggerSource =
+      options?.triggerSource ?? promptTriggerSourceOf({ triggerId: mandateFacts.triggerId });
+    if (triggerSource !== "trigger") {
+      throw new Error(EVENT_ADMISSION_USER_WITH_FACTS);
+    }
+    const queryId = options?.queryId ?? (options?.inputId as QueryId | undefined);
+    if (!queryId) throw new Error(EVENT_ADMISSION_MISSING_QUERY_ID);
+    return {
+      origin: "event",
+      mandate: {
+        tier: mandateFacts.tier,
+        ...(mandateFacts.mandateId ? { mandateId: mandateFacts.mandateId } : {}),
+        expiresAt: mandateFacts.expiresAt ?? null,
+      },
+    };
+  }
+  if (options?.triggerSource === "trigger") {
+    throw new Error(EVENT_ADMISSION_MISSING_MANDATE_FACTS);
+  }
+  return undefined;
+}
+
+/**
  * 每个 AgentRuntime 自己完成 prompt 的 admission：检查 busy 边界、建立 reservation、
  * 把 command 放进该 runtime 的 FIFO。Bootstrap 不应把这些步骤拆开，否则 reservation
  * 建立前的异步窗口会让同一 session 产生第二条 turn。
@@ -43,6 +94,10 @@ export async function admitPrompt(
   attachments?: Parameters<AgentRuntimeInternal["executeTurn"]>[1],
   options?: PromptAdmissionOptions,
 ): Promise<PromptAdmissionReceipt> {
+  // M4：准入边界先校验事件来源事实（trigger 来源缺 facts 立即响亮失败，绝不静默
+  // 退回 user-origin）。真正绑定发生在起轮分支：只有真实回合才有不可复用的 turnId；
+  // 排队/steer 不绑，避免把结论挂到客户端可复用的 queryId 上。
+  const admissionPermission = resolveAdmissionPermissionFacts(options);
   if (options?.requireQueue === true) {
     // Bug 根因：Highspeed 临时 provider 只能在独立 turn 的提升边界安装。如果仅依据
     // Bootstrap 的 busy 快照决定是否排队，状态在跨层 await 期间转为空闲会误用普通模型启动。
@@ -147,6 +202,16 @@ export async function admitPrompt(
 
   const queryId = options?.queryId ?? (options?.inputId as QueryId | undefined) ?? createQueryId();
   const turnId = createTurnId();
+  // M4：事件回合的 mandate 结论绑定到本次真实回合。turnId 由运行时生成、每轮回新，
+  // 后续工具判定经 trace.turnId 命中同一份事实；回合结束由 releaseTurnStart 删除。
+  // 排队输入在提升时会再次走本函数（新 turnId），因此每次都按当时的授权重新绑定。
+  if (admissionPermission) {
+    this.permissionService.bindTurnPermissionFacts({
+      sessionId: this.sessionId,
+      turnId,
+      facts: admissionPermission,
+    });
+  }
   const turnTraceContext = createChildTraceContext(options?.traceContext ?? this.rootTraceContext, {
     queryId,
     sessionId: this.sessionId,

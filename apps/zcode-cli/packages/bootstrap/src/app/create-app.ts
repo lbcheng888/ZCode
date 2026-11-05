@@ -44,6 +44,7 @@ import { isRemoteWorkspaceIdentity, resolveZCodeRuntimeEnv } from "@zcode/shared
 import {
   ZCODE_ATTACHMENT_FAULT_CODES,
   ZCodeAttachmentFaultError,
+  parseCommandEnvelope,
 } from "@zcode/shared/zcode-protocol-v4";
 
 import { createModelAdapter } from "../model-factory.js";
@@ -55,6 +56,7 @@ import type {
   ZCodeApp,
   ZCodeAppOptions,
 } from "./types.js";
+import { processSuperAgentAdmissionMandateFacts } from "./super-agent-admission-facts.js";
 import {
   createConfigCliOverrides,
   isMessageEnabled,
@@ -192,6 +194,16 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     }),
     options,
   );
+  // M4 门只在事件路由控制面内生效：mandateGate 单独打开时控制面不构造，门会静默失效，
+  // 运维却以为门已开。启动期显式拒绝该组合（kill-switch 只认 eventRouter=false）。
+  if (
+    configResult.config.features.mandateGate === true &&
+    configResult.config.features.eventRouter !== true
+  ) {
+    throw new Error(
+      "features.mandateGate=true 依赖 features.eventRouter=true（mandate 门只在事件路由控制面内生效，spec §5.4）",
+    );
+  }
   const loggerFactory = options.loggerFactory ?? createNodeLoggerFactory({ env: options.env });
   const logger = loggerFactory.createLogger("zcode").child({
     ...traceContextToLogContext(traceContext),
@@ -230,6 +242,11 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   // 声明提到 try 前，启动中途失败时外层 catch 能对称 stop 关库不泄漏。
   let superAgentControlPlane: SuperAgentControlPlane | undefined;
   let superAgentAbort: AbortController | undefined;
+  // M4：事件回合 mandate 结论的 admission 交接面（按 wire commandId 登记/取出）。
+  // 必须是进程级共享表：leader app 登记、目标 session app 的 input-facade 读取（协议
+  // 宿主每个 session 一个 app，各持一份表会让跨 session 投递静默丢 facts）。
+  // flag 关时恒空；input-facade 读不到结论 = 保持 user-origin 字节兼容。
+  const admissionMandateFacts = processSuperAgentAdmissionMandateFacts;
   try {
     const storageRoot = resolvePath(configResult.config.storage.dir);
     const cliStorageRoot = getCliStorageRoot(storageRoot);
@@ -964,6 +981,23 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       runtime,
       sessionId,
       traceContext,
+      // 交 resolution 而不是裸 facts：human_explicit_exempt 与「未登记」必须可区分——
+      // 前者要覆盖宿主按信封 triggerId 推导的 trigger 来源（免 Mandate 按 user-origin），
+      // 后者才允许沿用宿主来源（缺 facts 时由 Core 响亮失败）。
+      lookupAdmissionMandateFacts: (inputId) => admissionMandateFacts.peek(inputId),
+      lookupAdmissionTriggerSource: (inputId) => admissionMandateFacts.triggerSourceOf(inputId),
+      // M4：admission 边界重新解析（排队提升 / revoke / 换档）；控制面缺失响亮失败。
+      // 延迟读闭包变量：facade 构造时控制面尚未装配（create-app 后段才 start）。
+      revalidateAdmissionMandateFacts: (triggerId) => {
+        if (!superAgentControlPlane) {
+          throw new Error(
+            `事件回合 mandateFacts 重新解析时控制面缺席: triggerId=${triggerId}（flag-on 装配错误）`,
+          );
+        }
+        return superAgentControlPlane.resolveAdmissionMandateFacts(triggerId);
+      },
+      retainAdmissionMandateFacts: (inputId) => admissionMandateFacts.retain(inputId),
+      releaseAdmissionMandateFacts: (inputId) => admissionMandateFacts.drop(inputId),
     });
     const workflowFacade = createWorkflowFacade({
       agentTelemetry: modelTelemetry.agentExecution,
@@ -1038,6 +1072,33 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         );
       }
       superAgentAbort = new AbortController();
+      // M4：mandateGate 开时，所有带 triggerId 的 sendText 信封在唯一 admission 入口前
+      // 解析本回合 mandate 结论，并按 commandId 交给 input-facade。解析失败/缺结论
+      // 一律响亮失败——绝不让事件回合静默退回 user-origin（那会让 M4 门假死）。
+      // flag 关或信封无 triggerId 时原样直通，零行为变化。
+      const mandateGate = configResult.config.features.mandateGate === true;
+      const superAgentControlPlaneHostPorts = mandateGate
+        ? {
+            ...superAgentHost,
+            handleCommand: async (raw: Parameters<typeof superAgentHost.handleCommand>[0]) => {
+              const parsed = parseCommandEnvelope(raw);
+              if (parsed.ok) {
+                const { commandId, triggerId } = parsed.envelope;
+                if (typeof triggerId === "string" && triggerId.trim().length > 0) {
+                  const resolution =
+                    superAgentControlPlane?.resolveAdmissionMandateFacts(triggerId);
+                  if (!resolution) {
+                    throw new Error(
+                      `事件回合 mandateFacts 解析器不可用: triggerId=${triggerId}（控制面未装配，spec §8-15②）`,
+                    );
+                  }
+                  admissionMandateFacts.bind(commandId, resolution);
+                }
+              }
+              return await superAgentHost.handleCommand(raw);
+            },
+          }
+        : superAgentHost;
       // leader 租约/回填/续期作用域：与协议 workspace 身份键同源（trim 缺省回退工作目录）。
       const superAgentWorkspaceIdentity =
         options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory;
@@ -1090,10 +1151,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           sessionId,
           isIdle: () => getRuntime().getActiveTurnInfo() === undefined,
         },
-        hostPorts: superAgentHost,
+        hostPorts: superAgentControlPlaneHostPorts,
         // M4/M6：flag 关（缺省）保持 P2 字节兼容——mandate 恒隐式 record_only、
         // 方案门不启用；flag 开才接三档解析与五字段出口门。
-        mandateGate: configResult.config.features.mandateGate === true,
+        mandateGate,
         adjudicationSession: createRuntimeAdjudicationSession({
           generateWorkspaceText: (input, sessionOptions) =>
             getRuntime().generateWorkspaceText(input, sessionOptions),

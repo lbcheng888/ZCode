@@ -100,6 +100,7 @@ import type {
 import type { McpAppsToolVisibility } from "@zcode/shared/mcp-apps";
 import type { EffectiveModelSelectionResult } from "@zcode/shared/model-selection";
 import type {
+  PromptTriggerSource,
   WorkspaceHookReviewDecision,
   WorkspaceHookTrustRevokeTarget,
 } from "@zcode/shared/zcode-protocol-v4";
@@ -273,6 +274,11 @@ export interface SteerTurnOptions {
 
 export type SendInputOptions = SubmitPromptOptions & {
   inputId?: string;
+  /**
+   * M4：输入来源（wire envelope.triggerId 推导）。只由宿主在事件回合投递时设置；
+   * 缺省 = 用户/宿主直接输入，既有 user-origin 语义不变。
+   */
+  triggerSource?: PromptTriggerSource;
   /** 可信消费入口确定的呈现标记；不改变原始用户内容或调度语义。 */
   inputPresentation?: ExecuteTurnOptions["inputPresentation"];
   delivery?: InputDelivery;

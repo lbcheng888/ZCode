@@ -67,6 +67,8 @@ describe("super-agent-mandate 隐式 record-only（P2 查询语义）", () => {
       tier: "speculative",
       source: "explicit",
       mandateId: inserted.id,
+      // expiresAt 与 tier/mandateId 同一读快照导出（避免二次查询 TOCTOU）。
+      expiresAt: now + 60_000,
     });
     // 未命中显式行 → 查询层 UNION 缺省（不写表）。
     expect(mandate.resolveFor("bot:bot-2")).toEqual({

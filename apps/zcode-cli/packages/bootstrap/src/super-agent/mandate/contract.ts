@@ -15,6 +15,11 @@ export interface MandateVerdict {
   source: "implicit" | "explicit";
   /** 命中的显式 mandateId；隐式缺省时缺省。 */
   mandateId?: string;
+  /**
+   * 命中显式行时的 expires_at（epoch ms）；implicit 缺省或显式行不设过期时为 null。
+   * 与 tier/mandateId 来自同一次 getActive 读快照，调用方不得二次查询（避免 TOCTOU）。
+   */
+  expiresAt?: number | null;
 }
 
 export interface MandateRecord {

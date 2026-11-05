@@ -16,8 +16,14 @@ import {
   normalizePromptInput,
   projectInputHistoryAttachments,
 } from "./prompt-input.js";
-import type { PrepareUserExecutionBoundary, SubmitPromptOptions, ZCodeApp } from "./types.js";
+import type {
+  PrepareUserExecutionBoundary,
+  SendInputOptions,
+  SubmitPromptOptions,
+  ZCodeApp,
+} from "./types.js";
 import type { CliDefaultSelection } from "./cli-default-selection.js";
+import type { SuperAgentAdmissionMandateResolution } from "./super-agent-admission-facts.js";
 
 type InputFacade = Pick<
   ZCodeApp,
@@ -53,6 +59,30 @@ interface CreateInputFacadeDeps {
   runtime: AgentRuntime;
   sessionId: SessionId;
   traceContext: TraceContext;
+  /**
+   * M4：按 inputId(=wire commandId) 取控制面在投递前解析的 mandate 结论。
+   * 仅 features.eventRouter + features.mandateGate 同时打开时由组合根注入。
+   */
+  lookupAdmissionMandateFacts?: (
+    inputId: string | undefined,
+  ) => SuperAgentAdmissionMandateResolution | undefined;
+  /**
+   * M4：按 inputId 取本输入是否由 trigger 信封发起。即使 facts 因跨 app 交接缺失，
+   * Core admission 也会按 trigger 来源响亮失败，而不是静默退回 user-origin。
+   */
+  lookupAdmissionTriggerSource?: (inputId: string | undefined) => "trigger" | undefined;
+  /**
+   * M4：在每次 admission 边界按 triggerId 重新解析结论（不复用投递时刻缓存）。
+   * 排队输入提升、入队后 mandate 被 revoke / 新 promote，都必须按当时的授权重判
+   * （spec §8-17②）；缺控制面 / 缺 trigger 行由实现响亮抛错，不退回旧结论。
+   */
+  revalidateAdmissionMandateFacts?: (
+    triggerId: string,
+  ) => SuperAgentAdmissionMandateResolution | undefined;
+  /** 排队输入标记为待提升（登记表淘汰循环必须保留它）。 */
+  retainAdmissionMandateFacts?: (inputId: string | undefined) => void;
+  /** M4：回合已起步或判定不会再起轮时释放登记项；排队输入保留到提升边界。 */
+  releaseAdmissionMandateFacts?: (inputId: string | undefined) => void;
 }
 
 export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
@@ -196,6 +226,32 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
     sendInput: async (input, options) => {
       const promptInput = normalizePromptInput(input);
       const delivery = options?.delivery ?? "auto";
+      // M4：事件回合的 mandate 结论按 commandId 登记，admission 前取出交给 Core；
+      // 排队输入要保留到提升时的下一次 admission，其余路径在收口处释放。
+      const admissionInputId = options?.inputId;
+      let admissionResolution = deps.lookupAdmissionMandateFacts?.(admissionInputId);
+      // M4：登记表只是「本输入属于事件回合」的身份凭据，档位结论必须在本次 admission
+      // 边界按 triggerId 重新解析——排队期间 mandate 可能被 revoke 或 promote 出新档，
+      // 复用投递时刻的旧结论会放行已撤销的写操作，或让新提升的 auto 档继续被拒。
+      if (admissionResolution?.kind === "mandate" && deps.revalidateAdmissionMandateFacts) {
+        const fresh = deps.revalidateAdmissionMandateFacts(admissionResolution.facts.triggerId);
+        if (!fresh) {
+          throw new Error(
+            `事件回合 mandate 重新解析失败: triggerId=${admissionResolution.facts.triggerId}（flag-on 控制面缺席，禁止复用投递时刻结论）`,
+          );
+        }
+        admissionResolution = fresh;
+      }
+      // human-explicit 直通「免 Mandate」：即使信封带 triggerId 也不向 Core 声明事件来源，
+      // 否则未配置显式 mandate 的人类直接消息会被隐式 record_only 判成只读。
+      // 其余情况以宿主从信封推导的来源为准；登记表命中则为 trigger。
+      const admissionTriggerSource =
+        admissionResolution?.kind === "human_explicit_exempt"
+          ? undefined
+          : (options?.triggerSource ?? deps.lookupAdmissionTriggerSource?.(admissionInputId));
+      const admissionMandateFacts =
+        admissionResolution?.kind === "mandate" ? admissionResolution.facts : undefined;
+      let keepAdmissionMandateFacts = false;
       const unsubscribe =
         options?.onEvent || options?.onTurnStartedObserved
           ? deps.runtime.subscribeEvents({
@@ -217,11 +273,18 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
         await preparePromptBoundary(options);
         options = deps.cliDefaultSelection?.prepareInput(options) ?? options;
         const prepared = await prepareRuntimePrompt(promptInput, options);
+        // M4：显式剥掉宿主传入的 triggerSource 再展开。human-explicit 免 Mandate 时
+        // admissionTriggerSource 必须真正缺席；直接展开 options 会把宿主的 "trigger"
+        // 原样带进 Core，导致缺 facts 的 admission 响亮失败。
+        const admissionOptions: SendInputOptions = { ...options };
+        delete admissionOptions.triggerSource;
         const result = await deps.runtime.admitPrompt(prepared.input, prepared.storedAttachments, {
-          ...options,
+          ...admissionOptions,
           delivery,
           traceContext: options?.traceContext ?? deps.traceContext,
           ...(prepared.input !== promptInput.text ? { displayInput: promptInput.text } : {}),
+          ...(admissionTriggerSource ? { triggerSource: admissionTriggerSource } : {}),
+          ...(admissionMandateFacts ? { mandateFacts: admissionMandateFacts } : {}),
         });
         if (result.kind === "started") {
           await recordAcceptedInputHistory(
@@ -239,6 +302,9 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
         }
         unsubscribe?.();
         if (result.kind === "queued") {
+          keepAdmissionMandateFacts = true;
+          // 待提升项必须在登记表淘汰中保留，否则提升后的 admission 会丢掉事件来源。
+          deps.retainAdmissionMandateFacts?.(admissionInputId);
           await recordAcceptedInputHistory(
             promptInput.text,
             "steered_input",
@@ -250,6 +316,10 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
       } catch (error) {
         unsubscribe?.();
         throw error;
+      } finally {
+        if (!keepAdmissionMandateFacts) {
+          deps.releaseAdmissionMandateFacts?.(admissionInputId);
+        }
       }
     },
     enqueueDeferredInput: async (input, options) => {
