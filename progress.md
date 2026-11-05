@@ -84,6 +84,11 @@
 - 修复：CLI 内部自动回合（auto-drain/goal）不携带附件事实的 fail-open 已登记；票据生产 secret 交付通道待接 ✅
 - 验证：双 scope typecheck、architecture 0、lint 0 errors、定向 65+354+116 测试绿；累计 42 提交
 
+## P6 收尾批次（2026-11-05）✅
+- OS egress 围栏：Linux netns+nftables / macOS sandbox-exec（darwin 真跑：白名单放行、--noproxy/undici 直连阻断、代理 403）/ Windows typed unimplemented；不可用 run 拒绝启动 ✅
+- 票据 secret 专用通道：MessagePort 控制帧（协议只见 ticketId）、宿主绑定校验、ZCODE_P6_CAPABILITY_TICKETS=1 组合根接线、真通道测试 53 例 ✅
+- 验证：根 typecheck、architecture 0、CLI lint 0 errors；累计 47 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
