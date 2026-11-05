@@ -59,6 +59,7 @@ import {
   withWorkflowRefineDeniedFollowUp,
 } from "./turn-control.js";
 import { mergeToolExecutionTelemetry, readToolExecutionTelemetry } from "../handlers/tool-perf.js";
+import { runWithCapabilityTicketAuthorization } from "../capability-ticket-context.js";
 import type { ToolExecuteOptions, ToolExecutorDeps } from "./types.js";
 import { validateInitialModelToolInput, validateInput, validateOutput } from "./validation.js";
 import type { ExecutableToolCall } from "../types.js";
@@ -555,13 +556,19 @@ async function executeToolCallImpl(
         ...(inputAdjustments === undefined ? {} : { inputAdjustments }),
       };
 
-      const output = await executeWithTimeout(
-        entry.handler,
-        executionInput,
-        context,
-        deadline,
-        executionAbortController,
-        entry,
+      // P6 C2：把本回合票据授权域限制在本次工具 handler 的异步作用域内。MCP adapter 在
+      // handler 内解析官方身份头时读取该 ALS，并只附带公开票据句柄（无 secret）。
+      const output = await runWithCapabilityTicketAuthorization(
+        deps.permissionService.currentCapabilityTicketAuthorization(),
+        () =>
+          executeWithTimeout(
+            entry.handler,
+            executionInput,
+            context,
+            deadline,
+            executionAbortController,
+            entry,
+          ),
       );
       const durationMs = Date.now() - startTime;
       if (isToolHandlerFailure(output)) {

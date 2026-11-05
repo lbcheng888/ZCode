@@ -1,3 +1,4 @@
+import type { IServerChannel } from "@zcode/rpc";
 import type { IBotsService, ServiceCollection } from "@zcode/services";
 import type { DynamicWorkflowMode, WindowHostAttachmentScope } from "@zcode/shared";
 import {
@@ -16,6 +17,8 @@ export async function connectDesktopSourceServer(
     getBots(): IBotsService | undefined;
     readDynamicWorkflowMode(): Promise<DynamicWorkflowMode | undefined>;
     onModeSyncError(error: unknown): void;
+    /** P6 C2：票据 admission 回连频道（Desktop Host broker 权威）。 */
+    capabilityTicketAdmissionChannel?: IServerChannel;
   },
 ): Promise<ServerRemoteConnection> {
   let connection: ServerRemoteConnection | undefined;
@@ -28,6 +31,9 @@ export async function connectDesktopSourceServer(
     connection = await (deps.connectServer ?? connectServerRemoteOverDuplex)({
       ...options,
       topicResourceChannel: relay.channel,
+      ...(deps.capabilityTicketAdmissionChannel
+        ? { capabilityTicketAdmissionChannel: deps.capabilityTicketAdmissionChannel }
+        : {}),
       onClose(event) {
         relay.dispose();
         options.onClose?.(event);

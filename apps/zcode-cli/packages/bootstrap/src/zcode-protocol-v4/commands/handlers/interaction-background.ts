@@ -20,7 +20,7 @@ import {
   attachmentFactsRevoked,
   effectiveAttachmentAdmissionRole,
 } from "@zcode/shared/zcode-protocol-v4";
-import { commandAttachmentOf } from "../executor.js";
+import { commandAttachmentOf } from "../command-admission.js";
 import { requireRecord } from "../record-access.js";
 import type { V4CommandCoreHost } from "../types.js";
 

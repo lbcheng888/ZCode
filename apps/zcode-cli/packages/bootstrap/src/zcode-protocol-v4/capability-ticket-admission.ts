@@ -27,6 +27,11 @@ export const capabilityTicketAuthorizationSchema = z
     scope: capabilityTicketScopeSchema,
     expiresAt: z.number().int().nonnegative(),
     revocationEpoch: z.number().int().nonnegative(),
+    /**
+     * P6 C2：宿主 admission 时宣告的真实凭据注入通道（公开事实）。CLI 据此决定
+     * MCP/plugin 凭据类工具是否允许执行；真正的 scope 校验在宿主 resolver 前执行。
+     */
+    credentialInjection: z.enum(["host-interaction"]).optional(),
   })
   .strict();
 

@@ -87,6 +87,10 @@ import { integratedTerminalShellSelectionSchema } from "../validationAppSettings
 import { zcodeTaskModeSchema } from "../zcode-task-mode-schema.js";
 import { OFFICIAL_MCP_AUTH_PORT_FAILURE_REASONS } from "../official-mcp-auth.js";
 import {
+  capabilityTicketBindingSchema,
+  capabilityTicketIdSchema,
+} from "../capability-ticket.js";
+import {
   zcodeSyntheticUserMessageSourceSchema as legacyZcodeSyntheticUserMessageSourceSchema,
   zcodeDeliveryKindSchema,
   zcodeInteractionRequestOriginSchema,
@@ -2858,6 +2862,13 @@ export const zcodeOfficialMcpAuthHeadersRequestParamsSchema = z
     pluginId: nonEmptyString,
     mcpKey: nonEmptyString,
     targetOrigin: nonEmptyString,
+    /**
+     * P6 C2：本次工具执行所属能力票据的公开句柄与绑定（**不含 secret**）。
+     * 两者必须同时出现：宿主按 broker 校验票据 + scope.resources 后才解析凭据。
+     * 缺席 = 无票据语义，宿主保持既有行为。
+     */
+    capabilityTicketId: capabilityTicketIdSchema.optional(),
+    capabilityTicketBinding: capabilityTicketBindingSchema.optional(),
   })
   .strict();
 export type ZCodeOfficialMcpAuthHeadersRequestParams = z.infer<

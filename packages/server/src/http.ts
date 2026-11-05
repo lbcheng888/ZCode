@@ -17,8 +17,14 @@ import {
   LoggingChannelServer,
   type ISocket,
 } from "@zcode/rpc";
-import type { TopicResourcePeers } from "@zcode/services/node";
-import { TOPIC_RESOURCE_RELAY_CHANNEL } from "@zcode/shared";
+import type {
+  CapabilityTicketAdmissionPeers,
+  TopicResourcePeers,
+} from "@zcode/services/node";
+import {
+  CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL,
+  TOPIC_RESOURCE_RELAY_CHANNEL,
+} from "@zcode/shared";
 import {
   ServiceCollection,
   IZCodeAgentService,
@@ -92,6 +98,7 @@ function setupChannelServer(
   clientMode: "desktop-continuous" | "web-remote-replayable",
   workspaceIdentityMapper?: SourceServerWorkspaceIdentityMapper,
   resourcePeers?: TopicResourcePeers,
+  capabilityTicketAdmissionPeers?: CapabilityTicketAdmissionPeers,
 ) {
   const socket = wrapWebSocket(ws);
   const protocol = new SocketProtocol(socket);
@@ -103,7 +110,16 @@ function setupChannelServer(
     : loggedServer;
   const agentService = services.getOptional(IZCodeAgentService);
   const reverseClient =
-    clientMode === "desktop-continuous" && resourcePeers ? new ChannelClient(protocol) : undefined;
+    clientMode === "desktop-continuous" && (resourcePeers || capabilityTicketAdmissionPeers)
+      ? new ChannelClient(protocol)
+      : undefined;
+  // P6 C2：票据 admission 反向频道只挂在 host capability 鉴权的 desktop-continuous 连接。
+  const capabilityTicketAdmissionPeer =
+    reverseClient && capabilityTicketAdmissionPeers
+      ? capabilityTicketAdmissionPeers.attach(
+          reverseClient.getChannel(CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL),
+        )
+      : undefined;
   const peer = reverseClient
     ? resourcePeers?.attach(reverseClient.getChannel(TOPIC_RESOURCE_RELAY_CHANNEL))
     : undefined;
@@ -132,6 +148,7 @@ function setupChannelServer(
   }
   services.exposeOnChannelServer(server, overrides);
   socket.onClose(() => {
+    capabilityTicketAdmissionPeer?.dispose();
     peer?.dispose();
     reverseClient?.dispose();
     void connectionScope?.dispose();
@@ -141,6 +158,8 @@ function setupChannelServer(
 
 export interface HttpServerOptions {
   topicResourcePeers?: TopicResourcePeers;
+  /** P6 C2：desktop-continuous host 连接上的票据 admission 反向频道挂载点。 */
+  capabilityTicketAdmissionPeers?: CapabilityTicketAdmissionPeers;
   serverId?: string;
   virtualProjects?: boolean;
   migrationFailedPathCount?: number;
@@ -196,6 +215,8 @@ function createServerInfo(options: HttpServerOptions): ServerRemoteInfo {
       websocketRpc: true,
       ...(options.virtualProjects ? { virtualProjects: true } : {}),
       processResourceTelemetry: true,
+      // P6 C2：本 Server 能在 desktop-continuous host 连接上挂载票据 admission 反向频道。
+      capabilityTicketAdmission: true,
     },
   });
 }
@@ -388,6 +409,7 @@ export function createHttpServer(
         "desktop-continuous",
         options.workspaceIdentityMapper,
         options.topicResourcePeers,
+        options.capabilityTicketAdmissionPeers,
       );
     },
   }));

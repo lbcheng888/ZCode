@@ -14,6 +14,7 @@ import { getTasksIndexDatabasePath } from "@zcode/services/storage-startup";
 import { CONTROL_PLANE_CORE_ENABLED_ENV } from "../contracts.js";
 import {
   createControlPlaneClient,
+  isControlPlanePeerModeEnabled,
   type ControlPlaneClient,
 } from "../supervisor/controlPlaneClient.js";
 import { createCoreHttpServer } from "./http.js";
@@ -80,6 +81,9 @@ export async function runServerCore(generation: number): Promise<void> {
     });
     const client = createControlPlaneClient({
       serverRoot: layout.serverRoot,
+      // §3.8：peer 门模式下 child 在连接建立时已完成内核身份校验，Core 不能再发
+      // auth 首帧（否则会被当作非法业务帧、触发协议错误断开）。开关与 child 共用 env。
+      peerMode: isControlPlanePeerModeEnabled(),
       onInboundRequest: createSuperAgentControlPlaneInboundHandler({
         getServices: () => hostServices,
         getDispatchSettlement: () => dispatchSettlement,
@@ -114,16 +118,20 @@ export async function runServerCore(generation: number): Promise<void> {
     );
   }
   const sourceServerId = (await resolveCoreServerId()) ?? hostname() ?? "zcode-server";
-  const { services, workspaceIdentityMapper, migrationFailedPathCount } =
-    await createServerHostServices({
-      sourceServerId,
-      zcodeBuiltinProviderConfigFilePath,
-      providerProvisioningTargetEnabled: true,
-      topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
-      ...(controlPlaneCorePort
-        ? { superAgentControlPlaneRpcPort: controlPlaneCorePort.port }
-        : {}),
-    });
+  const {
+    services,
+    workspaceIdentityMapper,
+    migrationFailedPathCount,
+    capabilityTicketAdmissionPeers,
+  } = await createServerHostServices({
+    sourceServerId,
+    zcodeBuiltinProviderConfigFilePath,
+    providerProvisioningTargetEnabled: true,
+    topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
+    ...(controlPlaneCorePort
+      ? { superAgentControlPlaneRpcPort: controlPlaneCorePort.port }
+      : {}),
+  });
   // child→Core 回调服务面就绪：此后 host.command/worker.find/resume 方可转发到 agent。
   if (controlPlaneEnabled) hostServices = services;
   /**
@@ -211,6 +219,7 @@ export async function runServerCore(generation: number): Promise<void> {
     migrationFailedPathCount,
     workspaceIdentityMapper,
     topicResourcePeers,
+    ...(capabilityTicketAdmissionPeers ? { capabilityTicketAdmissionPeers } : {}),
   });
   const send = (message: unknown): Promise<void> => {
     if (typeof process.send !== "function" || process.connected === false) return Promise.resolve();

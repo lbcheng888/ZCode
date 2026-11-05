@@ -121,6 +121,7 @@ import {
   type ZCodeAutomationRunOutcome,
   type ModelSelection,
   type AttachmentRole,
+  CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE,
 } from "@zcode/shared";
 import {
   createHostAttachmentAdmissionContext,
@@ -172,6 +173,7 @@ import {
   type WindowHostCapabilityTickets,
 } from "./windowHostAttachmentRegistry.js";
 import { createCapabilityTicketBroker } from "./capabilityTicketBroker.js";
+import { createWindowCapabilityTicketAdmissionChannel } from "./capabilityTicketAdmissionChannel.js";
 import {
   createCapabilityTicketRedeemChannel,
   postCapabilityTicketDelivery,
@@ -220,6 +222,12 @@ interface HostRemoteConnectionCapabilities {
   ) => RemoteMediaPreviewProxy;
   sourceServerId?: string;
   persistentSourceConnection?: boolean;
+  /**
+   * P6 C2：该远端执行宿主能把票据 admission 回传给 Desktop Host broker。
+   * 由 Server 在 `/api/server-info` 的 capabilities 中声明；未声明 = 旧版宿主，
+   * 命令 admission 不得宣告 credentialInjection（否则 CLI 会放行凭据工具，宿主却只能拒绝）。
+   */
+  capabilityTicketAdmission?: boolean;
   /** underlying 服务实例标识，创建 logical wrapper 不代表物理连接换代。 */
   physicalOwner?: () => object;
   profileId?: string;
@@ -1848,6 +1856,12 @@ async function ensureSourceServerConnectionManager(): Promise<SourceServerConnec
         connectDesktopSourceServer(options, {
           resolveServices: (scope) => windowRemoteConnectionRegistry.resolveScopedServices(scope),
           getBots: () => activeServices?.getOptional(IBotsService),
+          ...(hostCapabilityTicketAdmissionChannel
+            ? {
+                capabilityTicketAdmissionChannel:
+                  hostCapabilityTicketAdmissionChannel.channel,
+              }
+            : {}),
           readDynamicWorkflowMode: async () =>
             (await activeServices?.get(ISettingService).get())?.dynamicWorkflowMode,
           onModeSyncError: (error) =>
@@ -1954,6 +1968,11 @@ async function createWindowRemoteConnectionHandle(params: {
         fetchImpl: requireActiveHostApiNetworkTransport().fetch,
         commitMembership: admission.commit,
         topicResourceChannel: topicResourceRelay.channel,
+        ...(hostCapabilityTicketAdmissionChannel
+          ? {
+              capabilityTicketAdmissionChannel: hostCapabilityTicketAdmissionChannel.channel,
+            }
+          : {}),
         onClose: ({ code, reason }) => {
           sourceClosed = true;
           detachOwnSourceSettings();
@@ -2121,6 +2140,8 @@ async function createWindowRemoteConnectionHandle(params: {
     },
     capabilities: {
       sourceServerId: connection.serverInfo.serverId,
+      capabilityTicketAdmission:
+        connection.serverInfo.capabilities.capabilityTicketAdmission === true,
       physicalOwner: () => connection.services,
       ...(remoteMediaPreviewFactory ? { remoteMediaPreviewFactory } : {}),
       persistentSourceConnection: true,
@@ -2741,10 +2762,17 @@ function exposeServicesOnMessagePort(
  * 既有路径 bit-exact。
  *
  * 执行端 admission 已接线：带 `capabilityTicketId` 的命令在宿主入口经 broker 校验后，
- * 公开授权域（scope/binding/expiry/票据自身 epoch，无 secret）随可信 carrier 下发，CLI
- * 工具准入只收紧。仍缺：凭据注入（spec §2.5 C2）未接线；turn 运行中 CLI 无宿主控制面
- * 通道，吊销只在下一条命令 admission 生效；renderer 命令信封尚未携带 ticketId，
- * 当前生产 UI 命令不被票据 gate（见启动告警）。
+ * 公开授权域（scope/binding/expiry/票据自身 epoch/credentialInjection，无 secret）随可信
+ * carrier 下发，CLI 工具准入只收紧。凭据注入（spec §2.5 C2）复用既有官方 MCP 身份头通道：
+ * CLI 在工具执行 ALS 中读取票据句柄，随 interaction/requestOfficialMcpAuthHeaders 携带
+ * ticketId+binding（无 secret）向宿主索取；宿主在读取凭据前用同一个 broker 校验票据并要求
+ * scope.resources 含 host 级 `credential:official-mcp` 资源。远端执行宿主没有 broker：它经
+ * 已鉴权 host 连接的反向频道（CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL）把 admission 回传
+ * 本进程现场校验，并只在 Server 声明 `capabilityTicketAdmission` 时宣告 credentialInjection。
+ * 票据启用的执行面上，无票据字段的身份头请求同样 official_auth_scope_denied。仍缺：turn
+ * 运行中 CLI 无宿主控制面通道，吊销只在下一条命令 admission 生效；web/mobile relay 形态不
+ * 投递 secret、不签发票据（见启动告警）。desktop-continuous renderer 的命令信封已自动携带
+ * ticketId。
  * 平台覆盖：只有 desktop-continuous 的直连 renderer port 能投递控制帧；web/mobile 的
  * web-remote-replayable relay 只转发 Uint8Array，登记为 secret delivery 未实现，不签发并记
  * typed skip（见 windowHostAttachmentRegistry 的传输形态登记表）。
@@ -2753,12 +2781,29 @@ const p6CapabilityTicketsEnabled = process.env["ZCODE_P6_CAPABILITY_TICKETS"] ==
 const capabilityTicketBroker = p6CapabilityTicketsEnabled
   ? createCapabilityTicketBroker()
   : undefined;
+// P6 C2：远端执行宿主的票据 admission 回连权威。频道只注册在已鉴权的 host 连接
+// （desktop-continuous / host capability）反向 server 上，broker/角色权威留在本进程。
+// 票据关闭时频道仍注册但 `ticketPolicy=false`、`admit=broker_unavailable`：远端宿主据此
+// 保留无票据旧路径，而不是把“Desktop 未启用票据”误判成启用。
+const hostCapabilityTicketAdmissionChannel = createWindowCapabilityTicketAdmissionChannel({
+  broker: capabilityTicketBroker,
+  // 角色每次现取：角色变更/吊销在下一命令生效，不接受客户端自报。
+  resolveRole: (attachmentId) => resolveAttachmentRegistryRole?.(attachmentId),
+  logDenied: ({ attachmentId, code }) =>
+    logger.warn(
+      `capability ticket admission relay denied attachmentId=${attachmentId} code=${code}`,
+    ),
+});
 // secret 只经 attachment 专属 MessagePort 投递（见 capabilityTicketChannel.ts CONTRACT）。
 // 日志只允许公开 ticketId；secret 绝不进入任何日志参数。
 const hostCapabilityTickets: WindowHostCapabilityTickets<Electron.MessagePortMain> | undefined =
   capabilityTicketBroker
     ? {
         broker: capabilityTicketBroker,
+        // P6 C2：Ticketed 执行面授予主机级官方 MCP credential 资源。真正的 resolver
+        // 在 Desktop local host 或能回连 broker 的远端宿主（见 admission relay）里装配；
+        // 声明 credentialInjection 前还会按连接 capability 复核该宿主是否可回连。
+        credentialResources: [CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE],
         deliverSecret(attachmentId, delivery, port) {
           postCapabilityTicketDelivery(port, delivery);
           logger.info(
@@ -2777,13 +2822,19 @@ const hostCapabilityTickets: WindowHostCapabilityTickets<Electron.MessagePortMai
 
 if (p6CapabilityTicketsEnabled) {
   // 运行时事实而非注释承诺。现已接线：带 capabilityTicketId 的命令在宿主入口经 broker
-  // 校验（绑定/TTL/吊销/角色 scope），授权域随可信 carrier 下发，CLI 工具准入按它收紧。
+  // 校验（绑定/TTL/吊销/角色 scope），授权域随可信 carrier 下发，CLI 工具准入按它收紧；
+  // MCP/plugin 凭据工具经官方 MCP 身份头通道注入（宿主 resolver 前按票据 scope 校验），
+  // CUA 凭据工具只在宿主注入 CUA broker socket 时放行。
   // 已知限制必须写进告警，不能让人按“票据已 gate 所有执行”宣传：
-  //   - renderer/命令信封尚未携带 capabilityTicketId，生产 UI 命令实际不触发票据校验；
+  //   - desktop-continuous renderer 命令已自动携带 capabilityTicketId；web/mobile relay
+  //     不投递 secret、不签发票据，因此只有 desktop-continuous 的 remote attachment 被 gate；
   //   - 吊销只在下一条命令 admission 生效（CLI turn 内无宿主复核通道）；
-  //   - C2 短时凭据注入未实现（broker 在 Desktop main、执行在 CLI 进程，无控制面通道）。
+  //   - 凭据注入需要执行宿主能回连本 broker：远端 Server 经已鉴权 host 连接的反向频道
+  //     现场 admit（未声明 capabilityTicketAdmission 的旧 Server 不宣告注入通道）；
+  //     票据 scope 未授予 `credential:official-mcp` 时也不宣告 credentialInjection，
+  //     CLI 对 credential 工具 typed deny（fail-closed），不伪造注入。
   logger.warn(
-    "capability tickets enabled: only commands that carry capabilityTicketId are admission-gated; renderer command envelopes do not attach it yet, revocation takes effect at the next command admission (not mid-turn), and credential injection (C2) is unimplemented (credential-class tools stay denied)",
+    "capability tickets enabled: desktop-continuous renderer commands attach capabilityTicketId automatically; web/mobile relay attachments receive no secret delivery and are not issued tickets; revocation takes effect at the next command admission (not mid-turn); credential injection requires the ticket scope to grant credential:official-mcp and the execution host to declare capabilityTicketAdmission, otherwise credential-class tools stay denied fail-closed",
   );
 }
 
@@ -2868,8 +2919,28 @@ const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
                 logger.warn(
                   `capability ticket command denied attachmentId=${params.attachmentId} connectionId=${connectionId} code=${result.code}`,
                 );
+                return result;
               }
-              return result;
+              // P6 C2：只有票据 scope 真实授予主机级 credential 资源、**且该 attachment 的
+              // 执行宿主能把 admission 回传到本 broker** 时才宣告注入通道。旧版远端宿主
+              // 没有回连频道，宣告会让 CLI 放行凭据工具而宿主的真正解析必然拒绝；此时不
+              // 宣告，CLI 按 typed credential-injection-unavailable deny（fail-closed）。
+              const credentialInjection =
+                params.capabilities?.capabilityTicketAdmission === true &&
+                result.authorization.scope.resources?.includes(
+                  CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE,
+                )
+                  ? ("host-interaction" as const)
+                  : undefined;
+              return {
+                ok: true,
+                authorization: {
+                  ...result.authorization,
+                  ...(credentialInjection !== undefined
+                    ? { credentialInjection }
+                    : {}),
+                },
+              };
             },
           }
         : undefined;
@@ -3918,6 +3989,22 @@ parentPort.on("message", async (e: Electron.MessageEvent) => {
           log: (message, details) => logger.warn(message, details),
           establishOwner: () => {
             const initializedServices = createLocalServices({
+              // P6 C2：官方 MCP 身份头请求携带能力票据时，用与 attachment 同一个 broker
+              // 校验（角色按票据 binding.attachmentId 现取）。未启用票据时整块缺席。
+              ...(capabilityTicketBroker
+                ? {
+                    officialMcpCapabilityTicketAuthority: {
+                      admit: ({ ticketId, binding }) => {
+                        const role = resolveAttachmentRegistryRole?.(binding.attachmentId);
+                        return capabilityTicketBroker.admit({
+                          ticketId,
+                          binding,
+                          ...(role !== undefined ? { role } : {}),
+                        });
+                      },
+                    },
+                  }
+                : {}),
               reportPluginTelemetryEvent: (event) => {
                 parentPort?.postMessage({
                   type: HostResponseTypes.PluginTelemetry,

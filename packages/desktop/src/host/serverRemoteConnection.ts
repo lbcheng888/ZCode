@@ -12,6 +12,7 @@ import {
 import type { IServiceAccessor } from "@zcode/services";
 import {
   ZCODE_RPC_HOST_CAPABILITY_HEADER,
+  CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL,
   TOPIC_RESOURCE_RELAY_CHANNEL,
   serverRemoteHostCapabilitySchema,
   serverRemoteInfoSchema,
@@ -42,12 +43,19 @@ export interface ServerRemoteConnectionOptions {
   signal?: AbortSignal;
   commitMembership?(sourceServerId: string): Promise<void>;
   topicResourceChannel?: IServerChannel;
+  /**
+   * P6 C2：票据 admission 回连频道。远端执行宿主的凭据解析必须由本 Desktop Host 的
+   * broker 现场 admit；该频道只注册在已鉴权 host 连接的反向 server 上，绝不暴露给
+   * renderer/手机 service collection。
+   */
+  capabilityTicketAdmissionChannel?: IServerChannel;
   fetchImpl?: typeof fetch;
   onClose?: (event: { code: number; reason: string }) => void;
 }
 
 export interface ServerRemoteDuplexConnectionOptions {
   topicResourceChannel?: IServerChannel;
+  capabilityTicketAdmissionChannel?: IServerChannel;
   ingressToken: string;
   createConnection: ServerRemoteDuplexFactory;
   onClose?: (event: { code: number; reason: string }) => void;
@@ -184,14 +192,21 @@ function createNodeWebSocketServiceConnection(
   socket: WebSocket,
   onClose?: ServerRemoteConnectionOptions["onClose"],
   topicResourceChannel?: IServerChannel,
+  capabilityTicketAdmissionChannel?: IServerChannel,
 ): { services: IServiceAccessor; dispose(): void } {
   const protocol = new SocketProtocol(wrapNodeWebSocket(socket, onClose));
   const client = new ChannelClient(protocol);
-  const reverseServer = topicResourceChannel
-    ? new ChannelServer(protocol, "desktop-resource")
-    : undefined;
+  const reverseServer =
+    topicResourceChannel || capabilityTicketAdmissionChannel
+      ? new ChannelServer(protocol, "desktop-resource")
+      : undefined;
   if (reverseServer && topicResourceChannel)
     reverseServer.registerChannel(TOPIC_RESOURCE_RELAY_CHANNEL, topicResourceChannel);
+  if (reverseServer && capabilityTicketAdmissionChannel)
+    reverseServer.registerChannel(
+      CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL,
+      capabilityTicketAdmissionChannel,
+    );
   const dispose = () => {
     // Bug 根因：仅关闭 socket 会让未完成的 RPC 永久 pending，旧 Provisioning 请求
     // 因而占住 Environment lane，新连接始终无法发布 attachment。由物理连接统一
@@ -302,6 +317,7 @@ function connectNodeWebSocket(
           socket,
           options.onClose,
           options.topicResourceChannel,
+          options.capabilityTicketAdmissionChannel,
         ),
       });
     });
@@ -402,6 +418,7 @@ export async function connectServerRemoteOverDuplex(
           webSocket,
           options.onClose,
           options.topicResourceChannel,
+          options.capabilityTicketAdmissionChannel,
         );
       },
     });

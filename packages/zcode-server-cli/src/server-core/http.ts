@@ -27,11 +27,13 @@ import {
 } from "@zcode/services";
 import {
   createServiceLogger,
+  type CapabilityTicketAdmissionPeers,
   type TopicResourcePeers,
   SourceServerWorkspaceIdentityChannelServer,
   type SourceServerWorkspaceIdentityMapper,
 } from "@zcode/services/node";
 import {
+  CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL,
   SERVER_REMOTE_PROTOCOL_VERSION,
   TOPIC_RESOURCE_RELAY_CHANNEL,
   serverRemoteInfoOutputSchema,
@@ -106,6 +108,7 @@ function exposeWebSocket(
   clientMode: "desktop-continuous" | "web-remote-replayable",
   workspaceIdentityMapper?: SourceServerWorkspaceIdentityMapper,
   resourcePeers?: TopicResourcePeers,
+  capabilityTicketAdmissionPeers?: CapabilityTicketAdmissionPeers,
 ): void {
   const socket = wrapWebSocket(ws);
   const protocol = new SocketProtocol(socket);
@@ -118,7 +121,18 @@ function exposeWebSocket(
     : loggedServer;
   const agentService = services.getOptional(IZCodeAgentService);
   const reverseClient =
-    clientMode === "desktop-continuous" && resourcePeers ? new ChannelClient(protocol) : undefined;
+    clientMode === "desktop-continuous" && (resourcePeers || capabilityTicketAdmissionPeers)
+      ? new ChannelClient(protocol)
+      : undefined;
+  // P6 C2：票据 admission 只能回传给真正的 broker 持有者（Desktop Host）。频道只挂在
+  // desktop-continuous（host capability 鉴权 + trusted-host-relay）连接上，绝不提供给
+  // web-remote-replayable 客户端；连接关闭即摘除，避免向断连的连接转发。
+  const capabilityTicketAdmissionPeer =
+    reverseClient && capabilityTicketAdmissionPeers
+      ? capabilityTicketAdmissionPeers.attach(
+          reverseClient.getChannel(CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL),
+        )
+      : undefined;
   const rawResourceChannel = reverseClient?.getChannel(TOPIC_RESOURCE_RELAY_CHANNEL);
   // Source 内部 route 已 canonicalize；反向请求必须还原 Desktop 的 stable identity，
   // 否则同一 attachment 会被 registry 判成跨工作区请求。
@@ -187,6 +201,7 @@ function exposeWebSocket(
   }
   services.exposeOnChannelServer(server, overrides);
   socket.onClose(() => {
+    capabilityTicketAdmissionPeer?.dispose();
     peer?.dispose();
     reverseClient?.dispose();
     void scope?.dispose();
@@ -205,6 +220,7 @@ export async function createCoreHttpServer(
     hostCapabilityStore?: HostCapabilityStore;
     workspaceIdentityMapper?: SourceServerWorkspaceIdentityMapper;
     topicResourcePeers?: TopicResourcePeers;
+    capabilityTicketAdmissionPeers?: CapabilityTicketAdmissionPeers;
   } = {},
 ): Promise<CoreHttpServer> {
   const app = new Hono();
@@ -231,6 +247,9 @@ export async function createCoreHttpServer(
       websocketRpc: true,
       virtualProjects: true,
       processResourceTelemetry: true,
+      // P6 C2：本 Core 能在 desktop-continuous host 连接上挂载票据 admission 反向频道。
+      // Desktop Host 必须看到该能力才宣告 credentialInjection 并签发票据资源。
+      capabilityTicketAdmission: true,
     },
   });
   // 裸 Set 无法落实 expiresAt，未消费的 capability 会一直有效并持续累积。
@@ -299,6 +318,7 @@ export async function createCoreHttpServer(
           "desktop-continuous",
           options.workspaceIdentityMapper,
           options.topicResourcePeers,
+          options.capabilityTicketAdmissionPeers,
         );
       },
     })),

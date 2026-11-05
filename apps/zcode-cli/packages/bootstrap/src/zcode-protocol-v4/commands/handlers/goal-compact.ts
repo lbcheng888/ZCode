@@ -16,7 +16,7 @@ import {
   attachmentFactsRevoked,
   effectiveAttachmentAdmissionRole,
 } from "@zcode/shared/zcode-protocol-v4";
-import { commandAttachmentOf } from "../executor.js";
+import { commandAttachmentOf } from "../command-admission.js";
 import type { SteerTurnOptions, SubmitPromptOptions } from "../../../app/types.js";
 import { runWithSessionResidencyFinalization } from "../../../session-execution/index.js";
 import { inputIntentMetadata } from "../input-intent.js";

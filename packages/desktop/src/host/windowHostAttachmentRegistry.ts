@@ -29,6 +29,13 @@ export interface WindowHostCapabilityTicketDelivery {
 export interface WindowHostCapabilityTickets<TPort> {
   broker: CapabilityTicketBroker;
   /**
+   * P6 C2：宿主真实可注入的 credential 资源清单（精确项）。只有配置了该能力且角色为
+   * host 时才会写入票据 scope；未配置 = 不授予凭据资源，admission 也不得宣告注入通道。
+   * 桌面本地宿主注入 `CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE`（官方 MCP
+   * 身份头解析器是 host 级通道，签发时无法枚举远端 workspace 的 mcpKey）。
+   */
+  credentialResources?: readonly string[];
+  /**
    * 受控 secret 投递。第三个参数是同一次 attach 的 port：实现只能把 delivery 帧 post
    * 到该 attachment 自己的受控通道，不得写日志/参数/模型上下文。
    */
@@ -186,7 +193,19 @@ export function createWindowHostAttachmentRegistry<
       surfaceKind: surfaceKindForClientMode(params.clientMode),
       subject: { kind: "session", id: params.scope.remoteSessionId },
     };
-    const scope = deriveCapabilityTicketScopeForRole(params.role);
+    const roleScope = deriveCapabilityTicketScopeForRole(params.role);
+    // P6 C2：凭据资源是宿主能力而不是角色默认。只有宿主显式配置了真实注入通道（例如
+    // Desktop 官方 MCP 身份头解析器）且角色可申请 credential 工具族（host）时才授予；
+    // 未配置时不写 resources，admission 也不会宣告 credentialInjection（CLI typed deny）。
+    const credentialResources =
+      params.role === "host" ? tickets.credentialResources : undefined;
+    const scope =
+      credentialResources !== undefined && credentialResources.length > 0
+        ? {
+            ...roleScope,
+            resources: Array.from(new Set(credentialResources)),
+          }
+        : roleScope;
     let issued: ReturnType<CapabilityTicketBroker["issue"]> | undefined;
     try {
       issued = tickets.broker.issue({

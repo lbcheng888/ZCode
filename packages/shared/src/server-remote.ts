@@ -42,6 +42,9 @@ export const serverRemoteInfoSchema = z.object({
     virtualProjects: z.literal(true).optional(),
     // 旧 Server 缺少新增 dynamic event，必须先声明能力再订阅，避免异常打进对端读循环。
     processResourceTelemetry: z.boolean().optional(),
+    // P6 C2：Server 能在 desktop-continuous host 连接上挂载能力票据 admission 反向频道。
+    // 未声明的旧 Server 收不到票据，credentialInjection 也不得宣告（fail-closed）。
+    capabilityTicketAdmission: z.boolean().optional(),
   }),
 });
 
@@ -65,6 +68,7 @@ export const serverRemoteInfoOutputSchema = z
         virtualProjects: z.literal(true).optional(),
         // 输入和严格输出保持同一能力合同，否则新 Server 会在监听前被自身 schema 拒绝。
         processResourceTelemetry: z.boolean().optional(),
+        capabilityTicketAdmission: z.boolean().optional(),
       })
       .strict(),
   })

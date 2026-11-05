@@ -20,14 +20,18 @@ import {
  *   （兑换请求是 broker 专用受控通道，不是协议帧）与模型上下文投影。
  * - 未知字段 additive 兼容；未知 scope 维度不放大命中面，判定侧 fail-closed。
  *
- * 状态（不夸大）：本批只有类型/纯函数 + 宿主内存 broker + 客户端携带/兑换。凭据注入
- * （spec §2.5 C2）、SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程均
- * 未实现；broker 重启即全部票据失效（C7 由内存权威天然满足）。生产组合根默认关闭票据
+ * 状态（不夸大）：本批有类型/纯函数 + 宿主内存 broker + 客户端携带/兑换 + C2 凭据注入
+ * 接线。凭据注入复用既有 agent→host 官方 MCP 身份头通道：CLI 工具执行 ALS 只携带公开票据
+ * 句柄，宿主在 resolver 前用同一 broker 校验票据并要求 scope.resources 含本次 credential
+ * 资源。无真实注入通道时 credential 类工具 typed deny（`ticket.credential_injection_unavailable`）。
+ * 仍缺：SQLite `capability_tickets` 持久表、edge/headless 独立 broker 进程；
+ * broker 重启即全部票据失效（C7 由内存权威天然满足）。生产组合根默认关闭票据
  * （显式 feature flag + fail-closed）。执行端 admission 已消费 capabilityTicketId：宿主入口
  * 经 broker 校验后把公开授权域随可信 carrier 下发给 CLI，CLI prompt admission 在既有权限
- * 管线之后按 scope 只收紧；credential 类工具返回 typed deny（C2 凭据注入未实现）。
+ * 管线之后按 scope 只收紧。
  * 已知残留：CLI 在 turn 内无宿主控制面通道复核吊销（吊销只在下一条命令 admission 生效）；
- * renderer 命令信封尚未携带 ticketId；`revocationEpoch` 在 CLI 侧是签发快照，不参与判定。
+ * desktop-continuous 的 renderer 命令信封已由 messageport 包装自动携带 ticketId，web/mobile
+ * relay 形态不投递 secret、不签发票据；`revocationEpoch` 在 CLI 侧是签发快照，不参与判定。
  */
 
 /**
@@ -72,8 +76,15 @@ export const capabilityTicketBindingSchema = z
 export type CapabilityTicketBinding = z.infer<typeof capabilityTicketBindingSchema>;
 
 /**
- * scope 只写「允许的工具族/工具名/资源」。维度之间是**合取**：任何存在的维度都必须命中；
- * 完全不声明工具维度 ⇒ 不命中任何动作（fail-closed，不靠“资源看起来对”放行）。
+ * scope 只写「允许的工具族/工具名/凭据资源」。
+ *
+ * - `toolClasses` / `tools` 是工具维度，维度之间是**合取**：存在的维度必须全部命中；
+ *   完全不声明工具维度 ⇒ 不命中任何动作（fail-closed）。
+ * - `resources` 描述**凭据通道**（`credential:official-mcp` 主机级标记，或窄票据的
+ *   `credential:<mcpKey>` / `credential:<pluginId>`）。它只约束 `credential` 类动作，
+ *   不参与非凭据工具的判定（否则同一票据里的 Read/Write 会被误杀）。credential 动作
+ *   存在 resources 时必须有可证明的通道命中：MCP/plugin 交给宿主在读取凭据前精确复核，
+ *   CUA 只接受主机级标记 + 宿主注入的 broker socket；无法证明即 fail-closed。
  */
 export const capabilityTicketScopeSchema = z
   .object({
@@ -83,6 +94,16 @@ export const capabilityTicketScopeSchema = z
   })
   .passthrough();
 export type CapabilityTicketScope = z.infer<typeof capabilityTicketScopeSchema>;
+
+/**
+ * P6 C2：官方 MCP 身份头凭据资源（精确项，不做前缀匹配）。
+ *
+ * 宿主官方 MCP 身份头解析器是 **host 级**通道：用户身份/JWT 与 Coding Plan 凭证是全局
+ * 状态，不按 mcpKey/pluginId 分桶；签发 attachment 票据时宿主也无法枚举远端 workspace
+ * 里配置了哪些官方 MCP server。因此 host 角色票据声明这个主机级资源；执行侧只认精确
+ * 字符串，缺失即 fail-closed。不要用“任意 `credential:` 前缀命中”代替它。
+ */
+export const CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE = "credential:official-mcp";
 
 export const capabilityTicketModeSchema = z.enum(["single_use", "sequential"]);
 export type CapabilityTicketMode = z.infer<typeof capabilityTicketModeSchema>;
@@ -166,11 +187,83 @@ export const CAPABILITY_TICKET_FAILURE_CODES = [
   "ticket.replayed",
   "ticket.scope_denied",
   "ticket.broker_unavailable",
+  // 票据启用的 attachment 上，命令没有携带 capabilityTicketId。宿主入口 fail-closed，
+  // 不把“漏带票据”静默降级成无票据旧路径。
+  "ticket.required",
 ] as const;
 export type CapabilityTicketFailureCode = (typeof CAPABILITY_TICKET_FAILURE_CODES)[number];
 
 /**
- * 兑换成功返回一次性注入句柄。句柄仍不含 secret；凭据注入属于 §2.5 C2，本批不接线。
+ * 能力票据 admission 反向控制面（spec §2.5 C2）。
+ *
+ * 远端执行面（desktop-attached remote server）的 agent 反向请求官方 MCP 身份头时，
+ * **必须**由真正持有 broker 的 Desktop Host 校验票据；server 进程只通过已鉴权的
+ * host 连接私有反向频道转发 admission。请求/响应都只含公开事实，secret 永不进入该频道。
+ */
+export const CAPABILITY_TICKET_ADMISSION_RELAY_CHANNEL = "host-capability-ticket-admission";
+
+export const capabilityTicketAdmissionRelayRequestSchema = z
+  .object({
+    ticketId: capabilityTicketIdSchema,
+    binding: capabilityTicketBindingSchema,
+  })
+  .strict();
+export type CapabilityTicketAdmissionRelayRequest = z.infer<
+  typeof capabilityTicketAdmissionRelayRequestSchema
+>;
+
+/**
+ * admission 授权域（公开事实，无 secret）。与 broker.admit 的返回结构一致；远端宿主
+ * 拿到后还要按真正的 credential 资源复核。`credentialInjection` 由 Desktop Host 在
+ * 确认执行面可回连后才宣告。
+ */
+export const capabilityTicketAdmissionRelayAuthorizationSchema = z
+  .object({
+    ticketId: capabilityTicketIdSchema,
+    binding: capabilityTicketBindingSchema,
+    scope: capabilityTicketScopeSchema,
+    expiresAt: z.number().int().nonnegative(),
+    revocationEpoch: z.number().int().nonnegative(),
+    credentialInjection: z.literal("host-interaction").optional(),
+  })
+  .strict();
+export type CapabilityTicketAdmissionRelayAuthorization = z.infer<
+  typeof capabilityTicketAdmissionRelayAuthorizationSchema
+>;
+
+/**
+ * 票据启用策略查询：远端执行宿主据此决定“无票据字段的身份头请求是否必须拒绝”。
+ * 只有真正的 broker 持有者（Desktop Host）能回答；未注册频道的旧宿主该调用失败，
+ * 远端按“无法证明票据已启用”走旧路径（不得据此伪造票据门）。
+ */
+export const capabilityTicketAdmissionRelayPolicySchema = z
+  .object({ ticketRequired: z.boolean() })
+  .strict();
+export type CapabilityTicketAdmissionRelayPolicy = z.infer<
+  typeof capabilityTicketAdmissionRelayPolicySchema
+>;
+
+export const capabilityTicketAdmissionRelayResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      authorization: capabilityTicketAdmissionRelayAuthorizationSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      code: z.enum(CAPABILITY_TICKET_FAILURE_CODES),
+    })
+    .strict(),
+]);
+export type CapabilityTicketAdmissionRelayResult = z.infer<
+  typeof capabilityTicketAdmissionRelayResultSchema
+>;
+
+/**
+ * 兑换成功返回一次性注入句柄。句柄仍不含 secret；凭据注入（§2.5 C2）复用 agent→host
+ * 官方 MCP 身份头通道，宿主只在票据 scope 明确授予对应 credential 资源时解析。
  *
  * `requiresHostConfirmation` 表达 spec §1.3 矩阵里 workspace_write 的 `ask`：兑换成功**不等于**
  * 自动放行，执行端必须把这次动作路由到宿主确认面。D3 确认面未落地前，非 host 角色不允许
@@ -246,6 +339,14 @@ export function capabilityTicketScopeWithinRole(
   const allowed = REQUESTABLE_TOOL_CLASSES_BY_ROLE[parsedRole];
   // 完全不声明工具维度（只写 resources）无法证明动作面，非 host 一律拒绝。
   if (scope.toolClasses === undefined && scope.tools === undefined) return false;
+  // P6 C2：credential 资源是 host 级注入能力；非 host 即使 toolClasses 只含 read 也不能
+  // 携带 credential 资源，否则执行端可绕过工具面直接拿官方 MCP 身份头（fail-closed）。
+  if (
+    parsedRole !== "host" &&
+    scope.resources?.some((resource) => resource.startsWith("credential:"))
+  ) {
+    return false;
+  }
   if (
     scope.toolClasses !== undefined &&
     scope.toolClasses.some((toolClass) => !allowed.includes(toolClass))

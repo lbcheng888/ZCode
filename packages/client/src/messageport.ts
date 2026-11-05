@@ -1,5 +1,5 @@
 import { MessagePortProtocol, ChannelClient } from "@zcode/rpc";
-import type { IServiceAccessor } from "@zcode/services";
+import type { IServiceAccessor, IZCodeAgentService } from "@zcode/services";
 import {
   createCapabilityTicketChannelConnection,
   type CapabilityTicketChannelConnection,
@@ -13,6 +13,39 @@ function logMessagePortDebug(message: string): void {
     return;
   }
   console.log(message);
+}
+
+/**
+ * 把该连接自己的票据协议字段接到 agent service 的命令入口。
+ *
+ * 只拦截 `sendConversationCommandV4`：有票据时把 `{ capabilityTicketId }` 合并进
+ * `params.envelope`（additive 公开字段，secret 不进入信封）；未收到 delivery 时原样透传。
+ * 其余方法与 `on*` 事件监听保持 inner ProxyChannel proxy 的原始行为。
+ */
+function createTicketAwareZCodeAgentService(
+  service: IZCodeAgentService,
+  capabilityTickets: CapabilityTicketChannelConnection,
+): IZCodeAgentService {
+  return new Proxy(service, {
+    get(target, property) {
+      if (property !== "sendConversationCommandV4") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async function sendConversationCommandV4(
+        params: Parameters<IZCodeAgentService["sendConversationCommandV4"]>[0],
+      ) {
+        const fields = capabilityTickets.protocolFields();
+        if (fields === undefined) {
+          return target.sendConversationCommandV4(params);
+        }
+        return target.sendConversationCommandV4({
+          ...params,
+          envelope: { ...params.envelope, ...fields },
+        });
+      };
+    },
+  });
 }
 
 export interface MessagePortServiceConnection {
@@ -49,6 +82,14 @@ export function createMessagePortServiceConnection(
   logMessagePortDebug("[messageport] client created, waiting for Initialize...");
 
   const services = new RemoteServiceAccess(client, options);
+  // P6：包装只作用于本连接自己的票据通道（无模块级状态）。base window 与每个 remote
+  // workspace connection 各拿各的 ticket；未收到 delivery 时命令信封保持原样。
+  Object.defineProperty(services, "zcodeAgentService", {
+    value: createTicketAwareZCodeAgentService(services.zcodeAgentService, capabilityTickets),
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
   let disposed = false;
   return {
     services,
@@ -71,10 +112,9 @@ export function createMessagePortServiceConnection(
  * Desktop 模式下，utilityProcess（或 main 进程的远程代理）通过 MessagePort
  * 暴露 ChannelServer，renderer 用此函数建立 ChannelClient 连接。
  *
- * 注意：本便捷入口只返回 `services`，**丢弃** `capabilityTickets` 通道。P6 票据命令
- * 信封的客户端接线尚未落地：renderer 没有把 `protocolFields()` 写进命令，生产 UI 命令
- * 不携带 `capabilityTicketId`（见 P6 spec §2.5 已知残留与宿主启动告警）。需要票据语义的
- * 调用方必须改用 `createMessagePortServiceConnection` 并显式携带该公开字段。
+ * 注意：本便捷入口只返回 `services`，**丢弃** `capabilityTickets` 通道。需要票据语义的
+ * 调用方必须改用 `createMessagePortServiceConnection`：它的 `services.zcodeAgentService`
+ * 会在本连接收到 delivery 后自动把公开的 `capabilityTicketId` 合并进命令信封。
  */
 export function connectViaMessagePort(
   port: MessagePort,

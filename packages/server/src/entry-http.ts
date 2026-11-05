@@ -20,13 +20,17 @@ async function main(): Promise<void> {
   const authToken = process.env["ZCODE_SERVER_AUTH_TOKEN"]?.trim() || undefined;
   const topicResourcePeers = createTopicResourcePeers();
   const serverId = resolveHttpServerId();
-  const { services, workspaceIdentityMapper, migrationFailedPathCount } =
-    await createServerHostServices({
-      topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
-      sourceServerId: serverId,
-      zcodeBuiltinProviderConfigFilePath,
-      providerProvisioningTargetEnabled: Boolean(authToken),
-    });
+  const {
+    services,
+    workspaceIdentityMapper,
+    migrationFailedPathCount,
+    capabilityTicketAdmissionPeers,
+  } = await createServerHostServices({
+    topicResourceRelayChannel: (request) => topicResourcePeers.getChannel(request),
+    sourceServerId: serverId,
+    zcodeBuiltinProviderConfigFilePath,
+    providerProvisioningTargetEnabled: Boolean(authToken),
+  });
 
   createHttpServer(services, port, {
     serverId,
@@ -34,6 +38,7 @@ async function main(): Promise<void> {
     migrationFailedPathCount,
     virtualProjects: true,
     topicResourcePeers,
+    ...(capabilityTicketAdmissionPeers ? { capabilityTicketAdmissionPeers } : {}),
     ...(host ? { host } : {}),
     ...(staticRoot ? { staticRoot, spaFallback: true } : {}),
     ...(authToken ? { authToken, authRequired: true } : {}),

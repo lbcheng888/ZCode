@@ -224,6 +224,11 @@ export interface ControlPlaneLaunchParams {
   release: ReleaseManifest | null;
   /** §2.3 启动方投影给 child 的 flag；child 只读 mandateGate，缺省 false。 */
   mandateGate?: boolean;
+  /**
+   * §3.8 peer 门模式可信 PID 集合（Supervisor + 当前 Core）。launcher 映射为
+   * `ZCODE_CONTROL_PLANE_TRUSTED_PIDS`；缺省/空数组时不注入（authToken 模式不受影响）。
+   */
+  trustedPids?: readonly number[];
 }
 
 export const controlPlaneStateSchema = z.enum([

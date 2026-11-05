@@ -17,7 +17,7 @@ import {
 } from "../prompt-turn.js";
 import { createModelExecutionContext } from "../../../session-execution/index.js";
 import type { CapabilityTicketAuthorization } from "../../capability-ticket-admission.js";
-import { commandAttachmentOf, commandCapabilityTicketOf } from "../executor.js";
+import { commandAttachmentOf, commandCapabilityTicketOf } from "../command-admission.js";
 import type { V4CommandCoreHost, V4SessionRecordView, V4TurnExecution } from "../types.js";
 import { applyGoalCommand, assertHostAttachmentGoalControl } from "./goal-compact.js";
 import type { ConversationEditTarget } from "../../product-projection.js";

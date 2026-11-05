@@ -33,7 +33,7 @@ import {
   commandAttachmentOf,
   commandCapabilityTicketOf,
   commandExecutionContextOf,
-} from "../executor.js";
+} from "../command-admission.js";
 export { V4SessionIdleTimeoutError } from "./session-flow.js";
 
 /** sendQueuedNow 在投影里查不到该项原文（已被 drain/删除或 id 无效）→ 拒绝。 */

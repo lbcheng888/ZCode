@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE } from "@zcode/shared";
 import { createWindowHostAttachmentRegistry } from "../src/host/windowHostAttachmentRegistry.js";
 import { createCapabilityTicketBroker } from "../src/host/capabilityTicketBroker.js";
 import type { WindowHostCapabilityTicketDelivery } from "../src/host/windowHostAttachmentRegistry.js";
@@ -19,7 +20,7 @@ function createPort() {
   };
 }
 
-function createTicketHarness() {
+function createTicketHarness(options: { credentialResources?: readonly string[] } = {}) {
   let sequence = 0;
   const broker = createCapabilityTicketBroker({
     now: () => 1_000,
@@ -34,7 +35,14 @@ function createTicketHarness() {
   ): void => {
     deliveries.push({ attachmentId, delivery });
   };
-  return { broker, deliveries, deliverSecret };
+  return {
+    broker,
+    deliveries,
+    deliverSecret,
+    ...(options.credentialResources !== undefined
+      ? { credentialResources: options.credentialResources }
+      : {}),
+  };
 }
 
 const REMOTE_SCOPE = {
@@ -81,6 +89,40 @@ describe("attachment capability tickets", () => {
     // expose 参数会进入宿主服务暴露面：绝不允许 secret 字节出现在这里。
     expect(JSON.stringify(exposed)).not.toContain("secret-1");
     expect(registry.list()[0].capabilityTicketId).toBe("ticket-1");
+  });
+
+  it("P6 C2：只有宿主声明的 credential 资源写进 host 角色 scope，非 host 不授予", () => {
+    const tickets = createTicketHarness({
+      credentialResources: [CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE],
+    });
+    const registry = createWindowHostAttachmentRegistry({
+      resolveScope: () => ({ services: "services", generation: 1 }),
+      expose: () => ({ dispose: vi.fn() }),
+      capabilityTickets: {
+        broker: tickets.broker,
+        ...(tickets.credentialResources !== undefined
+          ? { credentialResources: tickets.credentialResources }
+          : {}),
+        deliverSecret: tickets.deliverSecret,
+      },
+    });
+    registry.attach({
+      requestId: "remote-1",
+      attachmentId: "remote-1",
+      clientMode: "desktop-continuous",
+      scope: REMOTE_SCOPE,
+      port: createPort().port,
+    });
+
+    // 签发侧不再伪造 per-mcpKey 清单：host 级官方 MCP resolver 是真实可注入资源。
+    expect(tickets.deliveries[0].delivery.scope.resources).toEqual([
+      CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE,
+    ]);
+    expect(tickets.deliveries[0].delivery.scope.toolClasses).toContain("credential");
+
+    // 角色降级后重新签发 read-only scope，不得继承 credential 资源。
+    registry.setRole("remote-1", "interactive");
+    expect(tickets.deliveries[1].delivery.scope).toEqual({ toolClasses: ["read"] });
   });
 
   it("未配置 broker 时保持现状：expose/list 不出现 ticket 字段", () => {

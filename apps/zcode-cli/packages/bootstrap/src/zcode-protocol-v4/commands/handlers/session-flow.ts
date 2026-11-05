@@ -17,7 +17,7 @@ import {
   resolveSubmittedExecutionState,
   V4InputAdmissionRejectedError,
 } from "../input-admission.js";
-import { commandAttachmentOf, commandCapabilityTicketOf } from "../executor.js";
+import { commandAttachmentOf, commandCapabilityTicketOf } from "../command-admission.js";
 import { inputIntentMetadata } from "../input-intent.js";
 import {
   resolveTurnAutomationId,

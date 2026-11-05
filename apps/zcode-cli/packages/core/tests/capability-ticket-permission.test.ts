@@ -8,7 +8,10 @@ import {
   type PermissionContext,
   type PermissionToolCapability,
 } from "../src/permission/service.js";
-import type { CapabilityTicketAuthorization } from "../src/permission/capability-ticket.js";
+import {
+  evaluateCapabilityTicketRestriction,
+  type CapabilityTicketAuthorization,
+} from "../src/permission/capability-ticket.js";
 
 const readCapability: PermissionToolCapability = {
   destructive: false,
@@ -26,13 +29,12 @@ const bashCapability: PermissionToolCapability = {
   sideEffectScope: "system",
 };
 
-const cuaCapability: PermissionToolCapability = {
+const mcpCapability: PermissionToolCapability = {
   destructive: false,
   needsApproval: true,
   readOnly: false,
   riskLevel: "medium",
   sideEffectScope: "workspace",
-  permissionCapabilityGroup: "official_cua",
 };
 
 function authorization(
@@ -100,13 +102,83 @@ describe("P6 capability ticket 工具准入叠加", () => {
     expect(decision.ruleId).toBe("capabilityTicket.expired");
   });
 
-  it("scope 命中 credential 类工具 ⇒ typed credential 注入不可达，拒绝而不是假装注入", () => {
+  it("MCP/plugin 凭据工具：宿主宣告 host-interaction 且 scope 命中才放行", () => {
     const service = new PermissionService();
-    const ticket = authorization({ scope: { toolClasses: ["credential"] } });
-    const decision = service.checkPermission(context("mcp__github__create_issue", ticket), cuaCapability);
+    const ticket = authorization({
+      scope: { toolClasses: ["credential"], resources: ["credential:github"] },
+      credentialInjection: "host-interaction",
+    });
+    const allowed = service.checkPermission(
+      context("mcp__github__create_issue", ticket),
+      mcpCapability,
+    );
+    expect(allowed.decision).toBe("allow");
+    expect(allowed.ruleId).not.toBe("capabilityTicket.credentialInjectionUnavailable");
+  });
+
+  it("无真实注入通道的 credential 工具 ⇒ typed deny，不放行、不假装注入", () => {
+    const service = new PermissionService();
+    const ticket = authorization({
+      scope: { toolClasses: ["credential"], resources: ["credential:github"] },
+    });
+    const decision = service.checkPermission(
+      context("mcp__github__create_issue", ticket),
+      mcpCapability,
+    );
     expect(decision.decision).toBe("deny");
-    expect(decision.ruleId).toBe("capabilityTicket.credentialInjectionUnimplemented");
-    expect(decision.reason).toContain("ticket.credential_injection_unimplemented");
+    expect(decision.ruleId).toBe("capabilityTicket.credentialInjectionUnavailable");
+    expect(decision.reason).toContain("ticket.credential_injection_unavailable");
+  });
+
+  it("CUA 凭据工具只认宿主注入的 CUA broker socket；缺失即 deny", () => {
+    const ticket = authorization({
+      scope: { toolClasses: ["credential"], resources: ["credential:official-mcp"] },
+      credentialInjection: "host-interaction",
+    });
+    const cua = { toolName: "mcp__computer-use__click", permissionGroup: "official_cua" };
+    expect(
+      evaluateCapabilityTicketRestriction({
+        authorization: ticket,
+        ...cua,
+        cuaBrokerAvailable: true,
+      }),
+    ).toBeUndefined();
+    const denied = evaluateCapabilityTicketRestriction({
+      authorization: ticket,
+      ...cua,
+      cuaBrokerAvailable: false,
+    });
+    expect(denied?.ruleId).toBe("capabilityTicket.credentialInjectionUnavailable");
+    // host-interaction 不能替代 CUA broker socket。
+    expect(denied).toBeDefined();
+  });
+
+  it("窄资源票据不能借 CUA broker socket 执行未声明的凭据通道", () => {
+    const narrow = authorization({
+      scope: { toolClasses: ["credential"], resources: ["credential:github"] },
+      credentialInjection: "host-interaction",
+    });
+    const denied = evaluateCapabilityTicketRestriction({
+      authorization: narrow,
+      toolName: "mcp__computer-use__click",
+      permissionGroup: "official_cua",
+      cuaBrokerAvailable: true,
+    });
+    expect(denied?.ruleId).toBe("capabilityTicket.credentialInjectionUnavailable");
+  });
+
+  it("resources 只约束 credential 动作：同一 host 票据内非凭据工具仍按工具维度放行", () => {
+    const hostTicket = authorization({
+      scope: {
+        toolClasses: ["read", "credential"],
+        resources: ["credential:official-mcp"],
+      },
+      credentialInjection: "host-interaction",
+    });
+    const service = new PermissionService();
+    expect(
+      service.checkPermission(context("Read", hostTicket), readCapability).decision,
+    ).toBe("allow");
   });
 
   it("与 attachment 矩阵叠加：只收紧，不互相放宽", () => {

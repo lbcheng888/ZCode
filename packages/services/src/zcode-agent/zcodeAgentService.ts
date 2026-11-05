@@ -120,6 +120,10 @@ import {
   zcodeProviderTestModelConnectivityResultSchema,
   zcodeOfficialMcpAuthHeadersRequestParamsSchema,
   summarizeOfficialMcpIdentityHeaders,
+  CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE,
+  type CapabilityTicketBinding,
+  type CapabilityTicketFailureCode,
+  type CapabilityTicketScope,
   zcodeProtocolEmptyResultSchema,
   zcodeProtocolMethods,
   zcodeProtocolNotifications,
@@ -361,6 +365,7 @@ import {
 import {
   readTrustedZCodeAgentV4Connection,
   readTrustedZCodeAgentV4UnsubscribeRoute,
+  type ZCodeAgentCapabilityTicketAuthorization,
   type ZCodeAgentV4ConnectionContext,
 } from "./zcodeAgentConnectionScope.js";
 import { createBackgroundSessionEventCoalescer } from "#src/zcode-agent/zcodeSessionEventCoalescer.js";
@@ -989,6 +994,37 @@ function createRuntimeUnavailableError(params: ZCodeAgentWorkspaceTarget): Error
   return error;
 }
 
+/**
+ * P6 C2：官方 MCP 身份头请求携带能力票据时的宿主校验端口。
+ *
+ * Desktop Host 用与 attachment 同一个 CapabilityTicketBroker 实现；角色按
+ * `binding.attachmentId` 现取（不接受客户端自报）。授权域只含公开事实，无 secret。
+ */
+export type ZCodeAgentOfficialMcpCapabilityTicketAdmissionResult =
+  | { ok: true; authorization: ZCodeAgentCapabilityTicketAuthorization }
+  | { ok: false; code: CapabilityTicketFailureCode };
+
+export interface ZCodeAgentOfficialMcpCapabilityTicketAuthority {
+  /**
+   * 同步（Desktop local host 的进程内 broker）或异步（desktop-attached remote host 经
+   * 已鉴权 host 连接反向频道回连 broker）均可。调用方必须 await 后才读取凭据。
+   */
+  admit(input: {
+    ticketId: string;
+    binding: CapabilityTicketBinding;
+  }):
+    | ZCodeAgentOfficialMcpCapabilityTicketAdmissionResult
+    | Promise<ZCodeAgentOfficialMcpCapabilityTicketAdmissionResult>;
+  /**
+   * 该宿主是否属于“票据已启用的执行面”。为 true 时，**不带任何票据字段**的官方 MCP
+   * 身份头请求也必须拒绝（ticket.required），否则客户端漏带票据就绕过了票据门。
+   *
+   * Desktop local host 的进程内 broker 不返回 true：本机 attachment 不签发票据，旧路径
+   * 必须保留。远端 host 的 relay 权威向 Desktop Host 查询 ticketPolicy 后才返回 true。
+   */
+  requireTicketForRequests?: () => boolean | Promise<boolean>;
+}
+
 interface CreateZCodeAgentServiceOptions extends Omit<
   ZCodeAgentProcessManagerOptions,
   "idleTimeoutMs"
@@ -1098,6 +1134,12 @@ interface CreateZCodeAgentServiceOptions extends Omit<
       trusted: boolean;
     }>;
   };
+  /**
+   * P6 C2：请求携带 capabilityTicketId 时的宿主校验端口。缺省 = 不接受票据请求
+   * （带票据的请求一律 official_auth_scope_denied，fail-closed，绝不读取凭据）。
+   * 无票据请求保持既有行为，不需要该端口。
+   */
+  officialMcpCapabilityTicketAuthority?: ZCodeAgentOfficialMcpCapabilityTicketAuthority;
   /** desktop-local Host 注入；只消费已校验、已去重的 live session event。 */
   cuaOperationStateReporter?: CuaOperationStateReporter;
   onCuaPipSessionLifecycle?: (
@@ -1217,6 +1259,26 @@ export function resolveOffPeakToolSelection(
     ? selection
     : { ...selection, options: { reasoningLevel: thoughtLevel } };
 }
+/**
+ * P6 C2：票据 scope 是否显式允许本次官方 MCP 凭据资源。
+ * 只认精确项：宿主签发的 host 级 `credential:official-mcp`（官方 MCP 身份头解析器是
+ * host 全局通道，签发侧无法枚举远端 mcpKey），以及调用方自行签发的
+ * `credential:<mcpKey>` / `credential:<pluginId>`。缺失即 fail-closed，不用前缀/包含
+ * 匹配放宽（避免 `credential:` 空资源或其它插件资源命中）。
+ */
+function officialMcpCredentialScopeAllows(
+  scope: CapabilityTicketScope,
+  input: { mcpKey: string; pluginId: string },
+): boolean {
+  const resources = scope.resources;
+  if (resources === undefined) return false;
+  return (
+    resources.includes(CAPABILITY_TICKET_OFFICIAL_MCP_CREDENTIAL_RESOURCE) ||
+    resources.includes(`credential:${input.mcpKey}`) ||
+    resources.includes(`credential:${input.pluginId}`)
+  );
+}
+
 export function createZCodeAgentService(
   options?: CreateZCodeAgentServiceOptions,
 ): IZCodeAgentService & { disposeAllAndWait(): Promise<void> } {
@@ -2696,6 +2758,63 @@ export function createZCodeAgentService(
           // host 侧二次校验必须发生在**读取凭据之前**：未命中即返回，resolveHeaders 不被调用，
           // 因此不会有任何凭据被读入内存。
           void (async () => {
+            // P6 C2：请求携带能力票据时，宿主必须在读取凭据之前先校验票据（存在性/TTL/
+            // 吊销/绑定/角色 scope），并要求 scope.resources 明确包含本次凭据资源。任一
+            // 失败即 official_auth_scope_denied，resolver 不被调用——绝不降级为匿名解析。
+            // 无票据请求：本地 attachment 与票据关闭的宿主保持既有行为；票据启用的执行面
+            // （authority.requireTicketForRequests=true）必须拒绝，不能靠漏带字段退回旧路径。
+            const ticketId = parsed.data.capabilityTicketId;
+            const ticketBinding = parsed.data.capabilityTicketBinding;
+            const denyTicketRequest = (detail: string): void => {
+              // ticketId 已经过 schema 字符集约束；这里仍只记录公开上下文与 typed code。
+              logger.warn(request.trace?.traceId, "官方 MCP 身份头请求未通过能力票据校验", {
+                detail,
+                mcpKey: parsed.data.mcpKey,
+                pluginId: parsed.data.pluginId,
+                requestId: parsed.data.requestId,
+                workspaceKey: parsed.data.workspace.workspaceKey,
+              });
+              void client.respond(request.id, {
+                ok: false,
+                reason: "official_auth_scope_denied",
+              });
+            };
+            if (ticketId !== undefined || ticketBinding !== undefined) {
+              if (ticketId === undefined || ticketBinding === undefined) {
+                denyTicketRequest("ticket_incomplete");
+                return;
+              }
+              const authority = options?.officialMcpCapabilityTicketAuthority;
+              if (!authority) {
+                denyTicketRequest("ticket_authority_missing");
+                return;
+              }
+              // authority 允许异步（远端宿主经已鉴权 host 连接反向频道回连 broker）；
+              // 必须 await admission 完成后才读取凭据。
+              const admission = await authority.admit({ ticketId, binding: ticketBinding });
+              if (!admission.ok) {
+                denyTicketRequest(admission.code);
+                return;
+              }
+              // 票据有效不等于可以拿凭据：scope 必须显式声明本次资源。
+              if (
+                !officialMcpCredentialScopeAllows(admission.authorization.scope, {
+                  mcpKey: parsed.data.mcpKey,
+                  pluginId: parsed.data.pluginId,
+                })
+              ) {
+                denyTicketRequest("credential_scope_missing");
+                return;
+              }
+            } else if (
+              // P6 C2：票据启用的执行面（远端 host 已挂载 desktop broker 回连频道）上，
+              // 漏带票据字段的身份头请求不得退回无票据旧路径，否则票据门可被客户端省略字段绕过。
+              (await options?.officialMcpCapabilityTicketAuthority?.requireTicketForRequests?.()) ===
+              true
+            ) {
+              denyTicketRequest("ticket_required");
+              return;
+            }
             const trustedOrigins = options?.officialMcpTrustedOrigins;
             const trust = trustedOrigins
               ? await trustedOrigins

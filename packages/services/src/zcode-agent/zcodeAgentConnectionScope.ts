@@ -51,6 +51,13 @@ export const zCodeAgentCapabilityTicketAuthorizationSchema = z
     expiresAt: z.number().int().nonnegative(),
     /** 该票据自身的吊销 epoch 快照（公开，无 secret）。 */
     revocationEpoch: z.number().int().nonnegative(),
+    /**
+     * P6 C2：宿主在 admission 时宣告的真实凭据注入通道。`host-interaction` =
+     * 本宿主装配了官方 MCP 身份头解析器（agent→host 反向请求），票据 scope 校验通过后
+     * 由宿主解析并回传本次请求的身份头。缺失 = 宿主未宣告注入能力，CLI 对凭据类工具
+     * fail-closed。该字段是公开事实，不是授权本身；真正的 scope 校验仍在宿主。
+     */
+    credentialInjection: z.enum(["host-interaction"]).optional(),
   })
   .strict();
 export type ZCodeAgentCapabilityTicketAuthorization = z.infer<
@@ -850,7 +857,13 @@ export function createZCodeAgentConnectionScope(
       // 不做“无票据继续执行”的降级。无 ticketId 的旧命令路径字节兼容。
       const declaredTicketId = params.envelope.capabilityTicketId;
       let commandConnection = forwardedConnection(params);
-      if (declaredTicketId !== undefined) {
+      if (declaredTicketId === undefined) {
+        // 票据启用的 attachment 上，命令必须显式声明 ticketId；缺失即拒绝。否则“忘了带
+        // 票据”会静默退回无票据旧路径，票据配置被绕过。无 authority 的旧连接保持不变。
+        if (options.capabilityTicket !== undefined) {
+          throw new CapabilityTicketCommandRejectedError("ticket.required");
+        }
+      } else {
         const authority = options.capabilityTicket;
         if (authority !== undefined) {
           const admitted = authority.admit({

@@ -1740,6 +1740,71 @@ describe("ZCodeAgent connection-scoped service facade", () => {
     });
   });
 
+  it("票据启用的 attachment 上，缺失 capabilityTicketId 的命令 fail-closed 拒绝", async () => {
+    const { base } = setupBase();
+    const admit = vi.fn((_input: { ticketId: string; connectionId: string }) => ({
+      ok: false as const,
+      code: "ticket.unknown" as const,
+    }));
+    const ticketScope = createZCodeAgentConnectionScope(
+      base,
+      { connectionId: "ticket-required", clientMode: "desktop-continuous" },
+      { capabilityTicket: { admit } },
+    );
+    await ticketScope.service.helloConversationV4();
+    await ticketScope.service.initializeConversationV4({
+      kind: "clientHello",
+      protocolVersion: 3,
+      clientId: "ticket-required-client",
+      appVersion: "4.0.0",
+    });
+    await expect(
+      ticketScope.service.sendConversationCommandV4({
+        workspacePath: "/repo",
+        envelope: {
+          commandId: "cmd-required",
+          clientId: "ticket-required-client",
+          sessionId: "session-1",
+          type: "sendText",
+          payload: { text: "hello" },
+          issuedAt: 1,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "ticket.required" });
+    expect(base.sendConversationCommandV4).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
+    await ticketScope.dispose();
+
+    // 无票据 authority 的旧连接：无 ticketId 命令保持字节兼容。
+    const plain = setupBase();
+    const plainScope = createZCodeAgentConnectionScope(plain.base, {
+      connectionId: "ticket-absent",
+      clientMode: "desktop-continuous",
+    });
+    await plainScope.service.helloConversationV4();
+    await plainScope.service.initializeConversationV4({
+      kind: "clientHello",
+      protocolVersion: 3,
+      clientId: "ticket-absent-client",
+      appVersion: "4.0.0",
+    });
+    await plainScope.service.sendConversationCommandV4({
+      workspacePath: "/repo",
+      envelope: {
+        commandId: "cmd-absent",
+        clientId: "ticket-absent-client",
+        sessionId: "session-1",
+        type: "sendText",
+        payload: { text: "hello" },
+        issuedAt: 1,
+      },
+    });
+    const forwarded = vi.mocked(plain.base.sendConversationCommandV4).mock.calls.at(-1)?.[0];
+    expect(forwarded?.envelope).not.toHaveProperty("capabilityTicketId");
+    expect(readTrustedZCodeAgentV4Connection(forwarded)?.capabilityTicket).toBeUndefined();
+    await plainScope.dispose();
+  });
+
   it("手机 replayable command 原样透传 canonical plugin link，不新增 selection state", async () => {
     const { base } = setupBase();
     const scope = createZCodeAgentConnectionScope(base, {

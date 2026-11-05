@@ -88,6 +88,12 @@ export type OfficialMcpAuthFailureReason = (typeof OFFICIAL_MCP_AUTH_FAILURE_REA
 export const OFFICIAL_MCP_AUTH_PORT_FAILURE_REASONS = [
   ...OFFICIAL_MCP_AUTH_FAILURE_REASONS,
   "official_mcp_origin_untrusted",
+  /**
+   * P6 C2：请求携带能力票据，但宿主 Broker 校验失败，或票据 scope.resources 不含本次
+   * `credential:<mcpKey>` / `credential:<pluginId>`。宿主在读取凭据**之前**拒绝；
+   * 绝不降级为匿名解析。
+   */
+  "official_auth_scope_denied",
 ] as const;
 
 export type OfficialMcpAuthPortFailureReason =

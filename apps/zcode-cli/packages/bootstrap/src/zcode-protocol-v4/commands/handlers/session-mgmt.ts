@@ -8,7 +8,7 @@ import type {
 } from "@zcode/shared/zcode-protocol-v4";
 import { mapAttachmentRefsToTurnAttachments } from "../attachment-refs.js";
 import { inputIntentMetadata } from "../input-intent.js";
-import { commandAdmissionOf } from "../executor.js";
+import { commandAdmissionOf } from "../command-admission.js";
 import { startPromptTurn } from "../prompt-turn.js";
 import { requireRecord } from "../record-access.js";
 import type { V4CommandCoreHost } from "../types.js";

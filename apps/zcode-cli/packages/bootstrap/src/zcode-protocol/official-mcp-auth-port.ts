@@ -8,6 +8,7 @@ import {
   type ZCodeWorkspaceRef,
 } from "@zcode/shared";
 import type { OfficialMcpAuthHeadersPort } from "@zcode/contracts";
+import { getCurrentCapabilityTicketAuthorization } from "@zcode/core";
 import type { ZCodeProtocolAgentServerContext } from "./server-types.js";
 
 let requestSequence = 0;
@@ -55,6 +56,17 @@ export function createOfficialMcpAuthHeadersPort(input: {
         return { ok: false, reason: "official_auth_unavailable" };
       }
       requestSequence += 1;
+      // P6 C2：工具执行 ALS 里有票据授权域时，把公开句柄与绑定随请求发给宿主。
+      // **只带 ticketId + binding**（公开事实），secret 永不进入协议帧；无票据时请求
+      // 字节兼容，宿主走既有行为。真正可否解析由宿主 broker + scope 校验决定。
+      const capabilityTicket = getCurrentCapabilityTicketAuthorization();
+      const capabilityTicketFields =
+        capabilityTicket === undefined
+          ? {}
+          : {
+              capabilityTicketId: capabilityTicket.ticketId,
+              capabilityTicketBinding: capabilityTicket.binding,
+            };
       try {
         return await context.requestClient(
           zcodeProtocolMethods.interactionRequestOfficialMcpAuthHeaders,
@@ -64,6 +76,7 @@ export function createOfficialMcpAuthHeadersPort(input: {
             requestId: `official-mcp-auth:${requestSequence}`,
             targetOrigin: request.targetOrigin,
             workspace,
+            ...capabilityTicketFields,
           },
           zcodeOfficialMcpAuthHeadersResponseSchema,
           request.signal ? { signal: request.signal } : {},

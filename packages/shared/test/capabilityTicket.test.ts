@@ -103,6 +103,20 @@ describe("capability ticket contract", () => {
     expect(
       capabilityTicketScopeWithinRole("interactive", { toolClasses: ["credential"] }),
     ).toBe(false);
+    // P6 C2：即使工具面被压缩成 read，非 host 也不能携带 credential 资源（否则可绕过
+    // 工具准入直接索取官方 MCP 身份头）。
+    expect(
+      capabilityTicketScopeWithinRole("read_mostly", {
+        toolClasses: ["read"],
+        resources: ["credential:official-mcp"],
+      }),
+    ).toBe(false);
+    expect(
+      capabilityTicketScopeWithinRole("host", {
+        toolClasses: ["read"],
+        resources: ["credential:official-mcp"],
+      }),
+    ).toBe(true);
   });
 
   it("只声明 resources、没有工具维度的 scope 一律 fail-closed", () => {
@@ -317,6 +331,7 @@ describe("capability ticket contract", () => {
         "ticket.broker_unavailable",
         "ticket.expired",
         "ticket.replayed",
+        "ticket.required",
         "ticket.revoked",
         "ticket.scope_denied",
         "ticket.unknown",

@@ -7,7 +7,7 @@ import type {
   QueueItem,
   SubmissionMode,
 } from "@zcode/shared/zcode-protocol-v4";
-import { commandAdmissionOf } from "./executor.js";
+import { commandAdmissionOf } from "./command-admission.js";
 
 export interface CanonicalCommandIntent {
   inputOrigin?: "desktop" | "mobile";

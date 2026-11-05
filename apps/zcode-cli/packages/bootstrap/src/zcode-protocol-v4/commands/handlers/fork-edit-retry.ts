@@ -18,7 +18,7 @@ import {
 } from "@zcode/contracts";
 import { mapAttachmentRefsToTurnAttachments } from "../attachment-refs.js";
 import { V4PromptRejectedError } from "../prompt-turn.js";
-import { commandAdmissionOf, commandCapabilityTicketOf } from "../executor.js";
+import { commandAdmissionOf, commandCapabilityTicketOf } from "../command-admission.js";
 import { hasPromptInput, V4InputAdmissionRejectedError } from "../input-admission.js";
 import { requireRecord } from "../record-access.js";
 import type { V4CommandCoreHost, V4SessionRecordView } from "../types.js";

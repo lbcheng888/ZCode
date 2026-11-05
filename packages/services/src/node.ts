@@ -67,6 +67,8 @@ export {
   type TopicResourcePeers,
 } from "./zcode-agent/topicResourcePeers.js";
 export { createTopicResourceRelayChannel } from "./zcode-agent/topicResourceRelayChannel.js";
+export { createCapabilityTicketAdmissionPeers } from "./zcode-agent/capabilityTicketAdmissionRelay.js";
+export type { CapabilityTicketAdmissionPeers } from "./zcode-agent/capabilityTicketAdmissionRelay.js";
 
 export { createFileService } from "./file/fileService.js";
 export {
@@ -431,6 +433,11 @@ import { createObservableSettingService } from "./setting/observableSettingServi
 import { createCredentialService } from "./credential/credentialService.js";
 import { createBroadcastService } from "./broadcast/broadcastService.js";
 import { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";
+import type { ZCodeAgentOfficialMcpCapabilityTicketAuthority } from "./zcode-agent/zcodeAgentService.js";
+import {
+  createCapabilityTicketAdmissionPeers,
+  type CapabilityTicketAdmissionPeers,
+} from "./zcode-agent/capabilityTicketAdmissionRelay.js";
 import type { ZCodeAgentCommandResolver } from "./zcode-agent/zcodeAgentProcessManager.js";
 import { buildAgentTelemetrySpawnEnv } from "./zcode-agent/agentTelemetryEnv.js";
 import { resolveZCodeAgentPresentationSurface } from "./zcode-agent/zcodeAgentPresentationSurface.js";
@@ -1211,6 +1218,13 @@ export function createLocalServices(options: {
   resolveClientLanguage?: () => string | undefined;
   /** Desktop Host 请求 Main 登记 Agent 已授权的精确本地视频路径。 */
   authorizeLocalMediaPreviewPath?: (path: string) => Promise<string>;
+  /**
+   * P6 C2：官方 MCP 身份头请求携带能力票据时的宿主校验端口。Desktop local host 用
+   * 与 attachment 同一个 CapabilityTicketBroker 实现；远端 server 宿主用
+   * `createCapabilityTicketAdmissionPeers` 经鉴权 host 连接反向频道回连该 broker。
+   * 缺省 = 不接受票据（fail-closed）。
+   */
+  officialMcpCapabilityTicketAuthority?: ZCodeAgentOfficialMcpCapabilityTicketAuthority;
   /**
    * 动态工作流用户选择变化后的转发口（docs/dynamic-workflow/launch.md「The user's choice」）：
    * Desktop Host 把本机设置里的选择推给本窗口所有在线的 desktop-attached remote Host。
@@ -2319,6 +2333,9 @@ export function createLocalServices(options: {
     },
     // 官方 Server MCP 身份头：host 是唯一身份权威，Agent 经反向请求索取。
     // Provider 存在性读取正式 Model Selection View；不恢复旧 Provider Snapshot。
+    ...(options?.officialMcpCapabilityTicketAuthority
+      ? { officialMcpCapabilityTicketAuthority: options.officialMcpCapabilityTicketAuthority }
+      : {}),
     officialMcpAuthHeadersResolver: createOfficialMcpAuthHeadersResolver({
       accountRequestAuthService,
       credentialService,
@@ -3273,6 +3290,10 @@ export async function createServerHostServices(options: {
   const triggerSink = options.superAgentControlPlaneRpcPort
     ? createSuperAgentControlPlaneTriggerSink(options.superAgentControlPlaneRpcPort)
     : undefined;
+  // P6 C2：远端执行宿主的 agent 通过 host 连接私有反向频道把票据 admission 回传
+  // Desktop Host broker。peers 随连接建立/关闭增删；无 peer 时 authority 返回
+  // ticket.broker_unavailable（fail-closed，不伪造授权域）。
+  const capabilityTicketAdmissionPeers = createCapabilityTicketAdmissionPeers();
   const services = createLocalServices({
     zcodeBuiltinProviderConfigFilePath: options.zcodeBuiltinProviderConfigFilePath,
     providerProvisioningTargetEnabled: options.providerProvisioningTargetEnabled,
@@ -3280,9 +3301,15 @@ export async function createServerHostServices(options: {
     topicResourceRelayChannel: options.topicResourceRelayChannel,
     projectStorageHostId,
     sourceServerWorkspaceService,
+    officialMcpCapabilityTicketAuthority: capabilityTicketAdmissionPeers.authority,
     ...(triggerSink ? { triggerSink } : {}),
   });
-  return { services, workspaceIdentityMapper, migrationFailedPathCount };
+  return {
+    services,
+    workspaceIdentityMapper,
+    migrationFailedPathCount,
+    capabilityTicketAdmissionPeers,
+  };
 }
 
 export { scopeConversationShareServiceForAttachment } from "./conversation-share/conversationShareConnectionScope.js";

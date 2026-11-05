@@ -18,7 +18,7 @@ import {
   setReactErrorArmsReporter,
 } from "@zcode/ui";
 import "@zcode/ui/styles.css";
-import { connectViaMessagePort, createMessagePortServiceConnection } from "@zcode/client";
+import { createMessagePortServiceConnection } from "@zcode/client";
 import {
   InternalChannels,
   databaseStartupStateSchema,
@@ -318,9 +318,13 @@ function handleServicePortMessage(event: MessageEvent): void {
 
 function initializeBusinessRoot(port: MessagePort): void {
   appInitialized = true;
-  const services = connectViaMessagePort(port, {
+  // 不能丢弃 capabilityTickets 通道：createMessagePortServiceConnection 会在本连接收到
+  // 宿主 delivery 后把公开 ticketId 合并进命令信封。窗口卸载时释放同一 connection。
+  const connection = createMessagePortServiceConnection(port, {
     sourceServerManagementService: true,
   });
+  window.addEventListener("beforeunload", () => connection.dispose());
+  const services = connection.services;
   baseServicesForRemoteSessions = services;
   registerBaseWorkspaceServices(services);
   flushPendingRemoteWorkspaceServicePorts();

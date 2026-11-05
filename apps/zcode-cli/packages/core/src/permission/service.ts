@@ -209,6 +209,15 @@ export class PermissionService {
   }
 
   /**
+   * P6 C2：当前回合绑定的能力票据授权域（公开事实，无 secret）；未绑定 ⇒ undefined。
+   * 工具执行调度在 handler 前读取它，放进工具执行 AsyncLocalStorage，使官方 MCP
+   * 身份头端口能在本次工具调用内附带票据句柄。只读已绑定事实，不重新解析。
+   */
+  currentCapabilityTicketAuthorization(): CapabilityTicketAuthorization | undefined {
+    return this.currentTurnPermissionFacts()?.capabilityTicket;
+  }
+
+  /**
    * 当前回合绑定的事实（没有绑定时 undefined = 既有 user-origin 语义）。
    * 直接读 trace 的 async-local 作用域，调用方不需要把 mandate 逐层搬运。
    */
