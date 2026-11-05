@@ -39,6 +39,12 @@
 - automation/offpeak 心跳与 TriggerSink 生产注入：跨进程结构不可达，按设计归里程碑 B（入站宿主下沉），拒绝假接线 ✅（spec §8 登记）
 - 验证：双 scope typecheck/lint 绿、architecture 0、定向 240 测试绿；累计 16 提交
 
+## 里程碑 B + P6 批次（2026-11-05）✅
+- 里程碑 B 实施规格（662 行）：daemon 受管子进程拓扑/RPC 方法表/租约归属/入站下沉/验收矩阵 B-A1..B-A18
+- daemon control-plane 子进程骨架：独立代际/崩溃预算/ready 门/协议版本/对称 stop；真 spawn 测试 + 全量 221 测试绿
+- P6 能力规格（设备权限/能力票据/OS egress 围栏，均标注未实现）+ 灰度试点手册（三级开关/观测/回滚/放量判据）
+- 验证：根 typecheck 过、architecture 0、lint 0 errors、server-cli 221 测试绿；累计 19 提交
+
 ## 已知接缝（登记、非阻塞）
 - specRun dispatcher 生产 launch 适配器（flag 开时 speculative/auto 响亮失败——fail-closed 如设计）
 - automation/offpeak owner 心跳接线（packages/services 分区）
