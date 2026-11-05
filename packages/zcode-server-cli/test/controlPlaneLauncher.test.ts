@@ -56,6 +56,8 @@ process.send({
   serverRoot: process.env.ZCODE_SERVER_ROOT,
   releaseId: process.env.ZCODE_SERVER_RELEASE_ID ?? null,
   mandateGate: process.env.ZCODE_CONTROL_PLANE_MANDATE_GATE ?? null,
+  peerCredentialsNativePath: process.env.ZCODE_PEER_CREDENTIALS_NATIVE_PATH ?? null,
+  trustedPids: process.env.ZCODE_CONTROL_PLANE_TRUSTED_PIDS ?? null,
 });
 process.on("message", (message) => {
   if (message && message.command === "shutdown") process.exit(0);
@@ -89,7 +91,7 @@ function waitForChildMessage(
 }
 
 describe("default control plane command resolution", () => {
- it("resolves packaged entry from release runtime layout", async () => {
+  it("resolves packaged entry from release runtime layout", async () => {
     const root = await temporaryRoot();
     const releaseDir = join(root, "releases", "1.0.0");
     await writeFileTree(releaseDir, ["runtime/zcode.cjs", "runtime/node"]);
@@ -159,6 +161,34 @@ describe("default control plane command resolution", () => {
       CONTROL_PLANE_SUBCOMMAND,
     ]);
     expect(resolution.command.cwd).toBe(root);
+    // 未构建原生 addon 时不注入 env，child 继续走 authToken（§3.8 生产握手）。
+    expect(resolution.command.peerCredentialsNativePath).toBeUndefined();
+  });
+
+  it("passes the built native peer credentials addon path in development", async () => {
+    const root = await temporaryRoot();
+    const prebuilt = join(
+      "packages",
+      "native-peer-credentials",
+      "prebuilds",
+      `${process.platform}-${process.arch}`,
+      "peercred.node",
+    );
+    await writeFileTree(root, [
+      "apps/zcode-cli/packages/cli/src/main.ts",
+      "node_modules/tsx/dist/cli.mjs",
+      prebuilt,
+    ]);
+    const searchFrom = join(root, "packages", "zcode-server-cli", "src", "supervisor");
+    await mkdir(searchFrom, { recursive: true });
+
+    const resolution = resolveDefaultControlPlaneCommand(
+      { serverRoot: join(root, "server"), release: null },
+      { devSearchFrom: searchFrom, platform: process.platform },
+    );
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok) return;
+    expect(resolution.command.peerCredentialsNativePath).toBe(join(root, prebuilt));
   });
 
   it("reports both missing release and missing development entry", async () => {
@@ -192,6 +222,7 @@ describe("default control plane launcher", () => {
         serverRoot: join(root, "server"),
         release: releaseManifest(releaseDir, "release-7"),
         mandateGate: true,
+        trustedPids: [4321],
       });
       try {
         const envMessage = await waitForChildMessage(child, (message) => message.type === "env");
@@ -203,12 +234,35 @@ describe("default control plane launcher", () => {
           releaseId: "release-7",
           // §2.3：launcher 只投影 flag，不在子进程里重新读取 RuntimeConfig。
           mandateGate: "1",
+          // §3.8：Core PID 由 Supervisor 投影进可信集合。
+          trustedPids: "4321",
         });
       } finally {
         child.kill("SIGKILL");
       }
     },
   );
+
+  it("does not inject a trusted-pids env when the set is empty or invalid", async () => {
+    const launcher = createControlPlaneLauncher({
+      executable: process.execPath,
+      args: ["-e", CHILD_SCRIPT],
+    });
+    const child = launcher.launch({
+      generation: 3,
+      protocolVersion: CONTROL_PLANE_PROTOCOL_VERSION,
+      dataBaseDir: join(tmpdir(), "data"),
+      serverRoot: join(tmpdir(), "server"),
+      release: null,
+      trustedPids: [0, -1, Number.NaN],
+    });
+    try {
+      const envMessage = await waitForChildMessage(child, (message) => message.type === "env");
+      expect(envMessage.trustedPids).toBeNull();
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
 
   it("throws before spawn when the entry cannot be resolved", async () => {
     const root = await temporaryRoot();
@@ -225,6 +279,29 @@ describe("default control plane launcher", () => {
         release: null,
       }),
     ).toThrow(/headless 入口不可解析/);
+  });
+
+  it("injects the native peer credentials addon path into the child env", async () => {
+    const nativePath = join(tmpdir(), "zcode-peercred-test.node");
+    const launcher = createControlPlaneLauncher({
+      executable: process.execPath,
+      args: ["-e", CHILD_SCRIPT],
+      peerCredentialsNativePath: nativePath,
+    });
+    const child = launcher.launch({
+      generation: 9,
+      protocolVersion: CONTROL_PLANE_PROTOCOL_VERSION,
+      dataBaseDir: join(tmpdir(), "data"),
+      serverRoot: join(tmpdir(), "server"),
+      release: null,
+      mandateGate: false,
+    });
+    try {
+      const envMessage = await waitForChildMessage(child, (message) => message.type === "env");
+      expect(envMessage.peerCredentialsNativePath).toBe(nativePath);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   it("keeps explicit command injection working", () => {

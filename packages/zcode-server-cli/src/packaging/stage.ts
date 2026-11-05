@@ -25,6 +25,12 @@ export interface StageOptions {
   bundledSkillsDir: string;
   /** 已准备好的目标平台 Node 二进制 */
   nodeBinaryPath: string;
+  /**
+   * 已构建的原生 peer credential addon（`peercred.node`）。给出时复制到
+   * `runtime/peercred.node` 并纳入 server-runtime 组件哈希；launcher 的 release
+   * 探测与实际打包产物因此一致。缺省表示目标平台没有可用的同平台产物。
+   */
+  nativePeerCredentialsAddonPath?: string;
   /** 构建入口从统一合规 owner（scripts/third-party-notices.mjs）读取后传入；组件组装不能自行拼凑许可。 */
   notices: { thirdParty: string; node: string; nodeSource: string };
   /** 依赖闭包解析与复制的来源 node_modules */
@@ -262,6 +268,24 @@ export async function stageRelease(options: StageOptions): Promise<StagedRelease
   await cp(options.nodeBinaryPath, nodeTargetPath, { dereference: true });
   if (!options.target.startsWith("win32-")) await chmod(nodeTargetPath, 0o755);
 
+  // §3.8 原生 peer credential addon 不是构建脚本的隐式产物：不从 prebuilds 猜，
+  // 由调用方给出同平台已构建路径。调用方声明了路径但文件不存在 → staging 失败，
+  // 不产出「声称带 addon、实际没有」的发行包；未声明（跨平台）时保持 authToken 路径。
+  let nativePeerCredentialsStaged = false;
+  if (options.nativePeerCredentialsAddonPath) {
+    const addonSource = resolve(options.nativePeerCredentialsAddonPath);
+    try {
+      await access(addonSource);
+    } catch (cause) {
+      throw new Error(
+        `Missing native peer credentials addon: ${addonSource}`,
+        { cause },
+      );
+    }
+    await cp(addonSource, join(runtimeDir, "peercred.node"), { dereference: true });
+    nativePeerCredentialsStaged = true;
+  }
+
   // runtime/node_modules 以产物扫描为事实源：bundle 引用什么就装什么（含传递依赖），
   // 不使用 tsup external 声明列表，避免声明与实际引用漂移。
   const referencedPackages = new Set<string>();
@@ -340,6 +364,7 @@ export async function stageRelease(options: StageOptions): Promise<StagedRelease
         "runtime/package.json",
         "runtime/node_modules",
         "runtime/THIRD-PARTY-NOTICES.md",
+        ...(nativePeerCredentialsStaged ? ["runtime/peercred.node"] : []),
       ],
     },
     {

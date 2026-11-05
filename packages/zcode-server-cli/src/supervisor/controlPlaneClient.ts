@@ -21,6 +21,16 @@ const log = createServiceLogger("super-agent-control-plane-client");
  * 与 peer 身份校验（§3.8，child 侧）不在本批次接线范围。
  */
 
+/** §3.8 显式 peer 门模式开关（Supervisor 环境投影给 Core 与 child，两侧必须一致）。 */
+export const CONTROL_PLANE_PEER_MODE_ENV = "ZCODE_CONTROL_PLANE_PEER_MODE";
+
+export function isControlPlanePeerModeEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env[CONTROL_PLANE_PEER_MODE_ENV]?.trim();
+  return raw === "1" || raw === "true";
+}
+
 export const CONTROL_PLANE_RPC_VERSION = controlPlaneProtocol.CONTROL_PLANE_RPC_VERSION;
 export const CONTROL_PLANE_MAX_FRAME_BYTES = controlPlaneProtocol.CONTROL_PLANE_MAX_FRAME_BYTES;
 export const CONTROL_PLANE_CONNECT_TIMEOUT_MS = 5_000;
@@ -140,6 +150,11 @@ export interface ControlPlaneClientOptions {
    */
   authTokenFile?: string;
   /**
+   * §3.8 显式 peer 门模式：true 时不读取凭据文件、不发送 auth 首帧；身份由 child
+   * 在连接建立时用内核 peer credential 校验。必须与 child 侧 env 开关一致。
+   */
+  peerMode?: boolean;
+  /**
    * child → Core 反向请求处理器（§3.3）。未注册的方法必须回 `proto.unimplemented`
    * 结构化错误，**不得**把入站请求当协议错误断开连接（backfill.seeds 会让
    * workspace.ensure 必然失败）。
@@ -194,11 +209,12 @@ class JsonlControlPlaneClient implements ControlPlaneClient {
     this.connectTimeoutMs = options.connectTimeoutMs ?? CONTROL_PLANE_CONNECT_TIMEOUT_MS;
     this.timeoutMsByMethod = options.timeoutMsByMethod ?? {};
     this.onInboundRequest = options.onInboundRequest;
-    this.authTokenFile =
-      options.authTokenFile ??
-      (options.serverRoot?.trim()
-        ? controlPlaneProtocol.resolveControlPlaneAuthTokenPath(options.serverRoot)
-        : undefined);
+    this.authTokenFile = options.peerMode
+      ? undefined
+      : options.authTokenFile ??
+        (options.serverRoot?.trim()
+          ? controlPlaneProtocol.resolveControlPlaneAuthTokenPath(options.serverRoot)
+          : undefined);
   }
 
   public get connected(): boolean {

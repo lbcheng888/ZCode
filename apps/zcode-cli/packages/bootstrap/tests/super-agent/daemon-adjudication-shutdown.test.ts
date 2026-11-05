@@ -178,6 +178,7 @@ describe("daemon shutdown 中止在途裁决", () => {
         dataBaseDir,
         serverRoot,
         mandateGate: false,
+        peerMode: false,
       },
       endpoint,
       authTokenFile,

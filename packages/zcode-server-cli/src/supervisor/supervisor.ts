@@ -842,6 +842,9 @@ export class Supervisor {
     this.clearControlPlaneReadyTimer();
     this.clearControlPlaneKillTimer();
     const generation = ++this.controlPlaneGeneration;
+    // §3.8：Core 与 Supervisor 不同代际时可重启，但每次 launchControlPlane 都紧跟在
+    // launchCore 之后，因此这里读到的就是当前 Core PID；peer 门模式据此构造可信集合。
+    const corePid = this.core?.pid;
     const child = options.launcher.launch({
       generation,
       protocolVersion: CONTROL_PLANE_PROTOCOL_VERSION,
@@ -849,6 +852,7 @@ export class Supervisor {
       serverRoot: this.layout.serverRoot,
       release: this.activeRelease,
       mandateGate: options.mandateGate === true,
+      ...(corePid !== undefined ? { trustedPids: [corePid] } : {}),
     });
     this.controlPlane = child;
     this.controlPlaneState = "starting";

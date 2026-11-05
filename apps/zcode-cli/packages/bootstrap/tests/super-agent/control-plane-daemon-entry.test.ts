@@ -44,7 +44,26 @@ describe("parseControlPlaneEntryConfig", () => {
       dataBaseDir: "/tmp/data",
       serverRoot: "/tmp/server",
       mandateGate: false,
+      peerMode: false,
     });
+  });
+
+  it("显式 peer 门开关由 env 投影，缺省关闭", () => {
+    expect(
+      parseControlPlaneEntryConfig({ argv: [], env: ENV }).peerMode,
+    ).toBe(false);
+    expect(
+      parseControlPlaneEntryConfig({
+        argv: [],
+        env: { ...ENV, ZCODE_CONTROL_PLANE_PEER_MODE: "1" },
+      }).peerMode,
+    ).toBe(true);
+    expect(
+      parseControlPlaneEntryConfig({
+        argv: [],
+        env: { ...ENV, ZCODE_CONTROL_PLANE_PEER_MODE: "true" },
+      }).peerMode,
+    ).toBe(true);
   });
 
   it("argv 覆盖 env，等价 `--key=value` 与 `--key value`", () => {

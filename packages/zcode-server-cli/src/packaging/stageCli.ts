@@ -18,6 +18,32 @@ import { resolveNodeDistBase } from "./nodeDistMirror.js";
 
 const log = (...args: unknown[]): void => console.log("[stage]", ...args);
 
+/**
+ * 原生 peer credential addon 只能在目标平台本机构建（构建脚本拒绝交叉编译）。
+ * 因此只在 target 与宿主一致时提供已构建产物；跨平台 staging 不注入，release 仍
+ * 以 authToken 握手运行（launcher 的 release 探测也会因文件缺失而不注入 env）。
+ */
+async function resolveNativePeerCredentialsAddon(
+  repoRoot: string,
+  target: ServerTarget,
+): Promise<string | undefined> {
+  if (target !== currentServerTarget()) return undefined;
+  const candidate = join(
+    repoRoot,
+    "packages",
+    "native-peer-credentials",
+    "prebuilds",
+    target,
+    "peercred.node",
+  );
+  if (!(await pathExists(candidate))) {
+    throw new Error(
+      `Native peer credentials addon missing for ${target}: ${candidate}; run pnpm --filter @zcode/native-peer-credentials build before staging`,
+    );
+  }
+  return candidate;
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -240,9 +266,10 @@ async function main(): Promise<void> {
   const appVersion = (
     JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")) as { version: string }
   ).version;
-  const [agentBundlePath, nodeBinaryPath] = await Promise.all([
+  const [agentBundlePath, nodeBinaryPath, nativePeerCredentialsAddonPath] = await Promise.all([
     ensureAgentBundle(repoRoot, argv.includes("--skip-agent-build")),
     ensureNodeBinary(repoRoot, target),
+    resolveNativePeerCredentialsAddon(repoRoot, target),
   ]);
   const [nativeToolsDir, officialPluginsDir, workspacePackageDirs] = await Promise.all([
     resolveNativeToolsDir(repoRoot, target),
@@ -257,6 +284,7 @@ async function main(): Promise<void> {
     agentBundlePath,
     bundledSkillsDir: join(repoRoot, "apps/zcode-cli/packages/bundled-skills"),
     nodeBinaryPath,
+    ...(nativePeerCredentialsAddonPath ? { nativePeerCredentialsAddonPath } : {}),
     notices: {
       thirdParty: thirdParty.toString("utf8"),
       node: nodeNotice.bytes.toString("utf8"),

@@ -12,11 +12,19 @@ export interface ControlPlaneLauncher {
   launch(params: ControlPlaneLaunchParams): ChildProcess;
 }
 
+export const CONTROL_PLANE_PEER_CREDENTIALS_NATIVE_PATH_ENV = "ZCODE_PEER_CREDENTIALS_NATIVE_PATH";
+export const CONTROL_PLANE_TRUSTED_PIDS_ENV = "ZCODE_CONTROL_PLANE_TRUSTED_PIDS";
+
 export interface HeadlessControlPlaneCommand {
   executable: string;
   args?: readonly string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * 原生 peer credential addon 的绝对路径。给出时 launcher 注入
+   * `ZCODE_PEER_CREDENTIALS_NATIVE_PATH`；缺省时不注入，child 保持 authToken 路径。
+   */
+  peerCredentialsNativePath?: string;
 }
 
 /**
@@ -36,6 +44,10 @@ export function createControlPlaneLauncher(
   }
   return {
     launch(params: ControlPlaneLaunchParams): ChildProcess {
+      // 只投影合法 PID；空集合不注入，避免 child 把空串当可信集合。
+      const trustedPids = (params.trustedPids ?? []).filter(
+        (pid) => Number.isInteger(pid) && pid > 0,
+      );
       return spawn(command.executable, [...(command.args ?? [])], {
         cwd: command.cwd,
         env: {
@@ -47,6 +59,14 @@ export function createControlPlaneLauncher(
           ZCODE_SERVER_ROOT: params.serverRoot,
           // §2.3 单一投影源：child 只读 mandateGate，launcher 不读 RuntimeConfig。
           ZCODE_CONTROL_PLANE_MANDATE_GATE: params.mandateGate === true ? "1" : "0",
+          ...(command.peerCredentialsNativePath
+            ? {
+                [CONTROL_PLANE_PEER_CREDENTIALS_NATIVE_PATH_ENV]: command.peerCredentialsNativePath,
+              }
+            : {}),
+          ...(trustedPids.length > 0
+            ? { [CONTROL_PLANE_TRUSTED_PIDS_ENV]: trustedPids.join(",") }
+            : {}),
           ...(params.release?.releaseId
             ? { ZCODE_SERVER_RELEASE_ID: params.release.releaseId }
             : {}),
@@ -73,6 +93,11 @@ export interface ControlPlaneEntryResolutionOptions {
   devSearchFrom?: string;
   /** 文件存在判定；缺省 fs.statSync。测试可注入以隔离真实文件系统。 */
   isFile?: (path: string) => boolean;
+  /**
+   * 显式指定原生 peer credential addon 路径；缺省按 release/开发树布局探测。
+   * 探测不到时不注入 env，child 保持 authToken 路径（§3.8 生产握手不变）。
+   */
+  peerCredentialsNativePath?: string;
 }
 
 export type ControlPlaneCommandResolution =
@@ -105,6 +130,14 @@ export function resolveDefaultControlPlaneCommand(
     if (!isFile(nodeExecutable)) {
       return { ok: false, reason: `release runtime node 可执行文件不存在：${nodeExecutable}` };
     }
+    // 打包态 addon 由 scripts/build-native-peer-credentials.mjs 产出后随 release
+    // 放到 runtime/peercred.node；缺失时不注入 env，生产 authToken 路径不受影响。
+    const nativePeerCredentialsPath = resolveNativePeerCredentialsPath({
+      options,
+      platform,
+      isFile,
+      releaseRuntimeRoot: runtimeRoot,
+    });
     return {
       ok: true,
       source: "release",
@@ -112,6 +145,9 @@ export function resolveDefaultControlPlaneCommand(
         executable: nodeExecutable,
         args: [bundle, CONTROL_PLANE_SUBCOMMAND],
         cwd: release.releaseDir,
+        ...(nativePeerCredentialsPath
+          ? { peerCredentialsNativePath: nativePeerCredentialsPath }
+          : {}),
       },
     };
   }
@@ -124,6 +160,12 @@ export function resolveDefaultControlPlaneCommand(
       reason: `未解析到 headless 入口：无 release runtime，且开发树 ${searchFrom} 下找不到 ${DEV_CLI_ENTRY_PATH} 与 ${DEV_TSX_CLI_PATH}`,
     };
   }
+  const nativePeerCredentialsPath = resolveNativePeerCredentialsPath({
+    options,
+    platform,
+    isFile,
+    monorepoRoot,
+  });
   return {
     ok: true,
     source: "development",
@@ -136,8 +178,38 @@ export function resolveDefaultControlPlaneCommand(
         CONTROL_PLANE_SUBCOMMAND,
       ],
       cwd: monorepoRoot,
+      ...(nativePeerCredentialsPath
+        ? { peerCredentialsNativePath: nativePeerCredentialsPath }
+        : {}),
     },
   };
+}
+
+function resolveNativePeerCredentialsPath(input: {
+  options: ControlPlaneEntryResolutionOptions;
+  platform: NodeJS.Platform;
+  isFile: (path: string) => boolean;
+  releaseRuntimeRoot?: string;
+  monorepoRoot?: string;
+}): string | undefined {
+  const explicit = input.options.peerCredentialsNativePath?.trim();
+  if (explicit) return explicit;
+  if (input.releaseRuntimeRoot) {
+    const candidate = join(input.releaseRuntimeRoot, "peercred.node");
+    if (input.isFile(candidate)) return candidate;
+  }
+  if (input.monorepoRoot) {
+    const candidate = join(
+      input.monorepoRoot,
+      "packages",
+      "native-peer-credentials",
+      "prebuilds",
+      `${input.platform}-${process.arch}`,
+      "peercred.node",
+    );
+    if (input.isFile(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function defaultIsFile(path: string): boolean {
@@ -154,10 +226,7 @@ function findMonorepoRoot(
 ): string | undefined {
   let current = searchFrom;
   while (true) {
-    if (
-      isFile(join(current, DEV_CLI_ENTRY_PATH)) &&
-      isFile(join(current, DEV_TSX_CLI_PATH))
-    ) {
+    if (isFile(join(current, DEV_CLI_ENTRY_PATH)) && isFile(join(current, DEV_TSX_CLI_PATH))) {
       return current;
     }
     const parent = dirname(current);

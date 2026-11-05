@@ -5,29 +5,61 @@
  * （shared `resolveControlPlaneAuthTokenPath`），Core 连接首帧提交、child 校验前不接受
  * 业务帧（见 rpcServer `authToken`）。这是本节 3.8 允许的替代路径。
  *
- * 本模块保留的是**可注入的 peer 门**，只用于测试替身与未来原生能力落地；节点公共 API
- * 没有 `SO_PEERCRED` / `LOCAL_PEERPID` / `GetNamedPipeClientProcessId` 绑定：
- * - Linux：用 `/proc/<pid>/fd` 的 socket inode 反查同 UID、同 socket 的进程；这**不是**
- *   内核级 peer credential（accepted socket 与客户端 socket 通常不是同一 inode），且
- *   存在 TOCTOU。
- * - macOS / Windows：当前运行时无可用的 peer PID 来源 → `unavailable`。若把它当生产
- *   认证，所有数据面连接都会被拒，因此生产必须使用凭据握手，不得用本 resolver 冒充
- *   §3.8 已实现。
- * - 真正的内核级实现需要原生绑定（`LOCAL_PEERPID` / `GetNamedPipeClientProcessId` +
- *   SID），是未来的加固项；不得用「同 UID 即可信」或客户端自报 PID 替代。
+ * 原生绑定由 `packages/native-peer-credentials` 提供（Node-API C addon）：
+ * - Linux：`SO_PEERCRED`；macOS：`LOCAL_PEERPID` + `getpeereid()`。
+ * - Windows **不支持**：Node 不把 named-pipe 连接句柄暴露为 fd，JS 侧拿不到内核
+ *   HANDLE，客户端 SID 查询也未实现；原生不可用时 Windows 恒为 unavailable（fail-closed），
+ *   不得声称 Windows peer 认证已落地。
+ * - 原生 addon 仅在没有 `authToken` 的原生/测试模式参与认证；生产仍是凭据握手。
+ * - 原生不可用时：Linux 退回 `/proc/<pid>/fd` 的 socket inode 反查（同 UID、同 socket），
+ *   这**不是**内核级 peer credential 且存在 TOCTOU；macOS/Windows 无原生即 `unavailable`。
+ *   不得用「同 UID 即可信」或客户端自报 PID 替代。
  *
- * 可信 PID 集合来源（仅测试/未来原生模式）：Supervisor = `process.ppid`；其余候选由
- * {@link CONTROL_PLANE_TRUSTED_PIDS_ENV} 注入。生产凭据模式下该集合不参与认证，
- * 当前也没有生产代码写入该 env。
+ * 可信 PID 集合来源（原生模式）：Supervisor = `process.ppid`；其余候选由
+ * {@link CONTROL_PLANE_TRUSTED_PIDS_ENV} 注入。生产凭据模式下该集合不参与认证。
  */
+import { existsSync } from "node:fs";
 import { readdir, readlink, stat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import type { Socket } from "node:net";
+import { isAbsolute, resolve } from "node:path";
 
 export const CONTROL_PLANE_TRUSTED_PIDS_ENV = "ZCODE_CONTROL_PLANE_TRUSTED_PIDS";
+export const PEER_CREDENTIALS_NATIVE_PATH_ENV = "ZCODE_PEER_CREDENTIALS_NATIVE_PATH";
+
+/** 原生 addon 导出的 peer credential 形状；无法解析时返回 null（fail-closed）。 */
+export interface NativePeerCredentials {
+  getPeerCredentials(fd: number): { pid: number; uid?: number; gid?: number } | null;
+}
 
 export type PeerIdentity =
-  | { kind: "resolved"; pid: number; uid: number }
+  | { kind: "resolved"; pid: number; uid?: number; gid?: number }
   | { kind: "unavailable"; reason: string };
+
+/**
+ * 按路径加载原生 addon。路径不存在 → undefined（原生不可用）；文件存在但加载失败或
+ * 不导出 `getPeerCredentials` → 原样抛出，不让坏产物静默退化。
+ */
+export function loadNativePeerCredentials(options: {
+  addonPath?: string;
+  requireModule?: (path: string) => unknown;
+} = {}): NativePeerCredentials | undefined {
+  const addonPath = options.addonPath?.trim();
+  if (!addonPath || !existsSync(addonPath)) return undefined;
+  // 用 process.execPath 作为 createRequire 的基准，而不是 import.meta.url：发布态入口
+  // 可能被 esbuild 打成 CJS，`import.meta.url` 在那里是 undefined；addon 路径按绝对路径加载。
+  const load =
+    options.requireModule ??
+    ((path: string) =>
+      createRequire(process.execPath)(isAbsolute(path) ? path : resolve(path)));
+  const loaded = load(addonPath) as Partial<NativePeerCredentials> | undefined;
+  if (typeof loaded?.getPeerCredentials !== "function") {
+    throw new Error(
+      `native peer credentials addon ${addonPath} does not export getPeerCredentials`,
+    );
+  }
+  return loaded as NativePeerCredentials;
+}
 
 export interface PeerIdentityResolver {
   resolve(socket: Socket): Promise<PeerIdentity>;
@@ -35,6 +67,11 @@ export interface PeerIdentityResolver {
 
 interface SocketWithHandle {
   _handle?: { fd?: number };
+}
+
+function socketFd(socket: Socket): number | undefined {
+  const fd = (socket as unknown as SocketWithHandle)._handle?.fd;
+  return typeof fd === "number" ? fd : undefined;
 }
 
 async function resolveLinuxPeer(socket: Socket): Promise<PeerIdentity> {
@@ -104,16 +141,51 @@ async function resolveLinuxPeer(socket: Socket): Promise<PeerIdentity> {
   };
 }
 
-/** 平台默认解析器；不支持的平台必须显式返回 unavailable（调用方 fail-closed）。 */
+export interface PlatformPeerIdentityResolverOptions {
+  /** 已加载的原生 addon；给出时优先使用。 */
+  native?: NativePeerCredentials;
+  /** 需要本模块按路径加载原生 addon 时使用（daemon entry 从 env 解析后传入）。 */
+  nativeAddonPath?: string;
+}
+
+/**
+ * 平台解析器：原生 addon 可用时优先走内核级身份；不可用时 Linux 退 `/proc`，其它平台
+ * 显式 unavailable（调用方 fail-closed，绝不伪造 PID）。
+ */
 export function createPlatformPeerIdentityResolver(
   platform: NodeJS.Platform = process.platform,
+  options: PlatformPeerIdentityResolverOptions = {},
 ): PeerIdentityResolver {
+  const native =
+    options.native ??
+    (options.nativeAddonPath !== undefined
+      ? loadNativePeerCredentials({ addonPath: options.nativeAddonPath })
+      : undefined);
   return {
     async resolve(socket: Socket): Promise<PeerIdentity> {
+      if (native) {
+        const fd = socketFd(socket);
+        if (fd === undefined) {
+          return { kind: "unavailable", reason: `${platform}: accepted socket fd unavailable` };
+        }
+        const credentials = native.getPeerCredentials(fd);
+        if (!credentials || !Number.isInteger(credentials.pid) || credentials.pid <= 0) {
+          return {
+            kind: "unavailable",
+            reason: `${platform}: native peer credentials unavailable for fd ${fd}`,
+          };
+        }
+        return {
+          kind: "resolved",
+          pid: credentials.pid,
+          ...(Number.isInteger(credentials.uid) ? { uid: credentials.uid } : {}),
+          ...(Number.isInteger(credentials.gid) ? { gid: credentials.gid } : {}),
+        };
+      }
       if (platform === "linux") return await resolveLinuxPeer(socket);
       return {
         kind: "unavailable",
-        reason: `${platform}: no peer credential API exposed by Node; native binding required (LOCAL_PEERPID / GetNamedPipeClientProcessId)`,
+        reason: `${platform}: native peer credentials addon unavailable (${platform === "win32" ? "Windows named-pipe HANDLE is not exposed to Node" : "LOCAL_PEERPID"})`,
       };
     },
   };

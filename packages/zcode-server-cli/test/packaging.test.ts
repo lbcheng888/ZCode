@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
@@ -310,6 +310,41 @@ describe("stageRelease", () => {
 
     expect(staged.packagedDependencies).toEqual(["fake-dep", "fake-transitive", "node-pty"]);
     expect(staged.archivePath).toBeNull();
+  });
+
+  it("stages the native peer credentials addon into runtime and component hashes", async () => {
+    const fixture = await makeStageFixture();
+    const addonPath = join(dirname(fixture.nodeBinaryPath), "peercred.node");
+    await writeFile(addonPath, "native-peer-binary");
+    const staged = await stageRelease({
+      target: "linux-x64",
+      appVersion: "9.9.9-test",
+      archive: false,
+      ...fixture,
+      nativePeerCredentialsAddonPath: addonPath,
+    });
+
+    expect(
+      await readFile(join(staged.releaseDir, "runtime", "peercred.node"), "utf8"),
+    ).toBe("native-peer-binary");
+    const manifest = JSON.parse(
+      await readFile(join(staged.releaseDir, "manifest.json"), "utf8"),
+    ) as { components: Array<{ id: string; paths: string[] }> };
+    const runtimeComponent = manifest.components.find((component) => component.id === "server-runtime");
+    expect(runtimeComponent?.paths).toContain("runtime/peercred.node");
+  });
+
+  it("fails closed when the requested native peer credentials addon is missing", async () => {
+    const fixture = await makeStageFixture();
+    await expect(
+      stageRelease({
+        target: "linux-x64",
+        appVersion: "9.9.9-test",
+        archive: false,
+        ...fixture,
+        nativePeerCredentialsAddonPath: join(dirname(fixture.nodeBinaryPath), "missing.node"),
+      }),
+    ).rejects.toThrow(/Missing native peer credentials addon/);
   });
 
   it("keeps official darwin prebuilds including spawn-helper for darwin targets", async () => {

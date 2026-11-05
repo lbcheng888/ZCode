@@ -32,7 +32,15 @@ import {
   DaemonPlaneManager,
   resolveTasksIndexDatabasePath,
 } from "../super-agent/daemon/planeManager.js";
-import type { ControlPlanePeerGuard } from "../super-agent/daemon/peerIdentity.js";
+import {
+  CONTROL_PLANE_TRUSTED_PIDS_ENV,
+  PEER_CREDENTIALS_NATIVE_PATH_ENV,
+  createControlPlanePeerGuard,
+  createPlatformPeerIdentityResolver,
+  loadNativePeerCredentials,
+  parseTrustedPids,
+  type ControlPlanePeerGuard,
+} from "../super-agent/daemon/peerIdentity.js";
 import { createControlPlaneRpcServer } from "../super-agent/daemon/rpcServer.js";
 import { getSuperAgentDatabasePath } from "./paths.js";
 
@@ -45,6 +53,14 @@ export const CONTROL_PLANE_ENV = {
   releaseId: "ZCODE_SERVER_RELEASE_ID",
   /** 启动方投影给 child 的 M4 flag（§2.3：child 只读 mandateGate）。 */
   mandateGate: "ZCODE_CONTROL_PLANE_MANDATE_GATE",
+  /** 原生 peer credential addon 路径（launcher 注入；仅 peer 门模式使用）。 */
+  peerCredentialsNativePath: PEER_CREDENTIALS_NATIVE_PATH_ENV,
+  /**
+   * 显式 peer 门模式开关（Supervisor/launcher 投影，`1`/`true` 开启）。缺省关闭，
+   * 生产仍走 Supervisor 铸造的 0600 凭据文件；开启时必须同时提供原生 addon 路径，
+   * addon 缺失即启动 fatal。
+   */
+  peerMode: "ZCODE_CONTROL_PLANE_PEER_MODE",
 } as const;
 
 /** health 心跳周期（与 leader 心跳同量级；Supervisor 只把它当只读快照）。 */
@@ -60,6 +76,8 @@ export interface ControlPlaneEntryConfig {
   serverRoot: string;
   releaseId?: string;
   mandateGate: boolean;
+  /** §3.8 显式 peer 门模式；开启时凭据文件被禁用，认证只走内核 peer 身份。 */
+  peerMode: boolean;
 }
 
 export interface ParseControlPlaneEntryInput {
@@ -122,6 +140,7 @@ export function parseControlPlaneEntryConfig(input: ParseControlPlaneEntryInput)
   if (!serverRoot) throw new Error("control-plane server-root is required");
   const releaseId = read("releaseId")?.trim();
   const mandateGateRaw = read("mandateGate")?.trim();
+  const peerModeRaw = read("peerMode")?.trim();
   return {
     generation,
     protocolVersion,
@@ -129,6 +148,7 @@ export function parseControlPlaneEntryConfig(input: ParseControlPlaneEntryInput)
     serverRoot,
     ...(releaseId ? { releaseId } : {}),
     mandateGate: mandateGateRaw === "1" || mandateGateRaw === "true",
+    peerMode: peerModeRaw === "1" || peerModeRaw === "true",
   };
 }
 
@@ -158,10 +178,16 @@ export interface StartControlPlaneDaemonOptions {
   config: ControlPlaneEntryConfig;
   /**
    * §3.8 显式凭据握手：Supervisor 在 daemon 启动期写入的 0600 文件。生产入口必须提供；
-   * 只有测试/进程内场景才允许改用 peerGuard 注入的测试替身。
+   * 只有显式 peer 门模式（`config.peerMode`）或测试注入 peerGuard 时才允许缺席。
    */
   authTokenFile?: string;
   peerGuard?: ControlPlanePeerGuard;
+  /**
+   * 原生 peer credential addon 路径（daemon entry 从 launcher env 解析后传入）。
+   * 仅在 `config.peerMode === true` 且未注入 peerGuard 时使用；缺失即启动 fatal。
+   * 非 peer 模式一律忽略，防止出现「配置了 addon 但永不可达」的死接线。
+   */
+  nativeAddonPath?: string;
   send: (message: unknown) => void;
   subscribeShutdownCommand: (listener: () => void) => void;
   subscribeParentDisconnect: (listener: () => void) => void;
@@ -386,7 +412,40 @@ export async function startControlPlaneDaemon(
         throw new Error(`control-plane auth token file is empty (${options.authTokenFile})`);
       }
     }
-    if (!authToken && !options.peerGuard) {
+    // §3.8 两种认证模式必须由显式开关选择，不能靠「凭据文件恰好缺席」隐式进入：
+    // peerMode 由 launcher/env 投影，开启时禁止同时提供凭据文件，避免两套语义静默混用。
+    if (options.config.peerMode && options.authTokenFile) {
+      throw new Error(
+        "control-plane peer mode must not be combined with an auth token file",
+      );
+    }
+    let peerGuard = options.peerGuard;
+    if (!peerGuard && options.config.peerMode) {
+      // 显式 peer 门模式：必须拿到内核级原生 resolver，信任集合 = spawn 父进程
+      // （Supervisor）+ launcher 投影的 Core PID。addon 缺失/加载失败即启动 fatal，
+      // 绝不回退到 /proc 启发式或未认证端点。生产默认不开此模式，仍走 authToken。
+      if (!options.nativeAddonPath) {
+        throw new Error(
+          "control-plane peer mode requires a native peer credentials addon path",
+        );
+      }
+      const native = loadNativePeerCredentials({ addonPath: options.nativeAddonPath });
+      if (!native) {
+        throw new Error(
+          `control-plane native peer credentials addon unavailable (${options.nativeAddonPath})`,
+        );
+      }
+      peerGuard = createControlPlanePeerGuard({
+        trustedPids: [
+          ...new Set([
+            process.ppid,
+            ...parseTrustedPids(options.env?.[CONTROL_PLANE_TRUSTED_PIDS_ENV]),
+          ]),
+        ],
+        resolver: createPlatformPeerIdentityResolver(options.platform, { native }),
+      });
+    }
+    if (!authToken && !peerGuard) {
       throw new Error(
         "control-plane daemon requires an auth token or a peer guard; refusing to bind an unauthenticated endpoint",
       );
@@ -394,7 +453,7 @@ export async function startControlPlaneDaemon(
     rpc = await createControlPlaneRpcServer({
       endpoint,
       ...(authToken ? { authToken } : {}),
-      ...(options.peerGuard ? { peerGuard: options.peerGuard } : {}),
+      ...(peerGuard ? { peerGuard } : {}),
       handler: async (method, params, context) => {
         if (!manager) throw new Error("control-plane daemon is not initialized");
         return await manager.handle(method, params, context.channel, context.deadlineAt);
@@ -511,6 +570,8 @@ export interface RunSuperAgentControlPlaneCommandOptions {
   peerGuard?: ControlPlanePeerGuard;
   /** 测试可覆盖凭据文件路径；缺省按 serverRoot 推导。 */
   authTokenFile?: string;
+  /** 原生 peer credential addon 路径；缺省读 launcher 注入的 env。 */
+  nativeAddonPath?: string;
   now?: () => number;
   onError?: (error: unknown, context: string) => void;
 }
@@ -533,15 +594,29 @@ export async function runSuperAgentControlPlaneCommand(
     return 1;
   }
 
-  // §3.8：生产只走 Supervisor 铸造的凭据；只有显式注入 peerGuard 的测试才绕过凭据。
-  const authTokenFile = options.peerGuard
+  // §3.8：默认只走 Supervisor 铸造的凭据；显式 peer 门模式（config.peerMode）或测试
+  // 注入 peerGuard 时才绕过凭据。peer 模式下只认原生 addon 路径，不走任何隐式回退。
+  const peerMode = config.peerMode || options.peerGuard !== undefined;
+  if (peerMode && options.authTokenFile) {
+    // 两套认证语义同时给出属于配置错误，静默丢弃 token 会让「peer 模式」掩盖真实意图。
+    const message = "control-plane peer mode must not be combined with an auth token file";
+    process.send?.({ type: "fatal", message });
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+  const authTokenFile = peerMode
     ? undefined
     : (options.authTokenFile ?? resolveControlPlaneAuthTokenPath(config.serverRoot));
+  const nativeAddonPath = config.peerMode
+    ? options.nativeAddonPath?.trim() ||
+      options.env[PEER_CREDENTIALS_NATIVE_PATH_ENV]?.trim()
+    : undefined;
 
   const daemon = await startControlPlaneDaemon({
     config,
     env: options.env,
     ...(options.peerGuard ? { peerGuard: options.peerGuard } : {}),
+    ...(nativeAddonPath ? { nativeAddonPath } : {}),
     ...(authTokenFile ? { authTokenFile } : {}),
     send: (message) => {
       // 没有 IPC 的本地直跑（dev 调试）只保留 fatal/stopped 的 stderr 证据。

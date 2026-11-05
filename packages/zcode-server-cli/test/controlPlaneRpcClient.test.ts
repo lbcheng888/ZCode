@@ -329,6 +329,35 @@ describe("control plane JSONL RPC client", () => {
     }
   });
 
+  it("peer mode sends no auth first frame and never reads the token file", async () => {
+    const root = await temporaryRoot();
+    const endpoint = resolveControlPlaneEndpoint(root, "darwin");
+    // 故意不创建凭据文件：peer 模式若尝试读取会在 connect 前失败。
+    const tokenPath = join(root, "run", "super-agent.auth");
+    const frames: Array<Record<string, unknown>> = [];
+    await startJsonlServer(
+      endpoint,
+      (request, socket) => {
+        if (request.method === "lease.list") sendResponse(socket, request, { workspaces: [] });
+      },
+      undefined,
+      frames,
+    );
+    const client = createControlPlaneClient({
+      endpoint,
+      authTokenFile: tokenPath,
+      peerMode: true,
+    });
+    try {
+      await client.connect();
+      await expect(client.request("lease.list", {})).resolves.toEqual({ workspaces: [] });
+      expect(frames[0]).toMatchObject({ method: "lease.list" });
+      expect(frames.some((frame) => "auth" in frame)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("maps ok:false responses to typed RPC errors", async () => {
     const root = await temporaryRoot();
     const endpoint = resolveControlPlaneEndpoint(root, "darwin");

@@ -1,0 +1,21 @@
+{
+  "name": "@zcode/native-peer-credentials",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node-API peer credentials for super-agent control-plane RPC (macOS LOCAL_PEERPID, Linux SO_PEERCRED; Windows unsupported/fail-closed)",
+  "files": [
+    "index.mjs",
+    "src",
+    "binding.gyp",
+    "prebuilds"
+  ],
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-native-peer-credentials.mjs",
+    "test": "vitest run test"
+  }
+}

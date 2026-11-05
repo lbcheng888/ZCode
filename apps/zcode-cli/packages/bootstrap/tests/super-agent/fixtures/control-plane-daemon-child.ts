@@ -33,6 +33,7 @@ const config = {
   dataBaseDir: process.env.ZCODE_DATA_BASE_DIR ?? "",
   serverRoot: process.env.ZCODE_SERVER_ROOT ?? "",
   mandateGate: false,
+  peerMode: process.env.TEST_PEER_MODE === "1",
 };
 
 void (async () => {
