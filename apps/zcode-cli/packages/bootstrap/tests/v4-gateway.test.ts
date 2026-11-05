@@ -30,6 +30,7 @@ import type {
   CommandResult,
   ConversationTopicFrame,
   ConversationTelemetryFact,
+  HostAttachmentAdmissionFacts,
   PendingWouldAcceptCard,
   RoutedTopicWireFrame,
   V4ConversationFileChangesResult,
@@ -107,7 +108,12 @@ interface HostStub {
   sessions: Set<string>;
   executeImpl: (
     envelope: CommandEnvelope,
-    admission?: { admissionSeq: number; admittedAt: number; queueItemId: string },
+    admission?: {
+      admissionSeq: number;
+      admittedAt: number;
+      queueItemId: string;
+      attachment?: HostAttachmentAdmissionFacts;
+    },
   ) => Promise<CommandResult | undefined>;
   /** hydration 打桩：sessionId → 持久化事件序列。 */
   persistedEvents: Map<string, SessionEvent[]>;
@@ -3689,6 +3695,29 @@ describe("projection event commit waiter", () => {
 });
 
 describe("v4/command 收口", () => {
+  it("从可信 carrier 读取附件事实并随 admission 交给执行器", async () => {
+    const host = makeHost();
+    const executeImpl = vi.fn(async () => undefined);
+    host.executeImpl = executeImpl;
+    const gateway = makeGateway(host);
+    const attachment: HostAttachmentAdmissionFacts = {
+      source: "remote",
+      attachment: { attachmentId: "mobile-gateway-1", role: "read_mostly" },
+    };
+    const ack = await gateway.handleCommand(
+      commandParams({
+        __zcodeTrustedV4Connection: {
+          connectionId: "conn-mobile-gateway",
+          clientMode: "web-remote-replayable",
+          attachment,
+        },
+      }),
+    );
+    expect(ack.status).toBe("accepted");
+    expect(executeImpl.mock.calls[0]?.[1]).toMatchObject({ attachment });
+    gateway.dispose();
+  });
+
   it.each(["createSession", "createSelectionSideSession"] as const)(
     "%s ACK 采用结果会话 Memory 而非父会话",
     async (type) => {

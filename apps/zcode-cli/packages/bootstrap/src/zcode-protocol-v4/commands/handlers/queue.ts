@@ -8,6 +8,11 @@ import type {
   CommandPayloadMap,
   CommandResult,
 } from "@zcode/shared/zcode-protocol-v4";
+import {
+  attachmentFactsRevoked,
+  composeAttachmentAdmissionFacts,
+  effectiveAttachmentAdmissionRole,
+} from "@zcode/shared/zcode-protocol-v4";
 import { isHighspeedProviderId } from "@zcode/shared";
 import { createModelExecutionContext } from "../../../session-execution/index.js";
 import { mapAttachmentRefsToTurnAttachments } from "../attachment-refs.js";
@@ -24,7 +29,7 @@ import {
 import { resolveSessionFallbackModelSelection } from "../input-admission.js";
 import { preemptActiveTurnAndWait } from "./session-flow.js";
 import { V4CommandNoopError } from "../../v4-gateway.js";
-import { commandExecutionContextOf } from "../executor.js";
+import { commandAttachmentOf, commandExecutionContextOf } from "../executor.js";
 export { V4SessionIdleTimeoutError } from "./session-flow.js";
 
 /** sendQueuedNow 在投影里查不到该项原文（已被 drain/删除或 id 无效）→ 拒绝。 */
@@ -56,6 +61,20 @@ export class V4QueueItemNotEditableError extends Error {
   constructor(queueItemId: string) {
     super(`v4 queue item is not editable: ${queueItemId}`);
     this.name = "V4QueueItemNotEditableError";
+  }
+}
+
+/**
+ * P6：提升边界复核附件事实失败。fail-closed 拒绝提升，保留原排队项。
+ * - revoked：入队来源的附件已吊销/角色未知，不能起轮。
+ * - autoDrainNonHost：非 host 来源的排队项没有可信连接可复核 registry，禁止自动 drain。
+ * - nonHostKind：非 host 来源不能经 goal/compact 维护命令起轮（这些路径不承载附件事实）。
+ */
+export class V4QueueAttachmentPromotionDeniedError extends Error {
+  readonly reasonCode = "guard.queueAttachmentDenied";
+  constructor(readonly detail: "revoked" | "autoDrainNonHost" | "nonHostKind") {
+    super(`v4 queue promotion denied by attachment admission: ${detail}`);
+    this.name = "V4QueueAttachmentPromotionDeniedError";
   }
 }
 
@@ -175,6 +194,17 @@ async function sendQueuedNow(
 ): Promise<CommandResult | undefined> {
   const payload = envelope.payload as CommandPayloadMap["sendQueuedNow"];
   const record = requireRecord(host, envelope.sessionId);
+  // P6：提升边界取「入队来源事实」与「当前连接事实」中更严者。只信当前连接会把远端
+  // 排队的文本用宿主连接提升成 host 权限（跨连接提权）；只信入队快照又无法观测吊销。
+  const originAttachment = host.getQueueAttachmentFacts?.(
+    record.app.sessionId,
+    payload.queueItemId,
+  );
+  const currentAttachment = commandAttachmentOf(envelope);
+  const attachmentAdmission = composeAttachmentAdmissionFacts(
+    originAttachment,
+    currentAttachment,
+  );
   const reservationId = envelope.commandId;
   const autoDrainPromotion = commandExecutionContextOf(envelope)?.autoDrainPromotion === true;
   const foregroundPromotionLeaseId = `queue-promotion:${reservationId}`;
@@ -187,6 +217,23 @@ async function sendQueuedNow(
     const queueItem = host.getQueueItem?.(record.app.sessionId, payload.queueItemId) ?? null;
     if (queueItem === null) {
       throw new V4QueueItemTextUnavailableError(payload.queueItemId);
+    }
+    // P6：来源事实吊销（attachment 在场但 role 缺失）直接拒绝；不能降成 read_mostly。
+    if (attachmentAdmission !== undefined && attachmentFactsRevoked(attachmentAdmission)) {
+      throw new V4QueueAttachmentPromotionDeniedError("revoked");
+    }
+    const effectiveRole =
+      attachmentAdmission === undefined
+        ? undefined
+        : effectiveAttachmentAdmissionRole(attachmentAdmission);
+    // 自动 drain 没有可信连接可向宿主 registry 复核当前角色，非 host 来源一律禁止自动起轮；
+    // 只能由宿主侧手动 sendQueuedNow 显式提升（仍按来源事实收紧）。
+    if (autoDrainPromotion && effectiveRole !== undefined && effectiveRole !== "host") {
+      throw new V4QueueAttachmentPromotionDeniedError("autoDrainNonHost");
+    }
+    // goal/compact 提升路径不承载附件事实（续跑轮会按 host 语义执行工具），非 host 来源拒绝。
+    if (effectiveRole !== undefined && effectiveRole !== "host" && queueItem.kind !== "sendText") {
+      throw new V4QueueAttachmentPromotionDeniedError("nonHostKind");
     }
     const acquirePromotionLease = (mode: "after-current" | "idle-only"): void => {
       const leaseResult = record.app.runtime.acquireForegroundPromotionLease({
@@ -322,6 +369,7 @@ async function sendQueuedNow(
         toolDisallowlist: queueItem.toolDisallowlist,
         ...(turnExecution ? { modelExecution: createModelExecutionContext(turnExecution) } : {}),
         ...(attachments ? { attachments } : {}),
+        ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
       });
       // 旧 fake app/兼容命令可能不返回 admission receipt；真实 app 已在 Core admission
       // 处完成 started 校验。只有明确 queued/rejected 才能判定 promotion 未启动。

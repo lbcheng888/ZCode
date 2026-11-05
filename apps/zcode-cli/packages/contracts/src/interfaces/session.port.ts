@@ -24,6 +24,8 @@ import type { GoalCompletionVerificationOutput } from "../tools/target.js";
 import type { PermissionOptionsPolicy, PermissionUpdate } from "./permission.port.js";
 import type { ToolResultDisplayPayload } from "../tools/tool-result-metadata.js";
 import type { ModelSelection } from "../model/model.js";
+// P6：宿主附件权威事实（只含 attachmentId/role/deviceKind，不含凭据）。
+import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
 
 // -----------------------------------------------
 // Collaboration Mode and Risk Level
@@ -163,6 +165,8 @@ export interface PendingSteerInputInfo {
   targetTurnId: TurnId;
   traceId: TraceId;
   intent?: TurnInputIntentMetadata;
+  /** P6：入队时的宿主附件事实；与 queue 项一起持久化，提升边界据此复核。 */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 /** 双列表投影:next-turn 收件箱(followup 目标,消费时自成回合)。 */
@@ -294,6 +298,8 @@ export interface TurnSteerInput {
   delivery?: TurnSteerDeliveryMode;
   intent?: TurnInputIntentMetadata;
   attachments?: PendingTurnAttachment[];
+  /** P6：入队时宿主给出的附件权威事实，提升边界必须复核（不能复用当前连接角色）。 */
+  attachment?: HostAttachmentAdmissionFacts;
   pendingInputId?: string;
   traceContext?: TraceContext;
   /** 当前输入消费时不向 provider 暴露的工具名。 */
@@ -456,6 +462,8 @@ export interface PendingTurnInput {
   delivery?: TurnSteerDeliveryMode;
   intent?: TurnInputIntentMetadata;
   attachments?: PendingTurnAttachment[];
+  /** P6：入队时的宿主附件事实；in-memory pending 项与事件投影保持同一份权威。 */
+  attachment?: HostAttachmentAdmissionFacts;
   /** 当前 pending input drain 后不向 provider 暴露的工具名。 */
   toolDisallowlist?: readonly string[];
   turnId: TurnId;

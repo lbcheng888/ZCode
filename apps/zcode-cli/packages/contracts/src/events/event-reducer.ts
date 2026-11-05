@@ -353,6 +353,8 @@ export class EventReducer {
         inputPresentation: payload.inputPresentation ?? existing?.inputPresentation,
         intent: payload.intent ?? existing?.intent,
         toolDisallowlist: payload.toolDisallowlist ?? existing?.toolDisallowlist,
+        // P6：编辑重发同 id queued 事件时 payload 不带 attachment，必须保留原入队事实。
+        attachment: payload.attachment ?? existing?.attachment,
         // 双列表投影(设计 §3.5):车道随事件入投影;held 编辑以同 id 重发 queued
         // 事件不带 delivery,必须保留既有车道,否则重放会把 next-step 项错并入 next-turn。
         delivery: payload.delivery ?? existing?.delivery ?? "queue",

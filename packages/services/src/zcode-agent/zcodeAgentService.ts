@@ -348,6 +348,7 @@ import {
   workspaceConfigTopic,
   workspaceConfigTopicWireCandidateSchema,
   utf8JsonByteLength,
+  TRUSTED_V4_CONNECTION_FIELD,
   ZCODE_ATTACHMENT_FAULT_CODES,
   ZCodeAttachmentFaultError,
   type CommandAck,
@@ -6189,7 +6190,20 @@ export function createZCodeAgentService(
           };
         }
       }
-      const ack: CommandAck = await client.request(V4_METHODS.command, envelope, commandAckSchema);
+      // P6：附件权威事实必须跨过 services→CLI 的 RPC 边界。Host 把 registry 派生的
+      // attachment 快照挂在可信 carrier 上；carrier 只存在于 params 顶层，若只发
+      // `envelope` 则 CLI 的 `readHostAttachmentAdmissionFacts(rawParams)` 永远读不到，
+      // 远端命令会落成 host 语义（fail-open）。命令 payload 不承载角色，carrier 用
+      // 保留键随 wire params 一起发送；CLI 侧 zod 会剥掉未知键，不影响信封解析。
+      const trustedConnection = readTrustedZCodeAgentV4Connection(params);
+      // 调用方可能把同名 carrier 塞进 envelope 本体（renderer 的任意扩展键），而 CLI 的
+      // rawParams 就是 envelope：必须先剥离再写 Host 真值，否则伪造 carrier 能直接提权。
+      const wireEnvelope = { ...envelope } as Record<string, unknown>;
+      delete wireEnvelope[TRUSTED_V4_CONNECTION_FIELD];
+      const wireParams = trustedConnection
+        ? { ...wireEnvelope, [TRUSTED_V4_CONNECTION_FIELD]: trustedConnection }
+        : wireEnvelope;
+      const ack: CommandAck = await client.request(V4_METHODS.command, wireParams, commandAckSchema);
       // Prompt command 在 committed TurnStarted 或 committed WorkspaceHookReviewRequested
       // 任一 authority 到达后即返回；人工审核不能占用 Host RPC，因此继续使用统一默认
       // timeout/watchdog。放宽到审核领域 deadline 只会掩盖串行协议队列死锁。

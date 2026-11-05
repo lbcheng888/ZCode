@@ -19,6 +19,7 @@ import type {
   ConversationTopicFrame,
   DeliveryProfile,
   DeliveryProfileName,
+  HostAttachmentAdmissionFacts,
   PendingWouldAcceptCard,
   QueueItem,
   SubscribeAck,
@@ -290,6 +291,11 @@ export class ConversationTopicPublisher {
 
   getSnapshot(): ConversationSnapshot {
     return this.projection.getSnapshot();
+  }
+
+  /** P6：queued 项的宿主附件事实（内部提升边界读取，不进 wire snapshot）。 */
+  getQueueAttachmentFacts(pendingInputId: string): HostAttachmentAdmissionFacts | undefined {
+    return this.projection.getQueueAttachmentFacts(pendingInputId);
   }
 
   /** 初始化只变化几次，沿既有 snapshot 恢复边界发布，不引入第二份事件流。 */

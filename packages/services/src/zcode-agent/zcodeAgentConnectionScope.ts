@@ -7,10 +7,12 @@ import {
   clientHelloSchema,
   clientSupportsWorkflowRunDeltas,
   conversationTopic,
+  hostAttachmentAdmissionSchema,
   sessionsIndexTopic,
   workspaceConfigTopic,
   type ConversationTopicWireCandidate,
   type HelloMessage,
+  type HostAttachmentAdmissionFacts,
   type SessionsIndexTopicWireCandidate,
   type V4ConnectionFlowState,
   type WorkspaceConfigTopicWireCandidate,
@@ -36,6 +38,11 @@ export interface ZCodeAgentV4ConnectionContext {
    */
   workflowRunDeltas?: boolean;
   historyFirst?: boolean;
+  /**
+   * P6：宿主侧附件权威事实。只由 Host 在建连时写入，renderer/mobile 入参中的同名字段
+   * 一律被清理后覆盖。角色每次由 Host 现取（getter），因此 setRole/吊销在下一命令生效。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 const TRUSTED_CONNECTION_FIELD = "__zcodeTrustedV4Connection";
@@ -81,12 +88,21 @@ export function readTrustedZCodeAgentV4Connection(
   ) {
     return null;
   }
+  // P6：附件事实是宿主写入的连接元数据。字段在场但结构非法 = Host 接线错误，
+  // 按 remote 最受限来源 fail-closed（绝不能静默回落 host）。
+  const rawAttachment = context.attachment;
+  let attachment: HostAttachmentAdmissionFacts | undefined;
+  if (rawAttachment !== undefined) {
+    const parsed = hostAttachmentAdmissionSchema.safeParse(rawAttachment);
+    attachment = parsed.success ? parsed.data : { source: "remote" };
+  }
   return {
     connectionId: context.connectionId,
     clientMode: context.clientMode,
     // 只认 true：缺席与 false 都是「旧消费者」，键在场与否是下游读端的判据。
     ...(context.workflowRunDeltas === true ? { workflowRunDeltas: true } : {}),
     ...(context.historyFirst === true ? { historyFirst: true } : {}),
+    ...(attachment !== undefined ? { attachment } : {}),
   };
 }
 
@@ -107,6 +123,8 @@ function withTrustedConnection<T extends object>(
   // 与 clientMode 同族的可信位：UI 面的 subscribe 不能自己挑增量编码。
   delete forwarded["workflowRunDeltas"];
   delete forwarded["historyFirst"];
+  // P6：附件事实只能来自 Host 连接元数据，调用方传入的同名键一律丢弃。
+  delete forwarded["attachment"];
   forwarded[TRUSTED_CONNECTION_FIELD] = context;
   return forwarded as T;
 }
@@ -207,6 +225,22 @@ function deliveryProfileFor(clientMode: ZCodeAgentV4ClientMode): HelloMessage["d
 
 function createHello(context: ZCodeAgentV4ConnectionContext): HelloMessage {
   const continuous = context.clientMode === "desktop-continuous";
+  // P6：附件角色只读投影（权威仍在宿主 registry；客户端不得用于准入）。角色缺失
+  // （吊销）时省略该字段，而不是投影成一个可读角色。
+  const attachmentFacts = context.attachment?.attachment;
+  const attachmentProjection =
+    attachmentFacts?.role !== undefined
+      ? {
+          attachmentId: attachmentFacts.attachmentId,
+          role: attachmentFacts.role,
+          ...(attachmentFacts.deviceScopeKey !== undefined
+            ? { deviceScopeKey: attachmentFacts.deviceScopeKey }
+            : {}),
+          ...(attachmentFacts.deviceKind !== undefined
+            ? { deviceKind: attachmentFacts.deviceKind }
+            : {}),
+        }
+      : undefined;
   return {
     kind: "hello",
     protocolVersion: V4_WIRE_PROTOCOL_VERSION,
@@ -225,6 +259,9 @@ function createHello(context: ZCodeAgentV4ConnectionContext): HelloMessage {
       // （那个 capabilities 是 .strict() 的，反过来会让老 Host 握不上手）。
       workflowRunDeltas: true,
       historyFirst: true,
+      // P6：只读投影放在非 strict 的 capabilities 扩展位，旧客户端会静默丢弃，
+      // 不会因为 hello 顶层 strict 解析失败而断连。
+      ...(attachmentProjection !== undefined ? { attachment: attachmentProjection } : {}),
     },
     auth: {},
   };
@@ -276,6 +313,8 @@ export function createZCodeAgentConnectionScope(
         // 增量位属于**下游那一端**：relay 自己不消费帧，只把下游 clientHello 的声明带上去。
         ...(downstream.workflowRunDeltas === true ? { workflowRunDeltas: true } : {}),
         ...(downstream.historyFirst === true ? { historyFirst: true } : {}),
+        // 附件角色同理属于下游那一端的宿主连接记录。
+        ...(downstream.attachment !== undefined ? { attachment: downstream.attachment } : {}),
       };
     }
     return {
@@ -283,6 +322,8 @@ export function createZCodeAgentConnectionScope(
       clientMode: context.clientMode,
       ...(clientWorkflowRunDeltas ? { workflowRunDeltas: true } : {}),
       ...(clientHistoryFirst ? { historyFirst: true } : {}),
+      // Host 写入的附件事实随每条命令透传；getter 在此按当前 registry 角色求值。
+      ...(context.attachment !== undefined ? { attachment: context.attachment } : {}),
     };
   };
 

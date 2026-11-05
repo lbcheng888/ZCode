@@ -12,6 +12,11 @@ import type {
   CommandPayloadMap,
   CommandResult,
 } from "@zcode/shared/zcode-protocol-v4";
+import {
+  attachmentFactsRevoked,
+  effectiveAttachmentAdmissionRole,
+} from "@zcode/shared/zcode-protocol-v4";
+import { commandAttachmentOf } from "../executor.js";
 import type { SteerTurnOptions, SubmitPromptOptions } from "../../../app/types.js";
 import { runWithSessionResidencyFinalization } from "../../../session-execution/index.js";
 import { inputIntentMetadata } from "../input-intent.js";
@@ -32,6 +37,7 @@ export class V4GoalCompactRejectedError extends Error {
       | "compactOperationLock"
       | "restoreWarning"
       | "guard.planGoalMutuallyExclusive"
+      | "guard.attachmentGoalControlDenied"
       | "emptyObjective",
     message: string,
   ) {
@@ -238,10 +244,34 @@ async function runCompactTurnInBackground(
  *    显式提交的新目标；已有目标时继续要求 replace 会让用户以为目标已变更但数据库仍保留
  *    旧目标。这里读到已有 target 就按替换路径处理（差异只体现在广播 reason）。
  */
+/**
+ * P6：goal set/resume 会启动宿主 goal 续跑回合；续跑轮不经过连接 admission、不承载附件
+ * 事实，工具会按 host 语义执行。设备矩阵把 goal/scheduler 控制对非 host 一律 deny，
+ * 因此这里 fail-closed 拒绝（吊销也拒绝）。
+ */
+export function assertHostAttachmentGoalControl(envelope: CommandEnvelope): void {
+  const attachment = commandAttachmentOf(envelope);
+  if (attachment === undefined) return;
+  if (attachmentFactsRevoked(attachment)) {
+    throw new V4GoalCompactRejectedError(
+      "guard.attachmentGoalControlDenied",
+      "Revoked attachment cannot control goals",
+    );
+  }
+  const role = effectiveAttachmentAdmissionRole(attachment);
+  if (role !== undefined && role !== "host") {
+    throw new V4GoalCompactRejectedError(
+      "guard.attachmentGoalControlDenied",
+      `Attachment role ${role} cannot control goals`,
+    );
+  }
+}
+
 async function sendGoalCommand(
   host: V4CommandCoreHost,
   envelope: CommandEnvelope,
 ): Promise<CommandResult | undefined> {
+  assertHostAttachmentGoalControl(envelope);
   const payload = envelope.payload as CommandPayloadMap["sendGoalCommand"];
   const record = requireRecord(host, envelope.sessionId);
   const objective = payload.text.trim();
@@ -435,6 +465,7 @@ async function resumeGoal(
   host: V4CommandCoreHost,
   envelope: CommandEnvelope,
 ): Promise<CommandResult | undefined> {
+  assertHostAttachmentGoalControl(envelope);
   const record = requireRecord(host, envelope.sessionId);
   if (record.activeAbortController) {
     // 同 sendGoalCommand：resume 属旧 goalSession 的非 pause 动作，运行中拒绝。

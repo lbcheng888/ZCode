@@ -157,6 +157,15 @@ export class V4InteractionRegistry {
    * 返回是否命中——未命中（已被应答/已注销/未知 id）时命令面按幂等成功收口
    * （proto.alreadyResolved 语义，多端先到先得，晚到应答无害）。
    */
+  /**
+   * P6 确认面：应答方需要知道这是不是权限类交互。`askUserQuestion` 可在设备本地回答；
+   * 其余（permission / plan approval / MCP elicitation）属于宿主确认面，read_mostly
+   * 远端附件不得自答（spec §1.3）。未知 id 返回 undefined，调用方按更严处理。
+   */
+  interactionKind(interactionId: string): "askUserQuestion" | "other" | undefined {
+    return this.pending.get(interactionId)?.options?.kind;
+  }
+
   resolve(interactionId: string, answer: V4InteractionAnswer): boolean {
     const entry = this.pending.get(interactionId);
     if (!entry || entry.fullAccessPending) return false;

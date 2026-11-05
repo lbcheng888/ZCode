@@ -4,6 +4,7 @@ import { localTtftFactsSchema } from "../localTtft.js";
 // 阶段为类型占位（后半接通道层时启用），数据形状已按规范定稿。
 import { z } from "zod";
 import { clientKindSchema } from "../attachment-role.js";
+import { attachmentHelloProjectionSchema } from "./attachment-admission.js";
 import { APP_USAGE_RANGES, appUsageSnapshotSchema } from "../usage-stats.js";
 import { zcodeWorkspaceRefSchema } from "../zcode-protocol-legacy-types.js";
 import {
@@ -37,6 +38,12 @@ export const hostCapabilitiesSchema = z.object({
    */
   workflowRunDeltas: z.boolean().optional(),
   historyFirst: z.boolean().optional(),
+  /**
+   * P6 §1.3：附件角色只读投影。放在**非 strict** 的 capabilities 扩展位：旧客户端的
+   * hostCapabilitiesSchema 会静默丢弃未知键，不会因 hello 顶层 strict 解析失败而断连；
+   * 新客户端可读取展示。权威仍在宿主 registry，客户端不得据此做准入。
+   */
+  attachment: attachmentHelloProjectionSchema.optional(),
 });
 export type HostCapabilities = z.infer<typeof hostCapabilitiesSchema>;
 

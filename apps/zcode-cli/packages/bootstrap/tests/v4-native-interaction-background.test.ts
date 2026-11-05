@@ -26,7 +26,10 @@ import type {
 import { SessionEventType } from "@zcode/contracts";
 import { V4CommandExecutor } from "../src/zcode-protocol-v4/commands/executor.js";
 import { ConversationV4Gateway } from "../src/zcode-protocol-v4/v4-gateway.js";
-import { V4CapabilityUnsupportedError } from "../src/zcode-protocol-v4/commands/handlers/interaction-background.js";
+import {
+  V4CapabilityUnsupportedError,
+  V4InteractionAttachmentDeniedError,
+} from "../src/zcode-protocol-v4/commands/handlers/interaction-background.js";
 import { V4InteractionRegistry } from "../src/zcode-protocol-v4/interaction-registry.js";
 import { createProtocolInteractionBroker } from "../src/zcode-protocol/interaction-broker.js";
 import { PERMISSION_DENIED_BY_USER_CONTENT } from "../src/permission-options.js";
@@ -86,6 +89,71 @@ describe("v4 原生 resolveInteraction", () => {
     expect(resolve).toHaveBeenCalledWith({ optionId: "allowOnce" });
     // 投递后即摘除：同一 id 二次应答按未命中处理。
     expect(registry.has("perm_1")).toBe(false);
+  });
+
+  it("read_mostly 附件不得自答权限类交互（必须宿主确认面）", async () => {
+    const registry = new V4InteractionRegistry();
+    const resolve = vi.fn();
+    registry.register("perm_remote", resolve, { kind: "other", sessionId: "s1" });
+    const host = makeHost({ interactions: registry });
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("resolveInteraction", {
+          interactionId: "perm_remote",
+          answer: { optionId: "allowOnce" },
+        }),
+        {
+          admissionSeq: 1,
+          admittedAt: 1,
+          queueItemId: "q-1",
+          attachment: {
+            source: "remote",
+            attachment: { attachmentId: "mobile-1", role: "read_mostly" },
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(V4InteractionAttachmentDeniedError);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("read_mostly 附件仍可回答 AskUserQuestion；吊销附件一律拒绝", async () => {
+    const registry = new V4InteractionRegistry();
+    const askResolve = vi.fn();
+    registry.register("ask_remote", askResolve, { kind: "askUserQuestion", sessionId: "s1" });
+    registry.register("perm_revoked", vi.fn(), { kind: "other", sessionId: "s1" });
+    const host = makeHost({ interactions: registry });
+
+    await new V4CommandExecutor(host).execute(
+      envelope("resolveInteraction", {
+        interactionId: "ask_remote",
+        answer: { optionId: "allowOnce" },
+      }),
+      {
+        admissionSeq: 1,
+        admittedAt: 1,
+        queueItemId: "q-1",
+        attachment: {
+          source: "remote",
+          attachment: { attachmentId: "mobile-1", role: "read_mostly" },
+        },
+      },
+    );
+    expect(askResolve).toHaveBeenCalled();
+
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("resolveInteraction", {
+          interactionId: "perm_revoked",
+          answer: { optionId: "deny" },
+        }),
+        {
+          admissionSeq: 1,
+          admittedAt: 1,
+          queueItemId: "q-1",
+          attachment: { source: "remote", attachment: { attachmentId: "mobile-1" } },
+        },
+      ),
+    ).rejects.toBeInstanceOf(V4InteractionAttachmentDeniedError);
   });
 
   it("晚到幂等：未命中（已应答/未知 id）不抛错，静默成功收口", async () => {

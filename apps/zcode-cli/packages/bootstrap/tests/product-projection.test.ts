@@ -5542,6 +5542,57 @@ describe("goal 状态机", () => {
     });
   });
 
+  it("P6：入队附件事实随 TurnSteerQueued 持久化，drain 后从提升侧表清除", () => {
+    const attachment = {
+      source: "remote" as const,
+      attachment: { attachmentId: "mobile-q", role: "read_mostly" as const },
+    };
+    const queued = (log: EventLog) => {
+      log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+      log.push(SessionEventType.TurnSteerQueued, {
+        pendingInputId: "queue-attachment",
+        input: "remote queued input",
+        inputPreview: "remote queued input",
+        inputSize: 20,
+        targetTurnId: "turn-1",
+        queueLength: 1,
+        delivery: "queue",
+        attachment,
+      });
+    };
+    const before = new EventLog();
+    queued(before);
+    expect(runAll(before.events).projection.getQueueAttachmentFacts("queue-attachment")).toEqual(
+      attachment,
+    );
+
+    // 编辑同 id 重发事件不带 attachment 时，原入队事实必须保留（编辑不是重新 admission）。
+    const edited = new EventLog();
+    queued(edited);
+    edited.push(SessionEventType.TurnSteerQueued, {
+      pendingInputId: "queue-attachment",
+      input: "edited text",
+      inputPreview: "edited text",
+      inputSize: 11,
+      targetTurnId: "turn-1",
+      queueLength: 1,
+    });
+    expect(runAll(edited.events).projection.getQueueAttachmentFacts("queue-attachment")).toEqual(
+      attachment,
+    );
+
+    const drained = new EventLog();
+    queued(drained);
+    drained.push(SessionEventType.TurnSteerDrained, {
+      pendingInputIds: ["queue-attachment"],
+      injectedMessageIds: ["msg-1"],
+      targetTurnId: "turn-1",
+    });
+    expect(
+      runAll(drained.events).projection.getQueueAttachmentFacts("queue-attachment"),
+    ).toBeUndefined();
+  });
+
   it("M07j：sendQueuedNow 抢占 goal verifier 时不暂停 future queue", () => {
     const log = new EventLog();
     log.push(SessionEventType.SessionCreated, {

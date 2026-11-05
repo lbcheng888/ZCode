@@ -47,6 +47,7 @@ import type {
   CommandsQueryResult,
   ConversationInputIntent,
   ConversationTopicFrame,
+  HostAttachmentAdmissionFacts,
   PendingWouldAcceptCard,
   QueueItem,
   RoutedTopicFrame,
@@ -90,6 +91,7 @@ import {
   commandsQueryParamsSchema,
   commandsQueryResultSchema,
   parseCommandEnvelope,
+  readHostAttachmentAdmissionFacts,
   measureTopicNotificationEnvelopeBytes,
   parseConversationTopic,
   parseSessionsIndexTopic,
@@ -2580,6 +2582,9 @@ export class ConversationV4Gateway {
    * settle 仍然固化结果供 duplicate 重放。
    */
   async handleCommand(rawParams: unknown): Promise<CommandAck> {
+    // P6：Host 写入的附件权威事实随每条命令到达。读在 inbox 之前，因为它只属于本次
+    // admission；排队输入提升时由新的命令重新携带，天然满足「每次 admission 复核」。
+    const attachmentAdmission = readHostAttachmentAdmissionFacts(rawParams);
     let ttftCapacityRejected = false;
     const ttftCommand =
       typeof rawParams === "object" && rawParams !== null && "ttft" in rawParams
@@ -2659,6 +2664,7 @@ export class ConversationV4Gateway {
         admissionSeq: outcome.admissionSeq,
         admittedAt: outcome.admittedAt,
         queueItemId: outcome.queueItemId,
+        ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
       };
       const admissionPublisher =
         outcome.envelope.type === "createSession"
@@ -2777,6 +2783,14 @@ export class ConversationV4Gateway {
     const snapshot = this.publishers.get(sessionId)?.getSnapshot();
     const item = snapshot?.queue.items.find((candidate) => candidate.queueItemId === queueItemId);
     return item ?? null;
+  }
+
+  /** P6：排队项入队时的宿主附件事实（提升边界复核用，不进 wire 投影）。 */
+  getQueueAttachmentFacts(
+    sessionId: string,
+    queueItemId: string,
+  ): HostAttachmentAdmissionFacts | undefined {
+    return this.publishers.get(sessionId)?.getQueueAttachmentFacts(queueItemId);
   }
 
   hasQueueItemKind(sessionId: string, kind: QueueItem["kind"]): boolean {

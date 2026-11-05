@@ -113,6 +113,7 @@ import type {
   ToolCallRow,
   TurnHeaderRow,
   TurnWorkSegment,
+  HostAttachmentAdmissionFacts,
   UserInputQuestionPayload,
   UserInputRow,
   WorkflowRunProgressEnvelope,
@@ -494,6 +495,12 @@ export class ProductProjection {
   // 投递语义侧表：TurnSteerQueued 时按事件 payload（或 followupMode 兜底）记录，
   // drain 时决定切轮 vs 内联；账本落地后以账本为准。
   private deliveryByPendingInputId = new Map<string, "guide" | "queue">();
+  /**
+   * P6：入队时宿主附件事实侧表。同一事实已随 TurnSteerQueued 事件持久化（rehydrate
+   * 会重新填充），这里只为提升边界提供权威读取；不写进 wire queueItem，避免旧客户端的
+   * strict schema 因未知键解析失败。drain/discard/delete 时同步清除。
+   */
+  private queueAttachmentByPendingInputId = new Map<string, HostAttachmentAdmissionFacts>();
   private currentTurnId: string | null = null;
   // 当前 runtime turn 是否由 model-only TurnStarted 建立（manual /compact、
   // goal continuation 等维护 turn）。SessionStart 摘要的 pending 归位不得以维护
@@ -527,6 +534,11 @@ export class ProductProjection {
 
   getSnapshot(): ConversationSnapshot {
     return this.snapshot;
+  }
+
+  /** P6：该排队项在入队时由宿主给出的附件事实（提升边界复核用；缺失 = 无 attachment 语义）。 */
+  getQueueAttachmentFacts(pendingInputId: string): HostAttachmentAdmissionFacts | undefined {
+    return this.queueAttachmentByPendingInputId.get(pendingInputId);
   }
 
   /** 生命周期状态独立于 run phase；更新必须推进水位，避免旧 base 漏掉门禁。 */
@@ -1230,6 +1242,7 @@ export class ProductProjection {
       ]),
     );
     clone.deliveryByPendingInputId = new Map(this.deliveryByPendingInputId);
+    clone.queueAttachmentByPendingInputId = new Map(this.queueAttachmentByPendingInputId);
     clone.currentTurnId = this.currentTurnId;
     clone.currentTurnStartedModelOnly = this.currentTurnStartedModelOnly;
     clone.contextWindowState = { ...this.contextWindowState };
@@ -1275,6 +1288,7 @@ export class ProductProjection {
     this.highspeedModelDurationByTurnId = candidate.highspeedModelDurationByTurnId;
     this.highspeedToolIntervalsByTurnId = candidate.highspeedToolIntervalsByTurnId;
     this.deliveryByPendingInputId = candidate.deliveryByPendingInputId;
+    this.queueAttachmentByPendingInputId = candidate.queueAttachmentByPendingInputId;
     this.currentTurnId = candidate.currentTurnId;
     this.currentTurnStartedModelOnly = candidate.currentTurnStartedModelOnly;
     this.contextWindowState = candidate.contextWindowState;
@@ -3757,6 +3771,11 @@ export class ProductProjection {
 
   private onTurnSteerQueued(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as TurnSteerQueuedPayload;
+    // P6：附件事实按 pendingInputId 记入侧表；编辑重发同 id 时 payload 可能不带事实，
+    // reducer/侧表都必须保留原值（编辑不是重新 admission）。
+    if (payload.attachment !== undefined) {
+      this.queueAttachmentByPendingInputId.set(payload.pendingInputId, payload.attachment);
+    }
     const queueItemId = payload.intent?.queueItemId ?? payload.pendingInputId;
     const existingIndex = this.snapshot.queue.items.findIndex(
       (item) => item.queueItemId === queueItemId,
@@ -4821,7 +4840,10 @@ export class ProductProjection {
 
   private removeQueueItems(ids: readonly string[]): ConversationDelta[] {
     const idSet = new Set(ids);
-    for (const id of ids) this.deliveryByPendingInputId.delete(id);
+    for (const id of ids) {
+      this.deliveryByPendingInputId.delete(id);
+      this.queueAttachmentByPendingInputId.delete(id);
+    }
     const items = this.snapshot.queue.items
       .filter((item) => !idSet.has(item.queueItemId))
       .map((item, index) =>

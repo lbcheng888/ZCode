@@ -54,6 +54,7 @@ function resolveAdmissionPermissionFacts(
   options: PromptAdmissionOptions | undefined,
 ): TurnPermissionFacts | undefined {
   const mandateFacts = options?.mandateFacts;
+  const attachment = options?.attachment;
   if (mandateFacts) {
     if (
       typeof mandateFacts.triggerId !== "string" ||
@@ -75,12 +76,15 @@ function resolveAdmissionPermissionFacts(
         ...(mandateFacts.mandateId ? { mandateId: mandateFacts.mandateId } : {}),
         expiresAt: mandateFacts.expiresAt ?? null,
       },
+      ...(attachment ? { attachment } : {}),
     };
   }
   if (options?.triggerSource === "trigger") {
     throw new Error(EVENT_ADMISSION_MISSING_MANDATE_FACTS);
   }
-  return undefined;
+  // P6：user 回合也可携带宿主附件事实（远端 attachment 的普通输入）。无 mandate 时
+  // 只绑 attachment，不伪造 event-origin；本地无 attachment 时保持 undefined 字节兼容。
+  return attachment ? { attachment } : undefined;
 }
 
 /**
@@ -98,6 +102,12 @@ export async function admitPrompt(
   // 退回 user-origin）。真正绑定发生在起轮分支：只有真实回合才有不可复用的 turnId；
   // 排队/steer 不绑，避免把结论挂到客户端可复用的 queryId 上。
   const admissionPermission = resolveAdmissionPermissionFacts(options);
+  // P6：附件事实在场时禁止 steer/inject/guide。这些车道把输入内联进**正在运行**的宿主
+  // 回合，不建立新回合、不绑定附件事实，远端 read_mostly 就能借 guide 把指令送进 host
+  // 回合执行（设备矩阵失效）。此时一律降级为 queue，提升边界再按入队时的来源事实复核。
+  const attachment = options?.attachment;
+  const hasAttachment = attachment !== undefined;
+  const enqueueAttachment = attachment ? { attachment } : {};
   if (options?.requireQueue === true) {
     // Bug 根因：Highspeed 临时 provider 只能在独立 turn 的提升边界安装。如果仅依据
     // Bootstrap 的 busy 快照决定是否排队，状态在跨层 await 期间转为空闲会误用普通模型启动。
@@ -113,6 +123,7 @@ export async function admitPrompt(
       queryId: options.queryId,
       toolDisallowlist: options.toolDisallowlist,
       traceContext: options.traceContext,
+      ...enqueueAttachment,
     });
   }
   const promotionLeaseOnly =
@@ -127,7 +138,9 @@ export async function admitPrompt(
   // inject 目标(设计 §3.5):绝不唤醒——不 start turn、不占跑道。idle 时只落
   // next-step 收件箱,由下一个真正起跑的回合在其首个 step 边界消费。
   // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
-  const wantsInject = options?.queueDelivery === "inject";
+  // 附件事实在场时 inject 也不得内联：inject 会在宿主回合的下一个 step 消费，
+  // 同样不经过附件 admission。降级为 queue，等提升边界按来源事实起新回合。
+  const wantsInject = options?.queueDelivery === "inject" && !hasAttachment;
   if (!busy && wantsInject) {
     return await this.enqueueDeferredInput({
       attachments,
@@ -139,6 +152,21 @@ export async function admitPrompt(
       queryId: options?.queryId,
       toolDisallowlist: options?.toolDisallowlist,
       traceContext: options?.traceContext,
+    });
+  }
+  if (!busy && hasAttachment && options?.queueDelivery === "inject") {
+    // 原车道是"绝不唤醒"的 inject；改用 queue 既不内联进宿主回合，也不擅自起轮。
+    return await this.enqueueDeferredInput({
+      attachments,
+      commandKind: options?.commandKind,
+      delivery: "queue",
+      input,
+      inputId: options?.inputId,
+      intent: admissionIntent(options?.intent, "queue"),
+      queryId: options?.queryId,
+      toolDisallowlist: options?.toolDisallowlist,
+      traceContext: options?.traceContext,
+      ...enqueueAttachment,
     });
   }
   if (busy) {
@@ -153,6 +181,7 @@ export async function admitPrompt(
     const activeTurn = this.activeTurn;
     const canSteer =
       attachments === undefined &&
+      !hasAttachment &&
       activeTurn?.steerable === true &&
       (wantsInject ||
         options?.queueDelivery === "guide" ||
@@ -182,7 +211,7 @@ export async function admitPrompt(
 
     const delivery = wantsInject
       ? ("inject" as const)
-      : options?.queueDelivery === "guide" && attachments === undefined
+      : options?.queueDelivery === "guide" && attachments === undefined && !hasAttachment
         ? ("guide" as const)
         : ("queue" as const);
     return await this.enqueueDeferredInput({
@@ -197,6 +226,7 @@ export async function admitPrompt(
       queryId: options?.queryId,
       toolDisallowlist: options?.toolDisallowlist,
       traceContext: options?.traceContext,
+      ...enqueueAttachment,
     });
   }
 

@@ -12,8 +12,9 @@ import {
 import { inputIntentMetadataFromCanonical } from "../input-intent.js";
 import { preflightPromptTurn, startPreflightedPromptTurn } from "../prompt-turn.js";
 import { createModelExecutionContext } from "../../../session-execution/index.js";
+import { commandAttachmentOf } from "../executor.js";
 import type { V4CommandCoreHost, V4SessionRecordView, V4TurnExecution } from "../types.js";
-import { applyGoalCommand } from "./goal-compact.js";
+import { applyGoalCommand, assertHostAttachmentGoalControl } from "./goal-compact.js";
 import type { ConversationEditTarget } from "../../product-projection.js";
 
 const EDIT_QUEUE_FALLBACK_REASON = "edit.admissionRace";
@@ -135,6 +136,8 @@ export async function startCanonicalIntent(
 ): Promise<void> {
   const requireQueue = options?.requireQueue === true;
   const retainQueuedTurnExecution = host.retainQueuedTurnExecution;
+  // P6：重发输入同样按本次命令的连接复核附件角色（编辑/重试不能洗掉远端限制）。
+  const attachmentAdmission = commandAttachmentOf(envelope);
   // 入队路径的凭据只能驻留内存；宿主不提供暂存能力时必须整体退回会话模型，不留半程加速。
   const canRetainQueuedHighspeed =
     requireQueue && highspeed !== undefined && retainQueuedTurnExecution !== undefined;
@@ -157,6 +160,7 @@ export async function startCanonicalIntent(
     }
   }
   if (editTarget.intent.kind === "sendGoalCommand") {
+    assertHostAttachmentGoalControl(envelope);
     await applyGoalCommand(host, record, {
       inputId: envelope.commandId,
       objective: text,
@@ -175,6 +179,7 @@ export async function startCanonicalIntent(
           ? { modelExecution: createModelExecutionContext(highspeed.execution) }
           : {}),
       ...(attachments ? { attachments } : {}),
+      ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
     });
     if (requireQueue && started.admission.kind !== "queued") {
       throw new Error("edited input was not admitted to the queue");

@@ -28,6 +28,7 @@ export * from "./workflow-artifacts.js";
 export * from "./workflow-workspace.js";
 export * from "./attachment-ref.js";
 export * from "./attachment-faults.js";
+export * from "./attachment-admission.js";
 export * from "./delta.js";
 export * from "./coalesce.js";
 export * from "./profiles.js";

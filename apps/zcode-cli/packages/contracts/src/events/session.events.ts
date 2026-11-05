@@ -28,6 +28,7 @@ import type {
   TurnSteerRejectReason,
   TurnSteerSource,
 } from "../interfaces/session.port.js";
+import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
 import type {
   EventId,
   InteractionRequestOrigin,
@@ -548,6 +549,11 @@ export interface TurnSteerQueuedPayload {
   targetTurnId: TurnId;
   queueLength: number;
   intent?: TurnInputIntentMetadata;
+  /**
+   * P6：入队时宿主给出的附件权威事实（随事件持久化）。提升边界必须用它复核角色，
+   * 不能拿提升者当前连接的角色顶替（否则远端排队的命令会被宿主提升成 host 权限）。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 export interface TurnSteerDeliveryChangedPayload {

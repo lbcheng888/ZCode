@@ -7,6 +7,7 @@ import { SessionEventType, type SessionEvent } from "@zcode/contracts";
 import type { CommandEnvelope, QueueItem } from "@zcode/shared/zcode-protocol-v4";
 import { V4CommandExecutor } from "../src/zcode-protocol-v4/commands/executor.js";
 import {
+  V4QueueAttachmentPromotionDeniedError,
   V4QueueItemTextUnavailableError,
   V4QueueItemReservedError,
   V4QueueItemNotEditableError,
@@ -412,6 +413,65 @@ describe("v4 普通 queue 自动消费 goal gate", () => {
 });
 
 describe("v4 原生 sendQueuedNow", () => {
+  it("提升边界取入队来源与当前连接中更严的附件事实（远端排队不被宿主提权）", async () => {
+    const app = makeApp();
+    const record = makeRecord({ app });
+    const remoteFacts = {
+      source: "remote" as const,
+      attachment: { attachmentId: "mobile-q", role: "read_mostly" as const },
+    };
+    const hostFacts = {
+      source: "local-host" as const,
+      attachment: { attachmentId: "desktop-host", role: "host" as const },
+    };
+    const host = makeHost(record, {
+      getQueueItem: vi.fn().mockReturnValue(queueItem()),
+      getQueueAttachmentFacts: vi.fn().mockReturnValue(remoteFacts),
+    });
+    await new V4CommandExecutor(host).execute(
+      envelope("sendQueuedNow", { queueItemId: "q-1" }),
+      { admissionSeq: 7, admittedAt: 1, queueItemId: "q-1", attachment: hostFacts },
+    );
+    // 宿主连接提升远端排队的指令时，回合必须绑定来源的 read_mostly，而不是 host。
+    expect(app.sendInput.mock.calls[0]?.[1]).toMatchObject({ attachment: remoteFacts });
+  });
+
+  it("非 host 来源的排队项禁止 auto-drain 自动起轮", async () => {
+    const app = makeApp();
+    const record = makeRecord({ app });
+    const host = makeHost(record, {
+      getQueueItem: vi.fn().mockReturnValue(queueItem()),
+      getQueueAttachmentFacts: vi.fn().mockReturnValue({
+        source: "remote" as const,
+        attachment: { attachmentId: "mobile-q", role: "read_mostly" as const },
+      }),
+    });
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("sendQueuedNow", { queueItemId: "q-1" }),
+        undefined,
+        { autoDrainPromotion: true },
+      ),
+    ).rejects.toBeInstanceOf(V4QueueAttachmentPromotionDeniedError);
+    expect(app.sendInput).not.toHaveBeenCalled();
+  });
+
+  it("入队来源附件已吊销（role 缺失）时拒绝提升", async () => {
+    const app = makeApp();
+    const record = makeRecord({ app });
+    const host = makeHost(record, {
+      getQueueItem: vi.fn().mockReturnValue(queueItem()),
+      getQueueAttachmentFacts: vi.fn().mockReturnValue({
+        source: "remote" as const,
+        attachment: { attachmentId: "mobile-q" },
+      }),
+    });
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("sendQueuedNow", { queueItemId: "q-1" })),
+    ).rejects.toBeInstanceOf(V4QueueAttachmentPromotionDeniedError);
+    expect(app.sendInput).not.toHaveBeenCalled();
+  });
+
   it("Highspeed queue 在卡仍有效时于提升边界应用单轮执行材料", async () => {
     const app = makeApp();
     const record = makeRecord({ app });

@@ -1,6 +1,9 @@
 import type { ToolSearchExecutionContext, ToolSearchMode } from "@zcode/contracts";
 import type { RequestVerificationReason } from "@zcode/shared";
-import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
+import type {
+  HostAttachmentAdmissionFacts,
+  PromptTriggerSource,
+} from "@zcode/shared/zcode-protocol-v4";
 import type { PermissionMandateFacts } from "../permission/service.js";
 import type { GetAgentDefinitions, LoadAgentDefinitions } from "../subagent/definitions.js";
 import type { RuntimeInputPresentation, TurnExecutionModelFallbackReason } from "@zcode/contracts";
@@ -573,6 +576,12 @@ export type PromptAdmissionOptions = ExecuteTurnOptions & {
    * admission 响亮失败、绝不静默按 user 回合放行）；user 回合必须缺席。
    */
   mandateFacts?: PromptAdmissionMandateFacts;
+  /**
+   * P6：宿主 attachment 事实（权威角色来自 Desktop attachment registry）。
+   * 缺失 = 本地/CLI 无 attachment 语义；远端来源由 `source` 显式给出，不靠字段在场推断。
+   * 该事实在本次 admission 边界绑定到回合，后续工具判定复用同一结论。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 };
 
 export type PromptAdmissionReceipt =

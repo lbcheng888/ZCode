@@ -16,8 +16,28 @@ import {
   WORKFLOW_RUN_RESUME_REJECTED_FAULT_PREFIX,
   WORKFLOW_RUN_SETTINGS_REJECTED_FAULT_PREFIX,
 } from "@zcode/shared/zcode-protocol-v4";
+import {
+  attachmentFactsRevoked,
+  effectiveAttachmentAdmissionRole,
+} from "@zcode/shared/zcode-protocol-v4";
+import { commandAttachmentOf } from "../executor.js";
 import { requireRecord } from "../record-access.js";
 import type { V4CommandCoreHost } from "../types.js";
+
+/**
+ * P6 D2/D5：read_mostly 远端附件不得自答权限类交互。写操作的 ask 必须回到宿主确认面；
+ * 吊销（attachment 在场但 role 缺失）的连接连 AskUserQuestion 也不得应答。
+ */
+export class V4InteractionAttachmentDeniedError extends Error {
+  readonly reasonCode = "guard.interactionAttachmentDenied";
+  constructor(
+    readonly interactionId: string,
+    readonly detail: "revoked" | "permissionFromReadMostly",
+  ) {
+    super(`attachment role cannot resolve interaction ${interactionId}: ${detail}`);
+    this.name = "V4InteractionAttachmentDeniedError";
+  }
+}
 
 /**
  * 能力不支持错误：会话 runtime 未实现可选能力时抛出（对照旧 server-operations.ts
@@ -47,6 +67,27 @@ async function resolveInteraction(
   envelope: CommandEnvelope,
 ): Promise<CommandResult | undefined> {
   const payload = envelope.payload as CommandPayloadMap["resolveInteraction"];
+  // P6：确认面按本命令的附件事实复核。read_mostly 只能回答 AskUserQuestion；权限类
+  // （permission/plan approval/MCP elicitation，registry kind="other"）必须由宿主确认面
+  // 作答，否则远端可对自己触发的 PermissionRequested 直接 allow（D2 被绕过）。
+  const attachment = commandAttachmentOf(envelope);
+  if (attachment !== undefined && attachmentFactsRevoked(attachment)) {
+    throw new V4InteractionAttachmentDeniedError(payload.interactionId, "revoked");
+  }
+  const role = effectiveAttachmentAdmissionRole(attachment);
+  if (role === "read_mostly") {
+    const interactionKind = host.interactions?.interactionKind?.(payload.interactionId);
+    // 未知 id/未知 kind 按权限类处理：不能因为登记表查不到就放行远端自答。
+    if (
+      payload.answer.optionId === PERMISSION_FULL_ACCESS_OPTION_ID ||
+      interactionKind !== "askUserQuestion"
+    ) {
+      throw new V4InteractionAttachmentDeniedError(
+        payload.interactionId,
+        "permissionFromReadMostly",
+      );
+    }
+  }
   const delivered =
     payload.answer.optionId === PERMISSION_FULL_ACCESS_OPTION_ID
       ? ((await host.interactions?.resolveFullAccess(payload.interactionId, envelope.sessionId!)) ??

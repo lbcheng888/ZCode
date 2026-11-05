@@ -18,7 +18,14 @@ import {
   type ToolPermissionSpec,
 } from "@zcode/contracts";
 import { getCurrentTraceContext } from "@zcode/contracts";
-import { OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME } from "@zcode/shared";
+import {
+  OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME,
+  composeAttachmentPermissionDecision,
+  evaluateAttachmentToolRestriction,
+  parseAttachmentRole,
+} from "@zcode/shared";
+import type { HostAttachmentAdmissionFacts } from "@zcode/shared/zcode-protocol-v4";
+import { readEscapesWorkspace } from "./attachment-workspace.js";
 import { resolvePlanModeTransitionPermission } from "./plan-mode-policy.js";
 import { webFetchRuleSubjects, wildcardToRegExp } from "./rule-matching.js";
 import { isPreapprovedWorkflowDraftWrite } from "./workflow-draft-path.js";
@@ -66,8 +73,13 @@ export type PermissionOrigin = "user" | "event";
  * 同一份结论（turn 内不重新解析；下一 admission 边界自然拿到新结论）。
  */
 export interface TurnPermissionFacts {
-  mandate: PermissionMandateFacts;
-  origin: PermissionOrigin;
+  mandate?: PermissionMandateFacts;
+  origin?: PermissionOrigin;
+  /**
+   * P6：本回合 prompt admission 绑定的宿主附件事实。缺失 = 无 attachment 语义（本地
+   * CLI/TUI 保持 host 现状）。来源与角色由 Host 显式给出，不从命令内容推断。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 export interface PermissionContext {
@@ -86,6 +98,12 @@ export interface PermissionContext {
   mandate?: PermissionMandateFacts;
   /** M4 例外②：缺省 user（既有调用方零行为变化）；事件驱动回合必须显式 event。 */
   origin?: PermissionOrigin;
+  /**
+   * P6：宿主 attachment 上下文（权威角色来自 Desktop attachment registry）。缺失 =
+   * 本地/CLI 无 attachment 语义，保持 host 现状；远端来源但元数据缺失时由准入层按
+   * read_mostly fail-closed，不能只看字段是否存在。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 export interface PermissionToolCapability {
@@ -194,16 +212,43 @@ export class PermissionService {
     projectRules?: PermissionRuleset | null,
     rulePolicy?: ToolPermissionRulePolicy,
   ): PermissionDecisionResult {
-    // M4：显式字段优先（hook recheck 等已拿到同一份事实的调用方）；缺省取 admission
-    // 绑定的回合事实。flag 关时从未绑定，两个字段保持缺席 = 字节兼容。
+    const permissionContext = this.resolveEffectivePermissionContext(context);
+    const decision = this.checkPermissionPipeline(
+      permissionContext,
+      toolCapability,
+      projectRules,
+      rulePolicy,
+    );
+    // P6 §1.3：附件矩阵必须在既有有序管线的**最终结论**之后叠加，且只收紧
+    // （deny > ask > allow）。这里包住整个管线而非逐个 return 改，保证 mandate/plan/
+    // alwaysAsk/yolo allow 等所有早返回分支都经过同一层，不会出现「allow 早返回漏叠加」。
+    return this.applyAttachmentRestriction(permissionContext, toolCapability, decision);
+  }
+
+  /** M4：显式字段优先；缺省取 admission 绑定的回合事实（未绑定 = 保持现状）。 */
+  private resolveEffectivePermissionContext(context: PermissionContext): PermissionContext {
     const bound = this.currentTurnPermissionFacts();
-    const permissionContext: PermissionContext = bound
-      ? {
-          ...context,
-          ...(context.mandate === undefined ? { mandate: bound.mandate } : {}),
-          ...(context.origin === undefined ? { origin: bound.origin } : {}),
-        }
-      : context;
+    if (!bound) return context;
+    return {
+      ...context,
+      ...(context.mandate === undefined && bound.mandate !== undefined
+        ? { mandate: bound.mandate }
+        : {}),
+      ...(context.origin === undefined && bound.origin !== undefined
+        ? { origin: bound.origin }
+        : {}),
+      ...(context.attachment === undefined && bound.attachment !== undefined
+        ? { attachment: bound.attachment }
+        : {}),
+    };
+  }
+
+  private checkPermissionPipeline(
+    permissionContext: PermissionContext,
+    toolCapability?: PermissionToolCapability,
+    projectRules?: PermissionRuleset | null,
+    rulePolicy?: ToolPermissionRulePolicy,
+  ): PermissionDecisionResult {
     const capability = this.resolveCapability(permissionContext, toolCapability);
     // M4：mandate 同步 fail-closed 门——插入点必须在 plan-transition 解析之前（管线最前端）。
     // 只认 admission 注入的 typed 结论，本层不查库（同步管线无法查库）。
@@ -386,6 +431,76 @@ export class PermissionService {
     }
 
     return this.checkBuildMode(permissionContext, capability);
+  }
+
+  /**
+   * P6 设备权限矩阵叠加（spec §1.3 / §1.4）。
+   *
+   * - 无 attachment 事实 = 本地/CLI 无 attachment 语义，返回既有结论（字节兼容）。
+   * - 事实存在但 attachment 元数据缺失且来源 remote = read_mostly fail-closed（D4）。
+   * - attachment 在场但角色缺失 = 已吊销/查不到 ⇒ 直接 deny（D5），绝不降成 read_mostly。
+   * - host 角色 = 沿用既有管线，不产生额外限制。
+   *
+   * D3 缺口（如实登记）：read_mostly/interactive 的写操作 ask 目前仍走既有 permission
+   * broker；宿主确认面路由尚未实现，因此末尾不伪造 host-confirmation 字段。
+   */
+  private applyAttachmentRestriction(
+    context: PermissionContext,
+    toolCapability: PermissionToolCapability | undefined,
+    decision: PermissionDecisionResult,
+  ): PermissionDecisionResult {
+    const facts = context.attachment;
+    if (!facts) return decision;
+    const capability = this.resolveCapability(context, toolCapability);
+    let role: ReturnType<typeof parseAttachmentRole> | undefined;
+    if (facts.attachment) {
+      if (facts.attachment.role === undefined) {
+        if (decision.decision === "deny") return decision;
+        return {
+          ...decision,
+          decision: "deny",
+          allowed: false,
+          escalated: false,
+          ruleId: "attachment.revoked",
+          reason: `Attachment ${facts.attachment.attachmentId} role is revoked or unresolved; fail-closed`,
+        };
+      }
+      role = parseAttachmentRole(facts.attachment.role);
+    } else if (facts.source === "remote") {
+      // 远端连接但 attachment 元数据缺失：按最受限角色处理，不落到 host。
+      role = "read_mostly";
+    } else {
+      return decision;
+    }
+    if (role === "host") return decision;
+
+    const restriction = evaluateAttachmentToolRestriction({
+      role,
+      toolName: context.toolName,
+      permissionGroup: capability.permissionCapabilityGroup,
+    });
+    // spec §1.3：纯读只允许在 workspace 内。矩阵的 `read: allow` 没有路径边界，必须在这里
+    // 加上；否则被攻破的远端可读宿主任意文件（~/.ssh、env）。workspace 外 fail-closed。
+    if (restriction?.toolClass === "read" && readEscapesWorkspace(context)) {
+      return {
+        ...decision,
+        decision: "deny",
+        allowed: false,
+        escalated: false,
+        ruleId: "attachment.workspaceEscape",
+        reason: `Attachment role ${role} may read only within the workspace; path escapes working directory`,
+      };
+    }
+    const composed = composeAttachmentPermissionDecision(decision.decision, restriction);
+    if (composed === decision.decision || !restriction) return decision;
+    return {
+      ...decision,
+      decision: composed,
+      allowed: composed === "allow",
+      escalated: composed === "ask",
+      ruleId: restriction.ruleId,
+      reason: restriction.reason,
+    };
   }
 
   /**

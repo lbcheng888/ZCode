@@ -262,6 +262,29 @@ describe("v4 原生 compact", () => {
 });
 
 describe("v4 原生 sendGoalCommand", () => {
+  it("P6：非 host 附件拒绝 goal set/resume（续跑轮不承载连接附件事实）", async () => {
+    const app = makeApp();
+    const record = makeRecord({ app });
+    const host = makeHost(record);
+    const admission = {
+      admissionSeq: 1,
+      admittedAt: 1,
+      queueItemId: "q-attach",
+      attachment: {
+        source: "remote" as const,
+        attachment: { attachmentId: "mobile-1", role: "read_mostly" as const },
+      },
+    };
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("sendGoalCommand", { text: "do x" }), admission),
+    ).rejects.toMatchObject({ reasonCode: "guard.attachmentGoalControlDenied" });
+    await expect(
+      new V4CommandExecutor(host).execute(envelope("resumeGoal", {}), admission),
+    ).rejects.toMatchObject({ reasonCode: "guard.attachmentGoalControlDenied" });
+    expect(app.setTarget).not.toHaveBeenCalled();
+    expect(app.updateTargetStatus).not.toHaveBeenCalled();
+  });
+
   it("set 正路径：setTarget(active) + 后台续跑 + 锁生命周期", async () => {
     let finishContinuation!: () => void;
     const continuationGate = new Promise<null>((resolve) => {

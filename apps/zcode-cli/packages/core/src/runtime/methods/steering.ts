@@ -125,6 +125,7 @@ export async function steerTurn(
   // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
   const delivery = request.delivery;
   const toolDisallowlist = request.toolDisallowlist;
+  const attachment = request.attachment;
   const queuePosition = activeTurn.pendingInputs.length;
   const intent = request.intent
     ? {
@@ -150,6 +151,7 @@ export async function steerTurn(
     ...(delivery ? { delivery } : {}),
     ...(intent ? { intent } : {}),
     ...(request.attachments ? { attachments: request.attachments } : {}),
+    ...(attachment ? { attachment } : {}),
     ...(toolDisallowlist ? { toolDisallowlist } : {}),
     turnId: activeTurn.turnId,
   };
@@ -184,6 +186,7 @@ export async function steerTurn(
       ...(request.inputPresentation ? { inputPresentation: request.inputPresentation } : {}),
       ...(delivery ? { delivery } : {}),
       ...(intent ? { intent } : {}),
+      ...(attachment ? { attachment } : {}),
       ...(toolDisallowlist ? { toolDisallowlist } : {}),
       targetTurnId: activeTurn.turnId,
       queueLength,
@@ -258,6 +261,8 @@ export async function enqueueDeferredInput(
   // inject 车道恒可用(设计 M11 Remove 清单已删 inject→queue 降级残留)。
   const delivery = request.delivery ?? "queue";
   const toolDisallowlist = request.toolDisallowlist;
+  // P6：附件事实随 queued 事件持久化；提升边界按来源事实复核角色。
+  const attachment = request.attachment;
   const pendingInputId =
     request.pendingInputId ??
     request.intent?.queueItemId ??
@@ -287,6 +292,7 @@ export async function enqueueDeferredInput(
       ...(request.inputPresentation ? { inputPresentation: request.inputPresentation } : {}),
       delivery,
       ...(intent ? { intent } : {}),
+      ...(attachment ? { attachment } : {}),
       ...(toolDisallowlist ? { toolDisallowlist } : {}),
       targetTurnId,
       queueLength,

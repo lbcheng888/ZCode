@@ -119,7 +119,12 @@ import {
   type ZCodeAutomationRun,
   type ZCodeAutomationRunOutcome,
   type ModelSelection,
+  type AttachmentRole,
 } from "@zcode/shared";
+import {
+  createHostAttachmentAdmissionContext,
+  type HostAttachmentProjectionSource,
+} from "./hostAttachmentAdmission.js";
 import {
   parseHostIncomingMessageEvent,
   rejectUnavailableAttachedServicePort,
@@ -2572,6 +2577,7 @@ function exposeServicesOnMessagePort(
   clientMode: ZCodeAgentV4ClientMode = "desktop-continuous",
   attachmentScope: WindowHostAttachmentScope = { kind: "local" },
   capabilities?: HostRemoteConnectionCapabilities,
+  hostAttachment?: HostAttachmentProjectionSource,
 ): ExposedServicePortHandle {
   const wrappedPort = wrapElectronPort(port);
   const protocol = new MessagePortProtocol(wrappedPort);
@@ -2583,7 +2589,14 @@ function exposeServicesOnMessagePort(
   const loggedServer = new LoggingChannelServer(rawServer, logRpc);
   const server = new NetworkTelemetryChannelServer(loggedServer);
   const agentService = services.getOptional(IZCodeAgentService);
-  const connectionContext = { connectionId: `host-rpc-${randomUUID()}`, clientMode };
+  // P6：附件事实写进连接元数据（services facade 会把它写进可信连接 carrier 并清理
+  // 调用方伪造的同名键）。无 attachment 的连接保持现状字节兼容。
+  const hostAttachmentFacts = createHostAttachmentAdmissionContext(hostAttachment, clientMode);
+  const connectionContext = {
+    connectionId: `host-rpc-${randomUUID()}`,
+    clientMode,
+    ...(hostAttachmentFacts ? { attachment: hostAttachmentFacts } : {}),
+  };
   const connectionScope = agentService
     ? createZCodeAgentConnectionScope(agentService, connectionContext)
     : undefined;
@@ -2703,6 +2716,24 @@ function exposeServicesOnMessagePort(
   return handle;
 }
 
+/**
+ * P6 能力票据在生产组合根**默认关闭**。真实落地还缺两块（spec §2.5）：
+ * 1. 连接级受控 secret 投递通道（secret 只能到执行端内存，不能进 RPC/协议帧/日志）；
+ * 2. CLI/执行端 admission 对 capabilityTicketId 的消费、兑换与宿主确认路由。
+ * 在这两块接线前显式开启必须 fail-closed 拒绝启动，不能静默跑成“看起来已启用但没生效”。
+ */
+const p6CapabilityTicketsEnabled = process.env["ZCODE_P6_CAPABILITY_TICKETS"] === "1";
+if (p6CapabilityTicketsEnabled) {
+  throw new Error(
+    "P6 capability tickets enabled but the controlled secret delivery channel and admission consumer are not wired; refusing to start (fail-closed)",
+  );
+}
+
+// registry 自引用不能在初始化器里直接取；建连后经这个 resolver 读取当前权威角色。
+let resolveAttachmentRegistryRole:
+  | ((attachmentId: string) => AttachmentRole | undefined)
+  | undefined;
+
 const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
   ServiceCollection,
   Electron.MessagePortMain,
@@ -2740,9 +2771,30 @@ const windowHostAttachmentRegistry = createWindowHostAttachmentRegistry<
       capabilities: windowRemoteConnectionRegistry.resolveScopedCapabilities(scope),
     };
   },
-  expose: ({ port, services, clientMode, scope, capabilities }) =>
-    exposeServicesOnMessagePort(port, services, false, clientMode, scope, capabilities),
+  expose: (params) => {
+    const { port, services, clientMode, scope, capabilities, attachmentId, deviceScopeKey } = params;
+    return exposeServicesOnMessagePort(
+      port,
+      services,
+      false,
+      clientMode,
+      scope,
+      capabilities,
+      attachmentId
+        ? {
+            attachmentId,
+            ...(deviceScopeKey !== undefined ? { deviceScopeKey } : {}),
+            // 每次现取 registry 角色（含 disposed 检查）：角色变更/吊销在下一命令生效，
+            // 不用 attach 时快照（spec §1.4）。
+            resolveRole: () => resolveAttachmentRegistryRole?.(params.attachmentId),
+          }
+        : undefined,
+    );
+  },
 });
+
+resolveAttachmentRegistryRole = (attachmentId) =>
+  windowHostAttachmentRegistry.getRole(attachmentId);
 
 function logWindowHostTopology(reason: string): void {
   const stats = windowRemoteConnectionRegistry.getStats();

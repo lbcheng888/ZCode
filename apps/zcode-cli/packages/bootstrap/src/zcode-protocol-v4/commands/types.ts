@@ -18,6 +18,7 @@ import type {
   CommandEnvelope,
   CommandPayloadMap,
   ConversationInputIntent,
+  HostAttachmentAdmissionFacts,
   QueueItem,
   StableForkTarget,
   StableForkTargetResolution,
@@ -97,6 +98,14 @@ export interface V4CommandCoreHost {
   // ── v4 原生能力（非过渡钩子）────────────────────────────────
   /** queue 项完整权威 intent；sendQueuedNow 禁止退化成 text-only 重发。 */
   getQueueItem?(sessionId: string, queueItemId: string): V4QueueItemCommand | null;
+  /**
+   * P6：该排队项入队时宿主给出的附件权威事实。提升边界必须按「来源事实与当前连接
+   * 事实中更严者」复核；来源事实缺失按无 attachment 语义（本地入队），来源已吊销则拒绝。
+   */
+  getQueueAttachmentFacts?(
+    sessionId: string,
+    queueItemId: string,
+  ): HostAttachmentAdmissionFacts | undefined;
   /** typed maintenance 命令去重；判据来自同一 projection queue，不维护旁路集合。 */
   hasQueueItemKind?(sessionId: string, kind: QueueItem["kind"]): boolean;
   /** guide eligibility：只阻止已有 ordinary queue；已有 guide 仍允许继续按 FIFO admission。 */

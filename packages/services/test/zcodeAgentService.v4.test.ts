@@ -1274,6 +1274,63 @@ describe("zcodeAgentService v4 conversation channel", () => {
     }
   });
 
+  it("remote attachment 事实随可信 carrier 跨过 services→CLI wire 边界", async () => {
+    const { service, workspacePath, logPath } = setupService();
+    const attachment = {
+      source: "remote" as const,
+      attachment: {
+        attachmentId: "mobile-wire-1",
+        role: "read_mostly" as const,
+        deviceKind: "web" as const,
+      },
+    };
+    const scope = createZCodeAgentConnectionScope(service, {
+      connectionId: "group-mobile-wire",
+      clientMode: "web-remote-replayable",
+      attachment,
+    });
+    try {
+      await scope.service.helloConversationV4();
+      await scope.service.initializeConversationV4({
+        kind: "clientHello",
+        protocolVersion: 3,
+        clientId: "wire-client",
+        appVersion: "4.0.0",
+      });
+      await scope.service.sendConversationCommandV4({
+        workspacePath,
+        envelope: {
+          commandId: "wire-command",
+          clientId: "wire-client",
+          sessionId: "wire-session",
+          type: "sendText",
+          issuedAt: 1,
+          payload: { text: "remote bash", inputOrigin: "desktop" },
+          // 伪造：调用方把 carrier 塞进信封本体，必须被 Host 真值覆盖。
+          __zcodeTrustedV4Connection: {
+            connectionId: "forged",
+            clientMode: "desktop-continuous",
+            attachment: { source: "local-host", attachment: { attachmentId: "x", role: "host" } },
+          },
+        } as never,
+      });
+      // 逐字断言 CLI 实际收到的 wire params：carrier 必须带 Host 派生的 role。
+      // 只发 envelope 会让 CLI 的 readHostAttachmentAdmissionFacts 永远读到 undefined。
+      expect(
+        readRequests(logPath).find((entry) => entry.method === "v4/command")?.params,
+      ).toMatchObject({
+        __zcodeTrustedV4Connection: {
+          connectionId: "group-mobile-wire",
+          clientMode: "web-remote-replayable",
+          attachment,
+        },
+      });
+    } finally {
+      await scope.dispose();
+      await service.disposeAllAndWait();
+    }
+  });
+
   it("does not carry runtime preferences on v4 create, send, or subscribe", async () => {
     const { service, workspacePath, logPath } = setupService();
     try {
@@ -1853,6 +1910,12 @@ describe("zcodeAgentService v4 conversation channel", () => {
           workspaceMode: "rewind",
         },
         issuedAt: 1700000000000,
+        // P6：远端连接的可信 carrier 必须随 wire params 到 CLI；无 registry 记录时
+        // CLI 按 read_mostly fail-closed（D4），不能落回 host。
+        __zcodeTrustedV4Connection: {
+          connectionId: "mobile-rewind",
+          clientMode: "web-remote-replayable",
+        },
       });
       // 同一 workspaceIdentity 的 subscribe + command 复用同一 host child，
       // 手机端不单独创建 Agent runtime，relay/main 也不持有 rewind 状态。

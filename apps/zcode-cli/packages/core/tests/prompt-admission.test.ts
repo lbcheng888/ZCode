@@ -325,6 +325,50 @@ describe("AgentRuntime prompt admission", () => {
   });
 });
 
+it("附件事实在场时 guide 不得内联进宿主回合，降级为 queue 并携带来源事实", async () => {
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const requests: unknown[] = [];
+  const runtime = createRuntime("attachment-guide-not-steered", async (request) => {
+    requests.push(request);
+    if (requests.length === 1) {
+      entered.resolve();
+      await release.promise;
+    }
+    return {
+      finishReason: "stop",
+      text: "working on A",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    };
+  });
+  const first = await runtime.admitPrompt("task A");
+  await entered.promise;
+  const remoteAttachment = {
+    source: "remote" as const,
+    attachment: { attachmentId: "mobile-guide-1", role: "read_mostly" as const },
+  };
+  const guide = await runtime.admitPrompt("remote guide", undefined, {
+    queueDelivery: "guide",
+    attachment: remoteAttachment,
+  } as never);
+  expect(guide.kind).toBe("queued");
+  release.resolve();
+  if (first.kind !== "started") throw new Error("first not started");
+  await first.completion;
+  // 若被 steer 内联，宿主回合会继续下一次 model 调用；降级为 queue 后没有第二次调用，
+  // 远端文本也不会出现在运行中的宿主回合消息里。
+  expect(requests).toHaveLength(1);
+  const projection = await (
+    runtime as unknown as {
+      rebuildProjection(): Promise<{
+        pendingSteerInputs: Array<{ input: string; delivery?: string; attachment?: unknown }>;
+      }>;
+    }
+  ).rebuildProjection();
+  const item = projection.pendingSteerInputs.find((input) => input.input === "remote guide");
+  expect(item).toMatchObject({ delivery: "queue", attachment: remoteAttachment });
+});
+
 it("renders a human guide through real admission and keeps the ongoing turn", async () => {
   const entered = deferred<void>();
   const release = deferred<void>();

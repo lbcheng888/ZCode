@@ -3,7 +3,11 @@
 // 逐命令原生化的推进方式：handlers/ 注册表列出已原生的命令；binder 只在 supports
 // 命中时走本执行器，未命中回落旧桥（binder 侧回落，随每条命令原生化逐条消失）。
 // 完成定义：原生 handler + L2 闭环 + L3 e2e，且写路径不经旧协议代码。
-import type { CommandEnvelope, CommandResult } from "@zcode/shared/zcode-protocol-v4";
+import type {
+  CommandEnvelope,
+  CommandResult,
+  HostAttachmentAdmissionFacts,
+} from "@zcode/shared/zcode-protocol-v4";
 import { NATIVE_HANDLERS } from "./handlers/index.js";
 import type { V4CommandCoreHost } from "./types.js";
 
@@ -65,6 +69,11 @@ export interface V4CommandAdmission {
   admissionSeq: number;
   admittedAt: number;
   queueItemId: string;
+  /**
+   * P6：本次命令所属连接的宿主附件事实（gateway 从 Host 覆写字段读取）。
+   * 缺失 = 无 attachment 语义，保持 host 现状。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 export interface V4CommandExecutionContext {
@@ -91,4 +100,11 @@ export function commandExecutionContextOf(
   envelope: CommandEnvelope,
 ): V4CommandExecutionContext | undefined {
   return (envelope as V4AdmittedCommandEnvelope).__v4ExecutionContext;
+}
+
+/** 本次命令的宿主附件事实；所有会启动 turn 的 handler 必须原样传给 prompt admission。 */
+export function commandAttachmentOf(
+  envelope: CommandEnvelope,
+): HostAttachmentAdmissionFacts | undefined {
+  return commandAdmissionOf(envelope).attachment;
 }

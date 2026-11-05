@@ -7,7 +7,10 @@ import { OFF_PEAK_EXECUTION_TOOL_DENYLIST } from "@zcode/shared";
 import { type TurnBackgroundAttribution, type TurnInputIntentMetadata } from "@zcode/contracts";
 import type { TurnAttachment } from "@zcode/core";
 import type { ZCodeAutomationBotDeliveryTarget } from "@zcode/shared";
-import type { PromptTriggerSource } from "@zcode/shared/zcode-protocol-v4";
+import type {
+  HostAttachmentAdmissionFacts,
+  PromptTriggerSource,
+} from "@zcode/shared/zcode-protocol-v4";
 import type { SendInputOptions, SendInputResult } from "../../app/types.js";
 import { runWithSessionResidencyFinalization } from "../../session-execution/index.js";
 import type { V4CommandCoreHost, V4SessionRecordView } from "./types.js";
@@ -33,6 +36,11 @@ export interface StartPromptTurnParamsBase {
   botDeliveryTarget?: ZCodeAutomationBotDeliveryTarget;
   /** M4：wire envelope.triggerId 推导的输入来源，随 sendInput 进入 Core admission。 */
   triggerSource?: PromptTriggerSource;
+  /**
+   * P6：本次命令所属连接的宿主附件事实。必须来自 `commandAttachmentOf(envelope)`，
+   * 不能复用排队 payload 里登记过的旧角色（提升边界要按当前连接重新复核）。
+   */
+  attachment?: HostAttachmentAdmissionFacts;
 }
 
 export type StartPromptTurnParams = StartPromptTurnParamsBase & TurnBackgroundAttribution;
@@ -227,6 +235,9 @@ async function startPromptTurnAfterPreflight(
         ...(params.requireQueue ? { requireQueue: true } : {}),
         ...(params.requireIdle ? { requireIdle: true } : {}),
         ...(params.triggerSource ? { triggerSource: params.triggerSource } : {}),
+        // P6：附件事实随 sendInput options 进入 Core admission；SendInputOptions 目前
+        // 没有类型化字段，但 spread 会原样透传到 `runtime.admitPrompt`。
+        ...(params.attachment ? { attachment: params.attachment } : {}),
         queryId: params.inputId as SendInputOptions["queryId"],
       },
     );

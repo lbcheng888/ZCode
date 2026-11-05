@@ -138,6 +138,8 @@ attachment?: {
 
 依赖：D3/D4 需要 §2 票据 broker 的吊销面；D1/D2 可独立先行（即使没有票据，也能 deny 工具）。
 
+**2026-11-05 落地状态（如实登记，不夸大）**：D1/D2 已接线——Host 把 registry 派生的附件事实写入可信 v4 连接元数据（`ZCodeAgentV4ConnectionContext.attachment`），hello 带只读投影，CLI prompt admission 绑定事实，`PermissionService` 在既有管线结论之后只收紧地叠加矩阵；unknown/缺失角色 fail-closed，吊销（role 缺失）直接 deny。仍缺：D3 宿主确认面路由（read_mostly 写操作的 ask 仍走既有 permission broker）、D4 票据联动、D5 真机矩阵；**已知 fail-open 缺口**：CLI 内部 auto-drain 提升与 goal/scheduler 续跑 turn 不携带可信连接附件事实（这些不是客户端命令 admission），上线前必须把附件绑定随队列项保存并在提升边界复核，或对非 host 来源 fail-closed 禁止这类自动 turn。远端 zcode-server 直连（无 Desktop registry）由可信 `clientMode=web-remote-replayable` 兜底为 read_mostly；`desktop-continuous` 且无附件记录时仍按 host 现状。
+
 ## 2. 能力票据（capability tickets）
 
 ### 2.1 威胁模型
