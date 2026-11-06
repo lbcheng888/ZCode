@@ -1,0 +1,33 @@
+{
+  "schema": "csg.spec.v2.index",
+  "builder": "manual_dag_caller_fixture",
+  "builder_version": "csg.spec.v2/dag-caller-fixture",
+  "scope": "dag_caller_non_canonical",
+  "tasks": [
+    {
+      "task": "c01_dag3_par",
+      "task_index": 201,
+      "spec": "data/spec_v2_dag3/tasks/c01_dag3_par.spec.json",
+      "sha256": "6a210eb3120a6bafec58c3b15a2a99ee8347ddeaa620ee25195c0a88360ab7ab",
+      "requirements": 1,
+      "modules": 5,
+      "assertions": 2,
+      "links": 7,
+      "template_assisted": false,
+      "missing": []
+    }
+  ],
+  "counts": {
+    "tasks": 1,
+    "requirements": 1,
+    "modules": 5,
+    "assertions": 2,
+    "links": 7
+  },
+  "pins": {
+    "oracle_manifest_sha": "f94225fd53dc9c163509ec7c5c4eacb570f702d39fb88acf0d7f3af850a75566",
+    "props_sha256": "bc6bb7c24d12b839eeb1fd817be82aa4369938a30f38a914347e434e6c634a2d",
+    "spec_defs_sha256": "cdd4e9d2a58cdeaa7802fd865165b2e19902d8907add002919fac3c7781f6726",
+    "source_sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3"
+  }
+}

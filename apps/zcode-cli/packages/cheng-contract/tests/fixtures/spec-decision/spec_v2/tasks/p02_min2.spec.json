@@ -1,0 +1,187 @@
+{
+ "schema": "csg.spec.v2",
+ "task": "p02_min2",
+ "task_index": 1,
+ "title": "min2 两数最小值",
+ "source": {
+  "path": "data/spec_v2/source/csg_ast_m5.4b5ea404e.cheng",
+  "lines": "2130-2130",
+  "sha256": "5851b447b5ed0cdf925793c7f991ce1fdc5af814e177a6b19011657031f7df83",
+  "quote": "let f = fnDeclare(\"min2\", TyInt)"
+ },
+ "flags": {
+  "template_assisted": false,
+  "missing": []
+ },
+ "requirements": [
+  {
+   "id": "req.p02_min2.min2",
+   "task": "p02_min2",
+   "fn": "min2",
+   "kind": "behavior",
+   "text": "min2(a, b) 返回两数中的较小者（min）。题面例：(3,7)→3、(10,2)→2、(5,5)→5。",
+   "signature": "min2(a: int32, b: int32) -> int32",
+   "domain": "int32 × int32",
+   "source": {
+    "path": "data/spec_v2/source/csg_ast_m5.4b5ea404e.cheng",
+    "lines": "2130-2130",
+    "sha256": "5851b447b5ed0cdf925793c7f991ce1fdc5af814e177a6b19011657031f7df83",
+    "quote": "let f = fnDeclare(\"min2\", TyInt)"
+   },
+   "status": "covered",
+   "notes": ""
+  }
+ ],
+ "modules": [
+  {
+   "id": "mod.p02_min2.min2",
+   "task": "p02_min2",
+   "name": "min2",
+   "role": "entry",
+   "fn": "min2",
+   "interface": {
+    "signature": "min2(a: int32, b: int32) -> int32",
+    "params": [
+     {
+      "name": "a",
+      "type": "int32"
+     },
+     {
+      "name": "b",
+      "type": "int32"
+     }
+    ],
+    "returns": "int32"
+   },
+   "impl": {
+    "kind": "settle_prog",
+    "path": "data/oracle_settle/prog/oracle/p02_min2.cheng",
+    "sha256": "5e944d5f0a731c5b2300426efb0c8e6a9356b33a5de21a99342cd80ac9238149",
+    "symbol": "min2",
+    "result_path": "data/oracle_settle/eval_v2_oracle.tsv",
+    "result_sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e",
+    "result_verdict": "semantic_pass"
+   },
+   "status": "evidenced"
+  }
+ ],
+ "assertions": [
+  {
+   "id": "ast.p02_min2.min2.eval",
+   "task": "p02_min2",
+   "fn": "min2",
+   "kind": "eval",
+   "requirement_ids": [
+    "req.p02_min2.min2"
+   ],
+   "module_ids": [
+    "mod.p02_min2.min2"
+   ],
+   "oracle": {
+    "path": "data/oracle_v2/cases/p02_min2.eval.cases",
+    "sha256": "d222e5c2d2ff875591c87b85e2c3e473761b51d11930e555c6760c77f3ccbc41",
+    "tier": "eval",
+    "rows": 12
+   },
+   "evidence": {
+    "kind": "settle_eval",
+    "program": {
+     "path": "data/oracle_settle/prog/oracle/p02_min2.cheng",
+     "sha256": "5e944d5f0a731c5b2300426efb0c8e6a9356b33a5de21a99342cd80ac9238149"
+    },
+    "receipt": {
+     "path": "data/oracle_settle/eval_v2_oracle.detail.tsv",
+     "sha256": "477b36f91e96639712de81a30bf905a438c91a0a714afb432f9e6e3012cc9077"
+    },
+    "table": {
+     "path": "data/oracle_settle/eval_v2_oracle.tsv",
+     "sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e"
+    },
+    "rows_total": 12,
+    "rows_passed": 12,
+    "checks_total": 12,
+    "checks_passed": 12,
+    "extra_checks": 0,
+    "verdict": "pass"
+   },
+   "status": "pass",
+   "flags": [],
+   "notes": ""
+  },
+  {
+   "id": "ast.p02_min2.min2.property",
+   "task": "p02_min2",
+   "fn": "min2",
+   "kind": "property",
+   "requirement_ids": [
+    "req.p02_min2.min2"
+   ],
+   "module_ids": [
+    "mod.p02_min2.min2"
+   ],
+   "oracle": {
+    "path": "data/oracle_v2/props/p02_min2.props",
+    "sha256": "e7bf7e01a5933c606c532d2e5dedf71402a2504f065778d7a89606d2ddd6242a",
+    "tier": "property",
+    "rows": 42
+   },
+   "evidence": {
+    "kind": "settle_eval",
+    "program": {
+     "path": "data/oracle_settle/prog/oracle/p02_min2.cheng",
+     "sha256": "5e944d5f0a731c5b2300426efb0c8e6a9356b33a5de21a99342cd80ac9238149"
+    },
+    "receipt": {
+     "path": "data/oracle_settle/eval_v2_oracle.detail.tsv",
+     "sha256": "477b36f91e96639712de81a30bf905a438c91a0a714afb432f9e6e3012cc9077"
+    },
+    "table": {
+     "path": "data/oracle_settle/eval_v2_oracle.tsv",
+     "sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e"
+    },
+    "rows_total": 42,
+    "rows_passed": 42,
+    "checks_total": 42,
+    "checks_passed": 42,
+    "extra_checks": 0,
+    "verdict": "pass"
+   },
+   "status": "pass",
+   "flags": [],
+   "notes": ""
+  }
+ ],
+ "links": [
+  {
+   "id": "lnk.p02_min2.001",
+   "from": "req.p02_min2.min2",
+   "to": "mod.p02_min2.min2",
+   "type": "implemented_by"
+  },
+  {
+   "id": "lnk.p02_min2.002",
+   "from": "req.p02_min2.min2",
+   "to": "ast.p02_min2.min2.eval",
+   "type": "verified_by"
+  },
+  {
+   "id": "lnk.p02_min2.003",
+   "from": "req.p02_min2.min2",
+   "to": "ast.p02_min2.min2.property",
+   "type": "verified_by"
+  },
+  {
+   "id": "lnk.p02_min2.004",
+   "from": "ast.p02_min2.min2.eval",
+   "to": "mod.p02_min2.min2",
+   "type": "exercises"
+  },
+  {
+   "id": "lnk.p02_min2.005",
+   "from": "ast.p02_min2.min2.property",
+   "to": "mod.p02_min2.min2",
+   "type": "exercises"
+  }
+ ],
+ "notes": "证据取自 oracle_settle：搜索外独立 runner 的 per-row 回执（detail TSV）；未持久化 eval 编译产物。"
+}

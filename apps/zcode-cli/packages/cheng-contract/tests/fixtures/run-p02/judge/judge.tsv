@@ -1,0 +1,2 @@
+task	n_eval	eval_ok	n_props	props_ok	n_settle_diag	settle_ok_diag	status	rc	program_sha256	note	compile_rc	run_rc
+p02_min2	12	12	42	42	20	20	semantic_pass	0	947631e19019189db5f3e24ff2c1378d6cb44d56ea7eac881f3907659311fa95	-	0	0

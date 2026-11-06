@@ -1,0 +1,2 @@
+task	n_eval	eval_ok	n_props	props_ok	n_settle_diag	settle_ok_diag	status	rc	program_sha256	note	compile_rc	run_rc
+p16_glue_len	12	12	7	7	20	20	semantic_pass	0	cf90df8574e45325405dbe96fc7a8de400b9e595a5951ba5a868580df90937aa	-	0	0

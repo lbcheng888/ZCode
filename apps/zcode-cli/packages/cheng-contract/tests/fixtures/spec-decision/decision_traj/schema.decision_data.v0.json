@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "csg.decision_data/v0",
+  "title": "Cheng CSG decision trace 训练记录 (decision-level)",
+  "type": "object",
+  "required": ["schema", "hole_id", "hole_type", "context_cid", "candidates", "chosen", "score", "settle_rc", "judge_verdict", "spec_cid", "provenance"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "csg.decision_data/v0"},
+    "hole_id": {"type": "string", "pattern": "^[A-Za-z0-9_.\\-]+(/[^/@]+)+@\\d+$|^prec/\\d{3}$"},
+    "hole_type": {
+      "oneOf": [
+        {"$ref": "#/definitions/hole_type_m5"},
+        {"$ref": "#/definitions/hole_type_precedent"}
+      ]
+    },
+    "context_cid": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidates": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["id", "legal"], "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "legal": {"type": "boolean"},
+          "score": {"type": ["integer", "null"]},
+          "hit": {"type": "integer"}
+        }
+      }
+    },
+    "chosen": {"type": "string", "minLength": 1},
+    "score": {"type": ["integer", "null"], "description": "M5 决策帧=选中候选调度分; 判例对=null (无搜索调度)"},
+    "settle_rc": {"type": "object"},
+    "judge_verdict": {
+      "enum": ["not_judged", "semantic_pass", "semantic_fail",
+               "dual_pass", "car_pass", "cold_pass", "suite_green",
+               "registered_realizer_gap", "verdict_confirmed"]
+    },
+    "spec_cid": {"type": "string", "minLength": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["source", "sha256_or_commit"],
+      "properties": {
+        "source": {"type": "string"},
+        "sha256_or_commit": {"type": "string"},
+        "source_trace": {"type": "string"},
+        "source_sha256": {"type": "string"},
+        "trace_tag": {"type": "string"},
+        "path_sha256": {"type": "string"},
+        "split": {"enum": ["train", "train_negative", "determinism_only", "heldout_eval"]},
+        "parent_step": {"type": ["integer", "null"]},
+        "created_holes": {"type": "array", "items": {"type": "string"}},
+        "call_edges": {"type": "array"},
+        "invalidated": {"type": "boolean"},
+        "invalidated_by": {"type": "array"},
+        "prune": {"type": "object"},
+        "pruned": {"type": "array"},
+        "closure": {"type": "object"},
+        "commit": {"type": "string"}
+      }
+    }
+  },
+  "definitions": {
+    "hole_type_m5": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["stmt", "expr"]},
+        "ty": {"type": "integer"},
+        "gate": {"type": "integer"},
+        "marker": {"type": "integer"},
+        "depth": {"type": "integer"},
+        "slot": {"type": "integer"},
+        "block": {"type": "integer"},
+        "fn": {"type": "integer"},
+        "round": {"type": "integer"},
+        "role": {"type": "integer"},
+        "loop_role": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "hole_type_precedent": {
+      "type": "object",
+      "required": ["kind", "family", "verdict_class"],
+      "properties": {
+        "kind": {"const": "source_migration"},
+        "family": {"type": "string", "pattern": "^F-"},
+        "verdict_class": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "_precedent_extension": {
+    "note": "判例对额外携带 hole_ctx (hole 上下文=错误判词+站点+代码形); context_cid=sha256(canon(hole_ctx))",
+    "fields": {"hole_ctx": {"required_keys": ["family", "verdict_class", "error_verdict", "site", "code_shape"]}}
+  }
+}

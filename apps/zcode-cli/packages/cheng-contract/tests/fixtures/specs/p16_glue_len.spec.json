@@ -1,0 +1,187 @@
+{
+ "schema": "csg.spec.v2",
+ "task": "p16_glue_len",
+ "task_index": 15,
+ "title": "glue_len 拼接长度（str）",
+ "source": {
+  "path": "data/spec_v2/source/csg_ast_m5.4b5ea404e.cheng",
+  "lines": "2410-2410",
+  "sha256": "5851b447b5ed0cdf925793c7f991ce1fdc5af814e177a6b19011657031f7df83",
+  "quote": "# p16 str 拼接+长度: len(a + b)"
+ },
+ "flags": {
+  "template_assisted": false,
+  "missing": []
+ },
+ "requirements": [
+  {
+   "id": "req.p16_glue_len.glue_len",
+   "task": "p16_glue_len",
+   "fn": "glue_len",
+   "kind": "behavior",
+   "text": "glue_len(a, b) 返回两个字符串拼接后的长度 len(a + b)，即 len(a)+len(b)。题面例：(\"ab\",\"cd\")→4、(\"\",\"x\")→1、(\"abc\",\"\")→3。",
+   "signature": "glue_len(a: str, b: str) -> int32",
+   "domain": "a,b 为 str",
+   "source": {
+    "path": "data/spec_v2/source/csg_ast_m5.4b5ea404e.cheng",
+    "lines": "2410-2410",
+    "sha256": "5851b447b5ed0cdf925793c7f991ce1fdc5af814e177a6b19011657031f7df83",
+    "quote": "# p16 str 拼接+长度: len(a + b)"
+   },
+   "status": "covered",
+   "notes": ""
+  }
+ ],
+ "modules": [
+  {
+   "id": "mod.p16_glue_len.glue_len",
+   "task": "p16_glue_len",
+   "name": "glue_len",
+   "role": "entry",
+   "fn": "glue_len",
+   "interface": {
+    "signature": "glue_len(a: str, b: str) -> int32",
+    "params": [
+     {
+      "name": "a",
+      "type": "str"
+     },
+     {
+      "name": "b",
+      "type": "str"
+     }
+    ],
+    "returns": "int32"
+   },
+   "impl": {
+    "kind": "settle_prog",
+    "path": "data/oracle_settle/prog/oracle/p16_glue_len.cheng",
+    "sha256": "012c6ae81df899894927eccfd828c7a0c01e86c91fe0741ab81f05fa7c393c2c",
+    "symbol": "glue_len",
+    "result_path": "data/oracle_settle/eval_v2_oracle.tsv",
+    "result_sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e",
+    "result_verdict": "semantic_pass"
+   },
+   "status": "evidenced"
+  }
+ ],
+ "assertions": [
+  {
+   "id": "ast.p16_glue_len.glue_len.eval",
+   "task": "p16_glue_len",
+   "fn": "glue_len",
+   "kind": "eval",
+   "requirement_ids": [
+    "req.p16_glue_len.glue_len"
+   ],
+   "module_ids": [
+    "mod.p16_glue_len.glue_len"
+   ],
+   "oracle": {
+    "path": "data/oracle_v2/cases/p16_glue_len.eval.cases",
+    "sha256": "1d558324ed81359182fca1f850543074e5a721c1104d21ee326414778e81371c",
+    "tier": "eval",
+    "rows": 12
+   },
+   "evidence": {
+    "kind": "settle_eval",
+    "program": {
+     "path": "data/oracle_settle/prog/oracle/p16_glue_len.cheng",
+     "sha256": "012c6ae81df899894927eccfd828c7a0c01e86c91fe0741ab81f05fa7c393c2c"
+    },
+    "receipt": {
+     "path": "data/oracle_settle/eval_v2_oracle.detail.tsv",
+     "sha256": "477b36f91e96639712de81a30bf905a438c91a0a714afb432f9e6e3012cc9077"
+    },
+    "table": {
+     "path": "data/oracle_settle/eval_v2_oracle.tsv",
+     "sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e"
+    },
+    "rows_total": 12,
+    "rows_passed": 12,
+    "checks_total": 12,
+    "checks_passed": 12,
+    "extra_checks": 0,
+    "verdict": "pass"
+   },
+   "status": "pass",
+   "flags": [],
+   "notes": ""
+  },
+  {
+   "id": "ast.p16_glue_len.glue_len.property",
+   "task": "p16_glue_len",
+   "fn": "glue_len",
+   "kind": "property",
+   "requirement_ids": [
+    "req.p16_glue_len.glue_len"
+   ],
+   "module_ids": [
+    "mod.p16_glue_len.glue_len"
+   ],
+   "oracle": {
+    "path": "data/oracle_v2/props/p16_glue_len.props",
+    "sha256": "92091d7081c624629635755faf1666f38f28f662fb672d6d65d4edb5a7e195d3",
+    "tier": "property",
+    "rows": 7
+   },
+   "evidence": {
+    "kind": "settle_eval",
+    "program": {
+     "path": "data/oracle_settle/prog/oracle/p16_glue_len.cheng",
+     "sha256": "012c6ae81df899894927eccfd828c7a0c01e86c91fe0741ab81f05fa7c393c2c"
+    },
+    "receipt": {
+     "path": "data/oracle_settle/eval_v2_oracle.detail.tsv",
+     "sha256": "477b36f91e96639712de81a30bf905a438c91a0a714afb432f9e6e3012cc9077"
+    },
+    "table": {
+     "path": "data/oracle_settle/eval_v2_oracle.tsv",
+     "sha256": "b8766604f103e7b7a6334cf856c0eded1fb965edd41ca86fc45b4414b52fac6e"
+    },
+    "rows_total": 7,
+    "rows_passed": 7,
+    "checks_total": 7,
+    "checks_passed": 7,
+    "extra_checks": 0,
+    "verdict": "pass"
+   },
+   "status": "pass",
+   "flags": [],
+   "notes": ""
+  }
+ ],
+ "links": [
+  {
+   "id": "lnk.p16_glue_len.001",
+   "from": "req.p16_glue_len.glue_len",
+   "to": "mod.p16_glue_len.glue_len",
+   "type": "implemented_by"
+  },
+  {
+   "id": "lnk.p16_glue_len.002",
+   "from": "req.p16_glue_len.glue_len",
+   "to": "ast.p16_glue_len.glue_len.eval",
+   "type": "verified_by"
+  },
+  {
+   "id": "lnk.p16_glue_len.003",
+   "from": "req.p16_glue_len.glue_len",
+   "to": "ast.p16_glue_len.glue_len.property",
+   "type": "verified_by"
+  },
+  {
+   "id": "lnk.p16_glue_len.004",
+   "from": "ast.p16_glue_len.glue_len.eval",
+   "to": "mod.p16_glue_len.glue_len",
+   "type": "exercises"
+  },
+  {
+   "id": "lnk.p16_glue_len.005",
+   "from": "ast.p16_glue_len.glue_len.property",
+   "to": "mod.p16_glue_len.glue_len",
+   "type": "exercises"
+  }
+ ],
+ "notes": "证据取自 oracle_settle 的 per-row 回执（detail TSV）；未持久化 eval 编译产物。"
+}

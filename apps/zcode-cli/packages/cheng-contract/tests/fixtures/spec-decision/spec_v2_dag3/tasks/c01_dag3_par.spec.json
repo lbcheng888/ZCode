@@ -1,0 +1,300 @@
+{
+  "schema": "csg.spec.v2",
+  "task": "c01_dag3_par",
+  "task_index": 201,
+  "title": "c01 三层模块 DAG（caller 段并行夹具：inc/dbl -> via_inc/via_dbl -> solve）",
+  "source": {
+    "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+    "lines": "1-2",
+    "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+    "quote": "# c01_dag3_par 参考实现: 3 层模块 DAG (inc/dbl -> via_inc/via_dbl -> solve)"
+  },
+  "flags": {
+    "template_assisted": false,
+    "template_reason": "",
+    "missing": []
+  },
+  "requirements": [
+    {
+      "id": "req.c01_dag3_par.solve",
+      "task": "c01_dag3_par",
+      "fn": "solve",
+      "kind": "behavior",
+      "text": "solve(v) = via_inc(via_dbl(v))，全 int32 定义域；解析式 2*v+1 只作期望来源说明，不作程序模板。",
+      "signature": "solve(v: int32) -> int32",
+      "domain": "int32（全定义域；生成代码不插域检查）",
+      "source": {
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "lines": "1-2",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "quote": "# c01_dag3_par 参考实现: 3 层模块 DAG (inc/dbl -> via_inc/via_dbl -> solve)"
+      },
+      "status": "covered",
+      "notes": ""
+    }
+  ],
+  "modules": [
+    {
+      "id": "mod.c01_dag3_par.inc",
+      "task": "c01_dag3_par",
+      "name": "inc",
+      "role": "helper",
+      "fn": "inc",
+      "interface": {
+        "signature": "inc(x: int32) -> int32",
+        "params": [
+          {
+            "name": "x",
+            "type": "int32"
+          }
+        ],
+        "returns": "int32"
+      },
+      "impl": {
+        "kind": "reference_prog",
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "symbol": "inc",
+        "result_path": "data/oracle_v2_dag3/ref_receipt.json",
+        "result_sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20",
+        "result_verdict": "reference_crosscheck_pass"
+      },
+      "status": "evidenced"
+    },
+    {
+      "id": "mod.c01_dag3_par.dbl",
+      "task": "c01_dag3_par",
+      "name": "dbl",
+      "role": "helper",
+      "fn": "dbl",
+      "interface": {
+        "signature": "dbl(x: int32) -> int32",
+        "params": [
+          {
+            "name": "x",
+            "type": "int32"
+          }
+        ],
+        "returns": "int32"
+      },
+      "impl": {
+        "kind": "reference_prog",
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "symbol": "dbl",
+        "result_path": "data/oracle_v2_dag3/ref_receipt.json",
+        "result_sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20",
+        "result_verdict": "reference_crosscheck_pass"
+      },
+      "status": "evidenced"
+    },
+    {
+      "id": "mod.c01_dag3_par.via_inc",
+      "task": "c01_dag3_par",
+      "name": "via_inc",
+      "role": "helper",
+      "fn": "via_inc",
+      "interface": {
+        "signature": "via_inc(a: int32) -> int32",
+        "params": [
+          {
+            "name": "a",
+            "type": "int32"
+          }
+        ],
+        "returns": "int32"
+      },
+      "impl": {
+        "kind": "reference_prog",
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "symbol": "via_inc",
+        "result_path": "data/oracle_v2_dag3/ref_receipt.json",
+        "result_sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20",
+        "result_verdict": "reference_crosscheck_pass"
+      },
+      "status": "evidenced"
+    },
+    {
+      "id": "mod.c01_dag3_par.via_dbl",
+      "task": "c01_dag3_par",
+      "name": "via_dbl",
+      "role": "helper",
+      "fn": "via_dbl",
+      "interface": {
+        "signature": "via_dbl(a: int32) -> int32",
+        "params": [
+          {
+            "name": "a",
+            "type": "int32"
+          }
+        ],
+        "returns": "int32"
+      },
+      "impl": {
+        "kind": "reference_prog",
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "symbol": "via_dbl",
+        "result_path": "data/oracle_v2_dag3/ref_receipt.json",
+        "result_sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20",
+        "result_verdict": "reference_crosscheck_pass"
+      },
+      "status": "evidenced"
+    },
+    {
+      "id": "mod.c01_dag3_par.solve",
+      "task": "c01_dag3_par",
+      "name": "solve",
+      "role": "entry",
+      "fn": "solve",
+      "interface": {
+        "signature": "solve(v: int32) -> int32",
+        "params": [
+          {
+            "name": "v",
+            "type": "int32"
+          }
+        ],
+        "returns": "int32"
+      },
+      "impl": {
+        "kind": "reference_prog",
+        "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+        "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3",
+        "symbol": "solve",
+        "result_path": "data/oracle_v2_dag3/ref_receipt.json",
+        "result_sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20",
+        "result_verdict": "reference_crosscheck_pass"
+      },
+      "status": "evidenced"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "ast.c01_dag3_par.solve.eval",
+      "task": "c01_dag3_par",
+      "fn": "solve",
+      "kind": "eval",
+      "requirement_ids": [
+        "req.c01_dag3_par.solve"
+      ],
+      "module_ids": [
+        "mod.c01_dag3_par.solve"
+      ],
+      "oracle": {
+        "path": "data/oracle_v2_dag3/cases/c01_dag3_par.eval.cases",
+        "sha256": "7ee6f46841db711a14e64f3c996be9d34874b314ed208a17927fdf4bbc64d414",
+        "tier": "eval",
+        "rows": 12
+      },
+      "evidence": {
+        "kind": "settle_eval",
+        "program": {
+          "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+          "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3"
+        },
+        "receipt": {
+          "path": "data/oracle_v2_dag3/ref_receipt.json",
+          "sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20"
+        },
+        "rows_total": 12,
+        "rows_passed": 12,
+        "checks_total": 12,
+        "checks_passed": 12,
+        "extra_checks": 0,
+        "verdict": "reference_rows_passed"
+      },
+      "status": "evidenced",
+      "flags": {
+        "reference": true,
+        "note": "参考证据只做 preflight；生成程序由管线外 judge 判 semantic_pass"
+      }
+    },
+    {
+      "id": "ast.c01_dag3_par.solve.property",
+      "task": "c01_dag3_par",
+      "fn": "solve",
+      "kind": "property",
+      "requirement_ids": [
+        "req.c01_dag3_par.solve"
+      ],
+      "module_ids": [
+        "mod.c01_dag3_par.solve"
+      ],
+      "oracle": {
+        "path": "data/oracle_v2_dag3/props/c01_dag3_par.props",
+        "sha256": "bc6bb7c24d12b839eeb1fd817be82aa4369938a30f38a914347e434e6c634a2d",
+        "tier": "property",
+        "rows": 12
+      },
+      "evidence": {
+        "kind": "settle_eval",
+        "program": {
+          "path": "data/spec_v2_dag3/source/c01_dag3_par.origin.cheng",
+          "sha256": "90f410546e8c72cfcd3659218b4188450df2385fedbfe67dd2e4a7c3de43f9a3"
+        },
+        "receipt": {
+          "path": "data/oracle_v2_dag3/ref_receipt.json",
+          "sha256": "c467aeaa9f3698665c1deb2a386c1102b23ab3b0fc0a37b63dde9d45c62bda20"
+        },
+        "rows_total": 12,
+        "rows_passed": 12,
+        "checks_total": 12,
+        "checks_passed": 12,
+        "extra_checks": 0,
+        "verdict": "reference_rows_passed"
+      },
+      "status": "evidenced",
+      "flags": {
+        "reference": true,
+        "note": "property 行只作最终评估 (predicate 在 data/oracle_v2_dag3/spec_defs.py)"
+      }
+    }
+  ],
+  "links": [
+    {
+      "id": "lnk.c01_dag3_par.001",
+      "from": "req.c01_dag3_par.solve",
+      "to": "mod.c01_dag3_par.solve",
+      "type": "implemented_by"
+    },
+    {
+      "id": "lnk.c01_dag3_par.002",
+      "from": "req.c01_dag3_par.solve",
+      "to": "ast.c01_dag3_par.solve.eval",
+      "type": "verified_by"
+    },
+    {
+      "id": "lnk.c01_dag3_par.003",
+      "from": "ast.c01_dag3_par.solve.eval",
+      "to": "mod.c01_dag3_par.solve",
+      "type": "exercises"
+    },
+    {
+      "id": "lnk.c01_dag3_par.004",
+      "from": "mod.c01_dag3_par.solve",
+      "to": "mod.c01_dag3_par.via_inc",
+      "type": "composes"
+    },
+    {
+      "id": "lnk.c01_dag3_par.005",
+      "from": "mod.c01_dag3_par.solve",
+      "to": "mod.c01_dag3_par.via_dbl",
+      "type": "composes"
+    },
+    {
+      "id": "lnk.c01_dag3_par.006",
+      "from": "mod.c01_dag3_par.via_inc",
+      "to": "mod.c01_dag3_par.inc",
+      "type": "composes"
+    },
+    {
+      "id": "lnk.c01_dag3_par.007",
+      "from": "mod.c01_dag3_par.via_dbl",
+      "to": "mod.c01_dag3_par.dbl",
+      "type": "composes"
+    }
+  ],
+  "notes": "非 canonical fixture（task_index 201，独立 index/oracle 家族 data/oracle_v2_dag3）；用于 caller 段 DAG 并行与逐模块 decision-level 证据，不进入 canonical 19 分母。"
+}

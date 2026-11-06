@@ -1,0 +1,28 @@
+csg_spec_v2_cli_run: run_id=m5-20261102T003843Z-53507
+csg_spec_v2_cli_run: mode=production
+csg_spec_v2_cli_run: pipeline=m5-typed-hole pipeline_version=1 planner=cheng python_role=independent_oracle_only
+csg_spec_v2_cli_run: task_name_routing=0 fallback=none
+csg_spec_v2_cli_run: liblearn=- prior_sha256=-
+csg_spec_v2_cli_run: production_acceptance=1 verdict=PASS
+csg_spec_v2_cli_run: driver_sha256=258b7ffa9cadec5df2c974e2b96babc384d7073801772f9eba1641a20b45bd82 provenance=explicit-driver+live-probe
+csg_spec_v2_cli_run: zero_c cold_provider_used=0 c_backend_used=0 orc_used=0
+csg_spec_v2_cli_run: link_object_count=40 pure_cheng_donor_count=40 c_provider_object_count=0
+csg_spec_v2_cli_run: driver_provider_object_count=0 (driver report verbatim: --link-providers count only, not a pass criterion)
+csg_spec_v2_cli_run: build_root_head=4449dc5e1e7a3086811e12c3d669c1756346a200 std_overlay_tree=057005baa7f553b7da72c65526563419da1d855d
+csg_spec_v2_cli_run: m5_src_sha256=9e2e47440eda75a4c7d9d3864f3555e9cdb1d8a498550fb633d177bb1700ecdb spec_lib_src_sha256=e1bfc4308dd7db8c0d6349deb6192c460f79e6fecd15d6b9f11c259a6d958d99
+csg_spec_v2_cli_run: m5_bin_sha256=4c5b26ac5dc6b0e545089aefe9c1cf17497fe647d5143b7d3251f5ac7fed5e73 probe_src_sha256=864166a165c4061371d3fcaf8335ceb0061f4d371e68b90719686ce631f1fd81
+csg_spec_v2_cli_run: trace_judge_src_sha256=a85361a59b4dd1bd4fbd78099577eb34cd96196dfaf959359058eb75e8fb5a9b trace_judge_bin_sha256=d8792e617c9aa3b1037e37220fb7d86c3a88a616240dd06a6d4fa5e81e0fc0da
+csg_spec_v2_cli_run: rss_cap=805306368 budget=900000
+csg_spec_v2_cli_run: sealed_input=1 held_out_absent=1
+csg_spec_v2_cli_run: spec_index=/Users/mac/cheng-lang/data/spec_v2/index.json oracle_root=/Users/mac/cheng-lang/data/oracle_v2 spec_defs=/Users/mac/cheng-lang/data/oracle_v2/spec_defs_v2.py props=1
+csg_spec_v2_cli_run: reference_evidence=preflight_path_sha references=2 (declared sha == disk sha)
+csg_spec_v2_cli_run: reference_acceptance=semantic_pass (verified==reference; not_owned!=reference, both need settle+eval+props)
+csg_spec_v2_cli_run: specs=1 covered=1 gap=0
+csg_spec_v2_cli_run: required=1 required_met=1
+csg_spec_v2_cli_run: determinism=solve+replay raw-stdout byte-identical (no normalization)
+csg_spec_v2_cli_run: trace=strict-replay native_structure=PASS python_check=PASS decision_trace_check=PASS
+csg_spec_v2_cli_run: semantic=independent_judge_only (native structure PASS is not semantic_pass)
+csg_spec_v2_cli_run: prog task	prog_sha256	exe_sha256	report_sha256	compile_rc	run_rc	judge	status
+csg_spec_v2_cli_run: prog p01_max2	9e3858786893943c0ebf4f2edf7d83476879b1810e78503ba0c8983885fc4554	c59b598bb435dd1aefd52ba88c030e51e68acc4d4a99ed893944486c517d243f	b4313c17ec66d61d00e6a477a03f9eea7de191d961ab952dc289f9881032e228	0	0	semantic_pass	judged
+csg_spec_v2_cli_run: judge task	n_eval	eval_ok	n_props	props_ok	n_settle_diag	settle_ok_diag	status	rc	program_sha256	note	compile_rc	run_rc
+csg_spec_v2_cli_run: judge p01_max2	12	12	49	49	20	20	semantic_pass	0	9e3858786893943c0ebf4f2edf7d83476879b1810e78503ba0c8983885fc4554	-	0	0

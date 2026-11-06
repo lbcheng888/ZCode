@@ -1,0 +1,6 @@
+level	fn	name	role	decisions	settles	call_edges	parent_roots	parent_in_fn	fn_examples	fn_passed	fn_verdict	program_examples	program_passed	program_verdict	segment_sha256	projection_sha256
+0	0	inc	helper	4	1	0	2	2	3	3	pass	0	0	-	1bfae6c37c61318d0ab902ff63d91a50e9557eb3bc6136e0a9ae39799fb58e02	4e1dd7df52ccb1c90b65f3c3b38d38d27b62204ccb75da3e56a217cf3f61b274
+0	1	dbl	helper	4	1	0	2	2	3	3	pass	0	0	-	f98a35dec0b48137d8dd04ea24d47fd3d64f1b73a2ca7b9259e98986d9a0e345	d90010774859649fdaf790c6a3a3ca5a2d88753fd103c955d771d9361c58f168
+1	2	via_inc	helper	3	1	1	2	1	3	3	pass	0	0	-	cd213e85e10b340047039521ae216d5dbaf2b3df1cdeac98f95e5d03d759701e	f5c166db84057068f7371a462daac7465ac7f518b01d0001d65ecc852a650864
+1	3	via_dbl	helper	4	1	0	2	2	3	3	pass	0	0	-	42f738aad46ca1a1c34dbfe7b7d4d2cb637c1af3b08ad3e5d1fcd0f8148f9f90	7c158e026652717651a496c82422354800f16145fab65b8538e1aec48fc40c8a
+2	4	solve	entry	13	1	0	2	11	9	9	pass	21	21	pass	9cad66e01d786120ca99e5dbb87255e0220a4a182476111c5843a3a0cf28edeb	ea6c1ede4ea409ab1f6c48db807e6568b78dfcd6d6d1e67dcaf28ed2990aab08
