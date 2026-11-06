@@ -1,7 +1,15 @@
+import {
+  WOULD_ACCEPT_UNAVAILABLE_TEXT,
+  WouldAcceptUnavailableError,
+} from "@zcode/shared/would-accept-host";
 import type { PendingWouldAcceptCard } from "@zcode/shared/zcode-protocol-v4";
 import type React from "react";
 import type { Message } from "./app-model.js";
 import type { TuiListWouldAcceptCards, TuiPromoteWouldAcceptCard } from "./types.js";
+
+// 类与文案住在 @zcode/shared：CLI 的非 TUI 路径也会加载宿主查询模块，不能从 TUI
+// 运行时 import。这里 re-export 保持既有公开面与 instanceof 身份。
+export { WOULD_ACCEPT_UNAVAILABLE_TEXT, WouldAcceptUnavailableError };
 
 /**
  * would-accept 收件箱的 TUI 降级命令（spec §5.5）。
@@ -14,20 +22,6 @@ import type { TuiListWouldAcceptCards, TuiPromoteWouldAcceptCard } from "./types
  */
 const WOULD_ACCEPT_COMMAND_NAME = "/would-accept";
 const WOULD_ACCEPT_PROMOTE_COMMAND = `${WOULD_ACCEPT_COMMAND_NAME} promote`;
-
-export const WOULD_ACCEPT_UNAVAILABLE_TEXT =
-  "Would-accept inbox is not available in this build.";
-
-/**
- * 宿主缝在场但能力缺席（features.eventRouter 关 / 控制面未构造）：与缝缺席走同一如实
- * unavailable 呈现。类型化分流——错误文本不作流程判据。
- */
-export class WouldAcceptUnavailableError extends Error {
-  constructor() {
-    super(WOULD_ACCEPT_UNAVAILABLE_TEXT);
-    this.name = "WouldAcceptUnavailableError";
-  }
-}
 
 export type WouldAcceptCommand =
   | { kind: "list" }

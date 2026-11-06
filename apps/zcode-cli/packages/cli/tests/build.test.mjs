@@ -261,6 +261,20 @@ test("built CLI embeds the compact registry without a runtime Fig dependency", a
   assert.doesNotMatch(bundle, /@withfig\/autocomplete\/build/);
 });
 
+// 打包态 agent（app-server / 存储准备）不随包携带 @zcode/tui；任何 eager require 都会让
+// 启动在 Cannot find module '@zcode/tui' 处崩溃。按需 import("@zcode/tui") 仍允许。
+test("built CLI never eagerly requires the TUI runtime", async (t) => {
+  let bundle;
+  try {
+    bundle = await readFile(new URL("../dist/zcode.cjs", import.meta.url), "utf8");
+  } catch {
+    t.skip("build the CLI before running the TUI eager-require gate");
+    return;
+  }
+
+  assert.doesNotMatch(bundle, /require\("@zcode\/tui"\)/);
+});
+
 test("request security subpath bundles through its edition entry", async () => {
   const result = await build({
     stdin: {

@@ -1150,3 +1150,8 @@ exceptions:
       - packages/server/src/global-data-root-migration.ts
       - packages/shared/src/onboardingRecord.ts
     reason: ChengCode 全局数据根迁移（~/.zcode → ~/.chengcode，原子移动 + 旧路径软链）在 CLI/desktop main/server 入口各需一个职责单一的启动迁移 helper；onboardingRecord.ts 是 fork 后上游既有文件，仅随路径根名调整。逐文件准入，不移动既有模块边界。
+  - id: would-accept-host-unmanaged-new-file
+    rule: unmanaged-new-file
+    paths:
+      - packages/shared/src/would-accept-host.ts
+    reason: would-accept 能力缺席错误契约从 @zcode/tui 移到 shared 子路径：CLI 的 app-server/存储准备路径也会加载宿主查询模块，运行时 import TUI 会让打包 agent 在缺 TUI 时启动崩溃。TUI 保留 re-export 以维持 instanceof 身份；逐文件准入，不移动既有模块边界。

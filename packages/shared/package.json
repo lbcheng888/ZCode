@@ -31,6 +31,7 @@
     "./gen-ui": "./src/gen-ui/index.ts",
     "./testing/fake-relay-v2": "./test/fixtures/fake-relay-v2.ts",
     "./super-agent-control-plane-protocol": "./src/super-agent-control-plane-protocol.ts",
+    "./would-accept-host": "./src/would-accept-host.ts",
     "./request-security": "./src/request-security-edition/index.ts",
     "./web-remote-relay": "./src/web-remote-relay/index.ts"
   },

@@ -3,7 +3,8 @@
 import type { CommandCenterApp } from "./command-center.js";
 import { listAppEffortOptions } from "./command-center/effort-options.js";
 import type { TuiPromptHandler } from "./tui-command-state.js";
-import { WouldAcceptUnavailableError, type TuiSessionMetadata } from "@zcode/tui";
+import type { TuiSessionMetadata } from "@zcode/tui";
+import { WouldAcceptUnavailableError } from "@zcode/shared/would-accept-host";
 
 export async function readTuiSessionMetadata(app: CommandCenterApp): Promise<TuiSessionMetadata> {
   const modelOptions = (await app.listModels?.()) ?? [];

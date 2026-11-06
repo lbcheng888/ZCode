@@ -692,7 +692,7 @@ function ReadonlyAssistantWorkItems({
     [rows, stageTailIsRunning],
   );
   return (
-    <div className="flex flex-col gap-4" data-conversation-share-work-items>
+    <div className="flex flex-col gap-2" data-conversation-share-work-items>
       {items.map((item) => {
         if (item.kind === "row") {
           return renderReadonlyRow(
