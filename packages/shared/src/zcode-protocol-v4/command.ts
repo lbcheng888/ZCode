@@ -1,5 +1,6 @@
+import { genUiModelContextSchema } from "../gen-ui/contract.js";
 import { createSessionRequestedConfigSchema } from "./create-session-config.js";
-import { localTtftContextSchema, localTtftClockSchema } from "../localTtft.js";
+import { localTtftContextSchema, localTtftClockSchema } from "../local-ttft/contract.js";
 import { conversationQuotesSchema } from "../conversationSelection.js";
 // Command 层：信封 / ACK / 命令全集 payload。
 // conversation rewind 无独立命令（裁决：= editUserQuery 的 UI 入口）；
@@ -99,6 +100,7 @@ export const commandPayloadSchemas = {
       // Desktop Cmd/Ctrl+Enter 只覆盖本次 busy input，不改 session followupMode。
       // startNow 由 CLI 原子抢占当前 turn，不经过 queue admission。
       requestedDelivery: z.enum(["startNow", "queue", "guide"]).optional(),
+      genUiContext: genUiModelContextSchema.optional(),
       browserAmbientContext: zcodeBrowserAmbientContextSchema.optional(),
       // Share handover 只允许当前 session 的一个已导入上下文；完整正文由 runtime 从
       // 持久化 provenance 解析，不能随 command 从 renderer 传入。
@@ -164,23 +166,23 @@ export const commandPayloadSchemas = {
   }),
   // compact 是输入型维护命令：idle 时立即执行，busy/held 时进入 FIFO。
   // 因为 admission 与当前 revision 无关，不走 CAS；sourceCommandId 提供幂等边界。
-  compact: z.object({}),
+  compact: z.object({ modelSelection: modelSelectionSchema.optional() }),
   // running 时对稳定 assistant row 可用。
   forkAssistant: z.object({ target: conversationRowTargetSchema }),
   applyFileRewind: z.object({ target: conversationRowTargetSchema }),
   editUserQuery: z
     .object({
-    target: conversationRowTargetSchema,
-    newText: z.string(),
+      target: conversationRowTargetSchema,
+      newText: z.string(),
       conversationQuotes: conversationQuotesSchema.optional(),
-    attachments: z.array(attachmentRefSchema).optional(),
+      attachments: z.array(attachmentRefSchema).optional(),
       // 编辑重发按新的主动发送处理：只接受本次重新 prepare 得到的卡与执行材料，
       // 不从被 rewind 的历史消息复用旧凭据。
       modelSelection: modelSelectionSchema.optional(),
       modelExecution: modelExecutionSchema.optional(),
       highspeedMeta: highspeedMessageMetaSchema.optional(),
-    // 缺省 preserve：仅切 conversation branch；rewind 会先安全恢复该轮文件。
-    workspaceMode: z.enum(["preserve", "rewind"]).optional(),
+      // 缺省 preserve：仅切 conversation branch；rewind 会先安全恢复该轮文件。
+      workspaceMode: z.enum(["preserve", "rewind"]).optional(),
     })
     .superRefine(requireModelSelectionForExecution),
   retryTurn: z.object({ target: conversationRowTargetSchema }),
@@ -268,7 +270,31 @@ export const commandPayloadSchemas = {
   // 破坏性动作：UI 必须先二次确认；CLI 在 turn 运行中拒绝（activeTurn），
   // 成功后广播 TargetChanged{action:"cleared", target:null} 并落 cleared tombstone。
   clearGoal: z.object({}),
+  // S4：goal 的用户直改入口（UI 设置面）。CAS 键 = 快照 goal 的 targetId+revision，
+  // 过期对被拒且不写任何字段；与 GoalUpdate/GoalChengBind 工具共用同一 store 写路径。
+  updateGoalAcceptance: z
+    .object({
+      targetID: z.string().min(1),
+      revision: z.number().int().nonnegative(),
+      acceptanceLevel: z.enum(["production", "diagnostic"]),
+    })
+    .strict(),
+  // 绑定/清除显式 Cheng plan/run 引用。chengRef=null 清除绑定；绑定时 CLI 侧经真实
+  // host inspect 复核（job 存在才写入，runId 取回执而非 UI 自由文本）。
+  bindGoalChengRef: z
+    .object({
+      targetID: z.string().min(1),
+      revision: z.number().int().nonnegative(),
+      chengRef: z
+        .object({ jobId: z.string().min(1), task: z.string().min(1) })
+        .strict()
+        .nullable(),
+    })
+    .strict(),
   cancelBackgroundWork: z.object({ workId: z.string() }),
+  // daemon watchdog 的用户通知命令：Core 经 host.command 投给 owner session，CLI
+  // handler 直驱 runtime 唯一 task-notification 队列（非输入命令，不排队/不携 baseRevision）。
+  notifyUser: z.object({ text: z.string().min(1).max(2000) }).strict(),
   // cancel & resume：恢复一个已取消 / 被进程死亡
   // 打断的 dwf run。workId ≡ runId（与 cancelBackgroundWork 同一个身份等式）；`name` 可选，
   // 喂恢复后完成通知的主题（重启后原 CreateWorkflow 工具 input 不可得）。刻意不携
@@ -360,6 +386,8 @@ export const promptTriggerSourceSchema = z.enum(["user", "trigger"]);
 export type PromptTriggerSource = z.infer<typeof promptTriggerSourceSchema>;
 
 export const commandEnvelopeSchema = z.object({
+  /** Host 可信 attachment 注入；CLI 保留到原 input intent。 */
+  inputOrigin: z.enum(["desktop", "mobile"]).optional(),
   ttft: localTtftContextSchema.optional(),
   // uuid v7，客户端生成，重试不变。
   commandId: z.string(),

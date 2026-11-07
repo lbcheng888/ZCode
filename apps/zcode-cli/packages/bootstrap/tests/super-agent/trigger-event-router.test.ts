@@ -67,6 +67,51 @@ function makeDelivery(log: TriggerDeliveryInput[]): {
 }
 
 describe("super-agent-trigger EventRouter.routeOwned（§3.1 owned 边，零 LLM）", () => {
+  it("红 ChengGate 丢弃 owned 回复：零投递，final_disposition=record_only", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    const subscriptions = createTriggerSubscriptions(db);
+    seedTriggerEvent(db, {
+      id: "trigger-gated",
+      payload: JSON.stringify({ text: "reply candidate", chengJobId: "job-red" }),
+    });
+    subscriptions.upsert({
+      workspaceIdentity: "ws-a",
+      threadKey: "bot:bot-1:u1:t1",
+      sessionId: "session-a",
+      lane: "followup",
+      ownerKind: "session",
+      now: NOW,
+    });
+
+    const delivered: TriggerDeliveryInput[] = [];
+    const outcome = await routeOwned(
+      {
+        db,
+        subscriptions,
+        delivery: makeDelivery(delivered),
+        resolveGate: async () => ({
+          ok: false,
+          level: "BLOCKED",
+          reasons: ["settle_not_solved"],
+        }),
+        now: () => NOW,
+      },
+      "trigger-gated",
+    );
+
+    expect(outcome).toEqual({
+      kind: "gate_blocked",
+      triggerId: "trigger-gated",
+      reason: "cheng_gate_blocked:settle_not_solved",
+    });
+    expect(delivered).toEqual([]);
+    expect(
+      db
+        .prepare("select final_disposition from trigger_events where id = 'trigger-gated'")
+        .get(),
+    ).toEqual({ final_disposition: "record_only" });
+  });
+
   it("多订阅者 fan-out：逐订阅者投递一次，lane 原样透传，幂等键 = triggerId:sessionId", async () => {
     db = await openSuperAgentDatabase({ databasePath: ":memory:" });
     const subscriptions = createTriggerSubscriptions(db);

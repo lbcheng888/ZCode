@@ -12,6 +12,7 @@
 //   flush buffer，旧 subscriptionId 不再产帧，客户端按 subId 丢弃旧代际帧。
 import { SessionEventType, type SessionEvent } from "@zcode/contracts";
 import type {
+  BackgroundRunView,
   CommandEnvelope,
   ConversationDelta,
   ConversationRowTarget,
@@ -347,6 +348,12 @@ export class ConversationTopicPublisher {
   /** would-accept 收件箱种子（spec §5.5）：投影初值来自控制面读面，不产 delta。 */
   seedWouldAccept(cards: readonly PendingWouldAcceptCard[]): void {
     this.projection.seedWouldAccept(cards);
+    this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+  }
+
+  /** 背景执行读面种子（S0）：投影初值来自 registry，无会话事件 delta。 */
+  seedBackgroundRuns(runs: readonly BackgroundRunView[]): void {
+    this.projection.seedBackgroundRuns(runs);
     this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
   }
 

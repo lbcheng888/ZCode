@@ -1,5 +1,67 @@
+import { SED_SAFE_FLAGS } from "./bash-readonly-policy-flags-text.js";
+
+const SED_QUIET_FLAGS = new Set(["-n", "--quiet", "--silent"]);
+const SED_ZERO_TERMINATED_FLAGS = new Set(["-z", "--zero-terminated"]);
+const SED_PRINT_COMMAND = /^(?:[1-9]\d*(?:,[1-9]\d*)?)?p$/u;
+const SED_UNSUPPORTED_SCRIPT_CHARACTERS = /[\p{Cc}\p{Zl}\p{Zp}]/u;
+const SED_SUBSTITUTION_PREFIX = "s/";
+const SED_SUBSTITUTION_FLAGS = /^[gpimIM]*[1-9]?[gpimIM]*$/u;
+const SED_SUBSTITUTION_ESCAPES = new Set("/\\&123456789.^$*+?()[]{}|");
+const SED_SUBSTITUTION_DELIMITERS = 2;
+
 export function isSedInPlaceOption(word: string): boolean {
   return word.startsWith("-i") || word === "--in-place" || word.startsWith("--in-place=");
+}
+
+export function sedCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {
+  // 原先只排除 -i 和局部 w 语法，漏掉了脚本执行和替换写入；这里只接受完整的安全语法。
+  // 复用 Bash AST 的 argv，避免再次拆分 shell 文本产生解析差异。
+  let index = 0;
+  let quiet = false;
+  let zeroTerminated = false;
+  for (; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") {
+      index += 1;
+      break;
+    }
+    if (!arg.startsWith("-")) break;
+    const flags = arg.startsWith("--") ? [arg] : [...arg.slice(1)].map((flag) => `-${flag}`);
+    if (flags.length === 0 || flags.some((flag) => !Object.hasOwn(SED_SAFE_FLAGS, flag)))
+      return true;
+    quiet ||= flags.some((flag) => SED_QUIET_FLAGS.has(flag));
+    zeroTerminated ||= flags.some((flag) => SED_ZERO_TERMINATED_FLAGS.has(flag));
+  }
+
+  const script = args[index];
+  if (!script || SED_UNSUPPORTED_SCRIPT_CHARACTERS.test(script)) return true;
+  const files = args.slice(index + 1);
+  // GNU sed 会重排脚本后的选项；不能把后置 -e/-f/-i 当普通文件名跳过。
+  if (files.some((file) => file.startsWith("-") && file !== "-")) return true;
+  if (quiet && script.split(";").every((command) => SED_PRINT_COMMAND.test(command.trim()))) {
+    return false;
+  }
+  return quiet || zeroTerminated || files.length > 0 || !isReadonlySedSubstitution(script);
+}
+
+function isReadonlySedSubstitution(script: string): boolean {
+  if (!script.startsWith(SED_SUBSTITUTION_PREFIX) || script.includes(";")) return false;
+  let delimiters = 0;
+  let lastDelimiter = -1;
+  for (let index = SED_SUBSTITUTION_PREFIX.length; index < script.length; index += 1) {
+    const character = script[index];
+    if (character === "\\") {
+      index += 1;
+      if (!SED_SUBSTITUTION_ESCAPES.has(script[index] ?? "")) return false;
+    } else if (character === "/") {
+      delimiters += 1;
+      lastDelimiter = index;
+    }
+  }
+  return (
+    delimiters === SED_SUBSTITUTION_DELIMITERS &&
+    SED_SUBSTITUTION_FLAGS.test(script.slice(lastDelimiter + 1))
+  );
 }
 
 export function jqCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {
@@ -45,42 +107,6 @@ function jqFilterIsDangerous(filter: string): boolean {
     /(^|[^A-Za-z0-9_$.])env(?=$|[^A-Za-z0-9_])/.test(filter) ||
     /(^|[^A-Za-z0-9_])(?:include|import)(?=$|[^A-Za-z0-9_])/.test(filter)
   );
-}
-
-export function sedCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {
-  let firstScriptSeen = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    if (!arg) continue;
-    if (isSedInPlaceOption(arg)) return true;
-    if (arg === "-e" || arg === "--expression") {
-      index += 1;
-      if (sedScriptWritesToFile(args[index] ?? "")) return true;
-      continue;
-    }
-    if (arg.startsWith("--expression=")) {
-      if (sedScriptWritesToFile(arg.slice("--expression=".length))) return true;
-      continue;
-    }
-    if (arg === "-l" || arg === "--line-length") {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--line-length=")) continue;
-    if (arg === "--") {
-      const script = args[index + 1] ?? "";
-      return sedScriptWritesToFile(script);
-    }
-    if (!arg.startsWith("-") && !firstScriptSeen) {
-      firstScriptSeen = true;
-      if (sedScriptWritesToFile(arg)) return true;
-    }
-  }
-  return false;
-}
-
-function sedScriptWritesToFile(script: string): boolean {
-  return /(?:^|[;{\n])\s*(?:[0-9,$!+~-]+)?\s*w(?:\s|$)/.test(script);
 }
 
 export function dateCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {
@@ -293,6 +319,39 @@ export function xargsCommandIsDangerous(_commandText: string, args: readonly str
     return !XARGS_TARGET_COMMANDS.has(arg);
   }
   return false;
+}
+
+/** uniq 的 -f/-s/-w（及长形式）带数值参数；其余 flags 全部无值。 */
+const UNIQ_VALUE_FLAGS = new Set([
+  "-f",
+  "-s",
+  "-w",
+  "--skip-fields",
+  "--skip-chars",
+  "--check-chars",
+]);
+
+/**
+ * uniq 的第二个位置参数就是输出文件（`uniq [options] [input [output]]`）：
+ * 位置参数超过 1 个即含输出文件，按写命令拒绝。flags 本身无文件语义（GNU uniq
+ * 无 -o/--output），带值 flags 需跳过其参数避免把 `-f 1` 的数值误数成位置参数。
+ */
+export function uniqCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {
+  let positionalCount = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (!arg) continue;
+    if (arg === "--") {
+      positionalCount += args.length - index - 1;
+      break;
+    }
+    if (arg.startsWith("-") && arg !== "-") {
+      if (UNIQ_VALUE_FLAGS.has(arg)) index += 1;
+      continue;
+    }
+    positionalCount += 1;
+  }
+  return positionalCount > 1;
 }
 
 export function ghCommandIsDangerous(_commandText: string, args: readonly string[]): boolean {

@@ -13,6 +13,7 @@ import {
   type ModelResult,
   createRootTraceContext,
   createSessionId,
+  createToolCallId,
   type SessionStorePort,
 } from "@zcode/contracts";
 import {
@@ -246,5 +247,39 @@ describe("workflow facade child runtime — spec profile 与 processEnv 接缝",
       caCertFile: undefined,
     });
     execution.mockRestore();
+  });
+
+  it("expert workflow child 写工具继承父会话 admission，第二写者被拒", async () => {
+    const assertWriteAllowed = vi.fn(() => {
+      throw new Error(
+        "workspace write rejected: active spec-lane write lease owned by run-spec (tool=Write)",
+      );
+    });
+    const deps = {
+      ...makeDeps(),
+      workspaceWriteLeaseAdmission: { assertWriteAllowed },
+    };
+    const childSessionId = createSessionId("spec-lane-facade-lease");
+    const runtime = createWorkflowChildRuntime(deps, {
+      childSessionId,
+      childTraceContext: createRootTraceContext({ sessionId: childSessionId }),
+      workflowKind: "expert",
+    });
+    const call = {
+      id: createToolCallId("facade-lease-write"),
+      name: "Write",
+      input: { file_path: join(tempRoot, "blocked.txt"), content: "second writer" },
+    };
+    const schedule = await runtime.scheduleTools([call]);
+    const result = await runtime.executeTools([call], schedule, {
+      traceContext: createRootTraceContext({ sessionId: childSessionId }),
+    });
+
+    expect(result.results[0]?.success).toBe(false);
+    expect(result.results[0]?.error?.message).toContain("workspace write rejected");
+    expect(assertWriteAllowed).toHaveBeenCalledWith(
+      expect.objectContaining({ toolName: "Write", workspaceRoot: tempRoot }),
+    );
+    expect(assertWriteAllowed.mock.calls[0]?.[0]).not.toHaveProperty("ownerRunId");
   });
 });

@@ -48,6 +48,11 @@ export const WORLD_READ_REGISTRY = [
   // 机制——「读」与「效应」的差别在授权面（编译期字面量 cmd + 确认窗）与 journal 的
   // 节点种类（world-run），不在站点身份。
   { container: "world", member: "run", op: "run" },
+  // cheng.*：Cheng 数据面。generate 是效应（journal 落 world-run 并关闭导入缓存）；
+  // verify/graph 是只读投影。站点身份与其他 world-read 同构，所以只加行、不碰消费方。
+  { container: "cheng", member: "generate", op: "cheng-generate" },
+  { container: "cheng", member: "verify", op: "cheng-verify" },
+  { container: "cheng", member: "graph", op: "cheng-graph" },
 ] as const satisfies readonly WorldReadRow[];
 
 /**

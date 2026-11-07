@@ -42,6 +42,7 @@ import {
   clonePartForFork,
   emptyTokenUsageInfo,
   formatConversationForkNoticeBody,
+  isHiddenReminderMessage,
   slugify,
 } from "../helpers/index.js";
 import type { AgentRuntimeInternal } from "../internal.js";
@@ -68,6 +69,8 @@ function stableForkError(message: string, context: Record<string, unknown> = {})
 const MODEL_SELECTION_ENTRY_SUFFIX = ":runtime-model-selection";
 
 function modelSelectionFromMessage(message: MessageWithParts): ModelSelection | undefined {
+  // 隐藏提醒（如停止后的中断标记）只记 provider/model，不带 options，不是这一点的选型事实。
+  if (isHiddenReminderMessage(message)) return undefined;
   const selection = persistedModelSelectionOfMessage(message);
   // 加速卡 Selection 是 `selectionScope=execution` 的单轮执行事实（highspeed-card-spec §5），
   // 只有与同一轮 requestAuth 成对才有效。child 继承它会常驻在无凭据的加速 Provider 上：
@@ -321,7 +324,7 @@ function mapForkIdentity(map: ReadonlyMap<string, string>, id: string, field: st
 }
 
 function remapGoalForFork(goal: SessionGoal, identities: ForkIdentityMap): SessionGoal {
-  return {
+  const forked: SessionGoal = {
     ...goal,
     sessionID: identities.childSessionId,
     targetID: mapForkIdentity(identities.targetIds, goal.targetID, "goal target"),
@@ -329,6 +332,10 @@ function remapGoalForFork(goal: SessionGoal, identities: ForkIdentityMap): Sessi
     activeRunStartedAtMs: null,
     activeRunLastSeenAtMs: null,
   };
+  // ChengRef 是父会话的 job/run 绑定，不是目标语义的一部分；子会话继承它会把
+  // 父会话的 Cheng 证据错认成自己的。
+  delete forked.chengRef;
+  return forked;
 }
 
 function cloneVerifierEntryForAtomicFork(
@@ -1237,9 +1244,13 @@ export async function copyGoalStateForFork(
           parentTarget.status,
           copiedVerificationPayloads,
         );
+  // fork 不继承父会话的 Cheng job/run 绑定：targetID/objective/用量随快照复制，
+  // 但 ChengRef 是父会话的运行事实，子会话必须自行重新绑定。
+  const forkTargetSource: SessionGoal = { ...parentTarget };
+  delete forkTargetSource.chengRef;
   await sessionStore.cloneTargetForFork({
     sessionID: options.forkedSessionId,
-    source: parentTarget,
+    source: forkTargetSource,
     status: forkedStatus,
   });
 

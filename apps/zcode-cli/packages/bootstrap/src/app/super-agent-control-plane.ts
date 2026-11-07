@@ -20,12 +20,19 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import type { ModelSelection } from "@zcode/contracts";
+import { CHENG_PLAN_TOOL_NAME, goalChengPlanId } from "@zcode/contracts";
+import type {
+  ModelInputMessage,
+  ModelSelection,
+  ModelToolCall,
+  ModelToolContract,
+} from "@zcode/contracts";
 import type {
   WorkspaceGenerateTextInput,
   WorkspaceGenerateTextResult,
 } from "@zcode/core";
 import type {
+  BackgroundRunView,
   CommandAck,
   PendingWouldAcceptCard,
 } from "@zcode/shared/zcode-protocol-v4";
@@ -35,10 +42,13 @@ import {
 } from "@zcode/shared/zcode-protocol-v4";
 
 import { getSuperAgentDatabasePath } from "./paths.js";
+import { reconcileChengJobsOnDaemonStartup } from "../super-agent/daemon/cheng-job-startup.js";
+import { listBackgroundRunRows } from "../super-agent/storage/background-run-store.js";
 import {
   openSuperAgentDatabase,
   type SuperAgentDatabaseHandle,
 } from "../super-agent/storage/index.js";
+import { projectBackgroundRuns } from "../zcode-protocol/background-runs-projection.js";
 import {
   createDecisionLog,
   type SuperAgentDecisionLogContract,
@@ -75,6 +85,7 @@ import {
   type SuperAgentTriggerContract,
   type TriggerHostDeliveryPort,
   type TriggerSpecRunPort,
+  type TriggerChengGateVerdict,
   type TriggerWorkerPort,
 } from "../super-agent/trigger/index.js";
 import {
@@ -84,8 +95,11 @@ import {
 } from "./super-agent-host-ports.js";
 import {
   createAdjudicationDriver,
-  type AdjudicationDeliveryPort, type AdjudicationModelSessionRequest,
-  type AdjudicationModelSessionPort, type SuperAgentAdjudicationContract,
+  type AdjudicationChengPlanReceipt,
+  type AdjudicationDeliveryPort,
+  type AdjudicationModelSessionRequest,
+  type AdjudicationModelSessionPort,
+  type SuperAgentAdjudicationContract,
 } from "../super-agent/adjudication/index.js";
 
 // 宿主端口适配器拆到 super-agent-host-ports.ts（职责分离）；保持既有 import 面。
@@ -188,10 +202,20 @@ export interface CreateSuperAgentControlPlaneOptions {
    * 档位解析为 speculative/auto 时必需；缺席 = applyVerdicts 事务前响亮抛错。
    */
   specRun?: TriggerSpecRunPort;
+  /**
+   * trigger payload 带 `chengJobId` 时解析真实 ChengGate 的端口（组合根接 host verify）。
+   * 缺席时带 chengJobId 的 accept 在 dispatch 阶段 fail-closed，不启动 run。
+   */
+  resolveSpecRunGate?: (jobId: string) => Promise<TriggerChengGateVerdict>;
   /** 派发桥周期（push/sweep）轮询间隔；缺省 20s（与 Core scheduler poll 同值）。 */
   dispatchIntervalMs?: number;
   /** in_window 行宽限（超过即 skipped(no_dispatcher)）；缺省 5 分钟。 */
   dispatchGraceMs?: number;
+  /**
+   * daemon 启动时对 stale `kind=cheng-job` running 行做 failed(host_restarted) 收口。
+   * 只有 daemon plane 组合根传 true；会话 app 不传（避免误杀其他会话的在途 job）。
+   */
+  reconcileChengJobsOnStartup?: boolean;
 }
 
 export interface SuperAgentControlPlaneContracts {
@@ -215,6 +239,8 @@ export interface SuperAgentControlPlane {
   isLeader(): boolean;
   /** would-accept 卡片（§5.5）：decision_log(would_accept) × trigger_events 摘要联读；已批转卡被读面过滤。 */
   listPendingWouldAccept(): PendingWouldAcceptCard[];
+  /** v4 快照 `backgroundRuns[]`（S0）：registry 表有界投影，running 优先；显式 [] = 零行。 */
+  listBackgroundRuns(): BackgroundRunView[];
   /**
    * would-accept 一键批转 auto（spec §2.1 `promoteWouldAccept(cardId)` / design M4）：
    * 写显式 mandate(tier=auto) 行 + decision_log(would_accept_convert) 行，读面随即过滤该卡。
@@ -380,6 +406,155 @@ export function createRuntimeAdjudicationSession(deps: {
 }
 
 /**
+ * 短命 tool-loop 运行时端口：一次裁决 run 一个隔离 runtime。工具契约必须已按
+ * allowlist/disallowlist 过滤；执行端口只执行本 run 的临时 runtime 注册表。
+ */
+export interface AdjudicationToolRuntimePort {
+  readonly toolContracts: readonly ModelToolContract[];
+  generateText(input: {
+    messages: ModelInputMessage[];
+    tools: readonly ModelToolContract[];
+    maxOutputTokens?: number;
+    abortSignal: AbortSignal;
+  }): Promise<WorkspaceGenerateTextResult>;
+  executeToolCall(
+    call: ModelToolCall,
+    abortSignal: AbortSignal,
+  ): Promise<{ content: string; isError: boolean }>;
+  close?(): Promise<void> | void;
+}
+
+/**
+ * 带工具的裁决短命会话（S2）：每批一个隔离 runtime；模型只能看到传入的只读 contracts，
+ * 返回的 toolCalls 再次按同一白名单/黑名单复核后才执行（不信任模型只调用已给工具）。
+ * 工具结果以 role=tool 消息回灌，下一轮模型据此继续裁决。超过 maxToolSteps 后以空工具面
+ * 强制收束，避免工具循环无界。
+ */
+export function createToolAdjudicationSession(deps: {
+  createRuntime(request: AdjudicationModelSessionRequest): AdjudicationToolRuntimePort;
+  abortSignal: AbortSignal;
+  resolveMaxOutputTokens?: (request: AdjudicationModelSessionRequest) => number | undefined;
+  maxToolSteps?: number;
+}): AdjudicationModelSessionPort {
+  const maxToolSteps = deps.maxToolSteps ?? 4;
+  return {
+    async run(request) {
+      if (deps.abortSignal.aborted) {
+        throw new Error("裁决会话已中止（控制面 stop）");
+      }
+      const runtime = deps.createRuntime(request);
+      let inputTokens = 0;
+      let outputTokens = 0;
+      const chengPlanReceipts: AdjudicationChengPlanReceipt[] = [];
+      try {
+        const messages: ModelInputMessage[] = [{ role: "user", content: request.prompt }];
+        const maxOutputTokens = deps.resolveMaxOutputTokens?.(request);
+        for (let step = 0; step <= maxToolSteps; step += 1) {
+          const tools = step >= maxToolSteps ? [] : runtime.toolContracts;
+          const result = await runtime.generateText({
+            messages,
+            tools,
+            abortSignal: deps.abortSignal,
+            ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+          });
+          inputTokens += result.usage?.inputTokens ?? 0;
+          outputTokens += result.usage?.outputTokens ?? 0;
+          const toolCalls = result.toolCalls ?? [];
+          if (toolCalls.length === 0 || tools.length === 0) {
+            return {
+              outputText: result.text,
+              ...(inputTokens > 0 || outputTokens > 0
+                ? { usage: { inputTokens, outputTokens } }
+                : {}),
+              ...(chengPlanReceipts.length === 0
+                ? {}
+                : { chengPlanReceipts: [...chengPlanReceipts] }),
+            };
+          }
+          messages.push({
+            role: "assistant",
+            content: result.text,
+            toolCalls,
+          });
+          for (const call of toolCalls) {
+            if (
+              !request.toolAllowlist.includes(call.name) ||
+              request.toolDisallowlist.includes(call.name)
+            ) {
+              messages.push({
+                role: "tool",
+                toolCallId: call.id,
+                toolName: call.name,
+                isError: true,
+                content: `tool not allowed in adjudication session: ${call.name}`,
+              });
+              continue;
+            }
+            const executed = await runtime.executeToolCall(call, deps.abortSignal);
+            if (call.name === CHENG_PLAN_TOOL_NAME) {
+              const receipt = chengPlanReceiptFromToolCall(call, executed);
+              if (
+                receipt !== undefined &&
+                !chengPlanReceipts.some((entry) => entry.planId === receipt.planId)
+              ) {
+                chengPlanReceipts.push(receipt);
+              }
+            }
+            messages.push({
+              role: "tool",
+              toolCallId: call.id,
+              toolName: call.name,
+              isError: executed.isError,
+              content: executed.content,
+            });
+          }
+        }
+        // 循环上限只在工具面已清空后仍返回 toolCalls 时到达；返回最后一次模型文本。
+        throw new Error("裁决工具循环超过上限且模型未收束");
+      } finally {
+        await runtime.close?.();
+      }
+    },
+    destroySession() {
+      // 每 run 独立 runtime，run 结束即 close；无跨 run 会话可销毁。
+    },
+  };
+}
+
+/**
+ * 从一次真实 ChengPlan 工具执行提取稳定回执：只认成功且输出 status=ok 的调用，
+ * planId 由入参 jobId 派生（不读模型自由文本）。失败/能力缺席不产生回执。
+ */
+function chengPlanReceiptFromToolCall(
+  call: ModelToolCall,
+  executed: { content: string; isError: boolean },
+): AdjudicationChengPlanReceipt | undefined {
+  if (executed.isError) return undefined;
+  const input = call.input;
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const { jobId, task } = input as { jobId?: unknown; task?: unknown };
+  if (
+    typeof jobId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(jobId) ||
+    typeof task !== "string" ||
+    task.trim().length === 0
+  ) {
+    return undefined;
+  }
+  let output: unknown;
+  try {
+    output = JSON.parse(executed.content);
+  } catch {
+    return undefined;
+  }
+  if (typeof output !== "object" || output === null) return undefined;
+  const record = output as Record<string, unknown>;
+  if (record.status !== "ok") return undefined;
+  if (typeof record.plan !== "object" || record.plan === null) return undefined;
+  return { planId: goalChengPlanId(jobId), jobId, task };
+}
+
+/**
  * 装配控制面（只构造、不启动循环——start/stop 归宿主生命周期，spec §3.3）。
  * 打开域库失败/迁移失败原样上浮；端口缺站在 flag-on 下于 create-app 启动期响亮失败。
  */
@@ -392,6 +567,9 @@ export async function createSuperAgentControlPlane(
   const workspaceIdentity = options.workspaceIdentity;
   const databasePath = hostPorts.superAgentDatabasePath ?? getSuperAgentDatabasePath();
   const db = await openSuperAgentDatabase({ databasePath });
+  if (options.reconcileChengJobsOnStartup === true) {
+    reconcileChengJobsOnDaemonStartup(db);
+  }
 
   let leader = false;
   let started = false;
@@ -470,6 +648,7 @@ export async function createSuperAgentControlPlane(
     now,
     ...(mandateGate ? { mandate } : {}),
     ...(options.specRun ? { specRun: options.specRun } : {}),
+    ...(options.resolveSpecRunGate ? { resolveSpecRunGate: options.resolveSpecRunGate } : {}),
     proposalGate: mandateGate,
     onError: options.onError,
   });
@@ -486,8 +665,8 @@ export async function createSuperAgentControlPlane(
   // 裁决交付 = trigger.applyVerdicts 精确接缝；同步落库成功后通知投影刷新。reject-only
   // 批也通知，但投影无变化时发布端不发 delta（幂等，不制造空帧）。
   const adjudicationDelivery: AdjudicationDeliveryPort = {
-    applyVerdicts(batchId, decisions) {
-      trigger.applyVerdicts(batchId, decisions);
+    async applyVerdicts(batchId, decisions) {
+      await trigger.applyVerdicts(batchId, decisions);
       notifyWouldAcceptChanged();
     },
   };
@@ -610,6 +789,10 @@ export async function createSuperAgentControlPlane(
       switch (result.route) {
         case "owned": {
           const outcome: RouteOwnedOutcome = await trigger.routeOwned(result.triggerId);
+          if (outcome.kind === "gate_blocked") {
+            // S1 回复出站门：红 gate 静默丢弃，不算投递失败、不进重放告警。
+            return { handled: true, triggerId: result.triggerId, route: result.route };
+          }
           if (outcome.kind !== "routed") {
             // orphaned/delivery_failed/not_found 都不是可静默消费的事实（A10 告警缝）；
             // delivery_failed 行保持未决，供启动重放扫描覆盖（§4 流五 3）。
@@ -706,6 +889,21 @@ export async function createSuperAgentControlPlane(
       });
     }
     return cards;
+  };
+
+  /**
+   * 读面取持久 registry（跨进程可见），而不是组合根内存里的某一份 registry。
+   * 两次查询合并：先抓全部 running 行，再抓最近行；后者覆盖同 id 的旧快照。
+   * 这样即使终态行足够多把 running 行压出“最近 N 条”，活跃 job 也不会从 UI 消失。
+   */
+  const listBackgroundRuns = (): BackgroundRunView[] => {
+    const rows = new Map(
+      [
+        ...listBackgroundRunRows(db, { state: "running", limit: 500 }),
+        ...listBackgroundRunRows(db, { limit: 500 }),
+      ].map((row) => [row.id, row] as const),
+    );
+    return projectBackgroundRuns([...rows.values()]);
   };
 
   /**
@@ -851,6 +1049,7 @@ export async function createSuperAgentControlPlane(
     },
     isLeader: () => leader,
     listPendingWouldAccept,
+    listBackgroundRuns,
     promoteWouldAccept,
     resolveAdmissionMandateFacts,
     releaseLeadership(): number {

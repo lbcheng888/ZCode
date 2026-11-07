@@ -2,11 +2,17 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  evaluateChengGate,
+  planChengNextAction,
   readDerivationGraph,
   readRunVolume,
   readSettleReceipt,
   readStructureReceipt,
+  type ChengGateResult,
+  type ChengPlanResult,
+  type RunVolumeReceipt,
   type SettleReceipt,
+  type StructureReceipt,
 } from "@zcode/cheng-contract";
 
 import { HostError } from "./errors.js";
@@ -73,6 +79,45 @@ export function projectVerify(record: JobRecord): VerifyResult {
     structureReason,
     artifactRef: runDir,
   };
+}
+
+/**
+ * 真实 ChengGate 评估（P4 contract）：直接吃已校验的原始回执，不从 verify 摘要二次推断。
+ * unknown mode 按 production fail-closed；生产档 manifest 完整性不在 verify 投影里，
+ * 缺失即按 false 拒绝，不虚报绿。
+ */
+export function evaluateVerifyGate(input: {
+  receipt: RunVolumeReceipt;
+  settle: SettleReceipt | null;
+  structure: StructureReceipt | null;
+}): ChengGateResult {
+  return evaluateChengGate({
+    error: null,
+    run: input.receipt,
+    settle: input.settle,
+    structure: input.structure,
+    mode: input.receipt.acceptance.mode === "diagnostic" ? "diagnostic" : "production",
+  });
+}
+
+/** 真实 planner：同一批原始回执 → ChengPlan；不调模型、不读日志。 */
+export function evaluateVerifyPlan(input: {
+  receipt: RunVolumeReceipt;
+  settle: SettleReceipt | null;
+  structure: StructureReceipt | null;
+  task: string;
+  jobId?: string;
+}): ChengPlanResult {
+  const mode = input.receipt.acceptance.mode === "diagnostic" ? "diagnostic" : "production";
+  return planChengNextAction({
+    error: null,
+    run: input.receipt,
+    settle: input.settle,
+    structure: input.structure,
+    mode,
+    task: input.task,
+    ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
+  });
 }
 
 export function projectGraph(record: JobRecord, task: string, view: "structure" | "decision"): GraphResult {

@@ -1,4 +1,5 @@
 import type { ToolEntry, ToolHandler } from "../types.js";
+import { assertWorkspaceWriteLease } from "../types.js";
 import {
   ApplyPatchErrorCode,
   ApplyPatchInputJsonSchema,
@@ -70,6 +71,15 @@ export const applyPatchHandler: ToolHandler = async (input, context) => {
       toolCallId: context.toolCallId,
     });
   }
+  assertWorkspaceWriteLease(
+    context,
+    "ApplyPatch",
+    sections.flatMap((section) =>
+      section.type === "update" && section.movePath !== undefined
+        ? [section.path, section.movePath]
+        : [section.path],
+    ),
+  );
 
   const trace = traceFor(context);
   const changes: VerifiedPatchChange[] = [];

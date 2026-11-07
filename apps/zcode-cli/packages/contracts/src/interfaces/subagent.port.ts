@@ -43,6 +43,12 @@ export interface SubagentRunOptions {
    * runtime 的执行端口；子 runtime 的 Bash 等子进程 I/O 在本次 run 内走覆盖端口。
    */
   executionPort?: ExecutionPort;
+  /**
+   * 程序化 spec run 的写租约 owner id（triggerId）。仅 spec lane 传；手动会话/subagent
+   * 不传。写工具 admission 用它与 active lease owner 精确匹配，避免把 spec child 自己
+   * 的写当成第二写者。
+   */
+  writeLeaseOwnerRunId?: string;
 }
 
 export interface SubagentLaunchRequest extends SubagentRunRequest {
@@ -60,6 +66,11 @@ export interface SubagentWaitOptions {
 }
 
 export interface SubagentStopOptions {
+  /**
+   * 谁在停：TaskStop 传 "model"，App 停止传 "user"，系统路径（rewind、闲时任务收尾）不传。
+   * 后台 agent 的 killed 通知据此写 "was stopped by ZCode" / "by user" / "was stopped"。
+   */
+  initiator?: "user" | "model";
   signal?: AbortSignal;
 }
 
@@ -68,7 +79,8 @@ export interface SubagentSendMessageRequest {
   turnId?: TurnId;
   parentToolCallId: ToolCallId | string;
   to: string;
-  summary: string;
+  /** 可选：只用于 UI 预览，缺省时用 message 的第一行；交付给 child 的只有 message。 */
+  summary?: string;
   message: string;
   workingDirectory: string;
   workspaceRoot: string;
@@ -117,6 +129,8 @@ export interface SubagentTaskSnapshot {
 }
 
 export interface SubagentPort {
+  /** 关闭准入，取消所属执行并等待真实执行和资源清理；不删除历史。 */
+  close?(): Promise<void>;
   launch(request: SubagentLaunchRequest, options?: SubagentLaunchOptions): Promise<AgentOutput>;
   run(request: SubagentRunRequest, options?: SubagentRunOptions): Promise<AgentOutput>;
   start?(

@@ -47,6 +47,8 @@ export interface DecisionLogEntryInput {
   evidence?: readonly string[];
   /** M6 方案卡：JSON 落 card_payload 列（收件箱出口据此呈现/校验）。 */
   card?: DecisionLogSchemeCard;
+  /** 可选 ChengPlan 稳定引用（S2）；落 cheng_plan_id 列，可空。 */
+  chengPlanId?: string | null;
   /** 落行时间（epoch ms）；缺省 Date.now()，测试/回填可注入。 */
   createdAt?: number;
 }

@@ -8,6 +8,11 @@ import {
   extractCompactRecoveryPointer,
   formatCompactRecoveryPointerForModel,
 } from "../src/compact/prompt.js";
+import {
+  collectCompactChengRefFacts,
+  sanitizeCompactRecoveryPointer,
+} from "../src/compact/cheng-ref-validation.js";
+import type { RuntimeMessageEntry } from "../src/agent/message-history.js";
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
 import { createTestModelFactory } from "./test-runtime-model.js";
@@ -24,9 +29,12 @@ afterEach(async () => {
 const OBJECTIVE = "Ship context recall with graph walk coverage";
 const CRITERION = "targeted vitest green and rewind suite unchanged";
 const SEED_ID = "target:target_recall_roundtrip";
+const CHENG_RUN_ID = "m5-20261107T000000Z-12345";
+const CHENG_JOB_ID = "a".repeat(64);
+const CHENG_PLAN_ID = `cheng-plan://${CHENG_JOB_ID}`;
 
 const POINTER_BLOCK = `<recovery_pointer>
-{"objective":"${OBJECTIVE}","criterion":"${CRITERION}","fileMap":["apps/zcode-cli/packages/core/src/tool/handlers/recall.ts"],"openQuestions":["trigger port seam"],"recallSeedIds":["${SEED_ID}"]}
+{"objective":"${OBJECTIVE}","criterion":"${CRITERION}","fileMap":["apps/zcode-cli/packages/core/src/tool/handlers/recall.ts"],"openQuestions":["trigger port seam"],"recallSeedIds":["${SEED_ID}"],"chengRunId":"${CHENG_RUN_ID}","chengPlanId":"${CHENG_PLAN_ID}"}
 </recovery_pointer>`;
 
 function providerContentToText(content: unknown): string {
@@ -51,6 +59,8 @@ describe("compact recovery pointer", () => {
     expect(extracted.pointer?.objective).toBe(OBJECTIVE);
     expect(extracted.pointer?.criterion).toBe(CRITERION);
     expect(extracted.pointer?.recallSeedIds).toEqual([SEED_ID]);
+    expect(extracted.pointer?.chengRunId).toBe(CHENG_RUN_ID);
+    expect(extracted.pointer?.chengPlanId).toBe(CHENG_PLAN_ID);
     expect(extracted.text).toContain("Keep the recall work.");
     expect(extracted.text).not.toContain("<recovery_pointer>");
 
@@ -59,6 +69,74 @@ describe("compact recovery pointer", () => {
     expect(projected).toContain(OBJECTIVE);
     expect(projected).toContain(SEED_ID);
     expect(projected).toContain(CRITERION);
+    expect(projected).toContain("Cheng references (explicit prior evidence)");
+    expect(projected).toContain(`- run_id: ${CHENG_RUN_ID}`);
+    expect(projected).toContain(`- plan_id: ${CHENG_PLAN_ID}`);
+  });
+
+  it("drops fabricated Cheng refs but keeps real tool receipts and the rest of the pointer", () => {
+    const entries: RuntimeMessageEntry[] = [
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call-inspect", name: "ChengInspect", input: { jobId: CHENG_JOB_ID } },
+          ],
+        },
+      },
+      {
+        message: {
+          role: "tool",
+          content: JSON.stringify({
+            status: "ok",
+            jobId: CHENG_JOB_ID,
+            runId: CHENG_RUN_ID,
+            state: "succeeded",
+            runDir: null,
+            exitCode: 41,
+            cancelRequested: false,
+          }),
+          isError: false,
+          toolCallId: "call-inspect",
+          toolName: "ChengInspect",
+        },
+      },
+    ];
+    const base = {
+      objective: OBJECTIVE,
+      criterion: CRITERION,
+      fileMap: ["apps/zcode-cli/packages/core/src/compact/prompt.ts"],
+      openQuestions: [],
+      recallSeedIds: [SEED_ID],
+    };
+
+    const real = sanitizeCompactRecoveryPointer(
+      {
+        ...base,
+        chengRunId: CHENG_RUN_ID,
+        chengPlanId: CHENG_PLAN_ID,
+      },
+      collectCompactChengRefFacts(entries),
+    );
+    expect(real).toMatchObject({
+      objective: OBJECTIVE,
+      chengRunId: CHENG_RUN_ID,
+      chengPlanId: CHENG_PLAN_ID,
+      recallSeedIds: [SEED_ID],
+    });
+
+    const fabricated = sanitizeCompactRecoveryPointer(
+      {
+        ...base,
+        chengRunId: "m5-invented",
+        chengPlanId: `cheng-plan://${"b".repeat(64)}`,
+      },
+      collectCompactChengRefFacts(entries),
+    );
+    expect(fabricated).toEqual(base);
+    expect(fabricated).not.toHaveProperty("chengRunId");
+    expect(fabricated).not.toHaveProperty("chengPlanId");
   });
 
   it("stays lenient when the block is missing or invalid (compact must not wedge)", () => {
@@ -121,6 +199,18 @@ describe("compact recovery pointer", () => {
     );
     await runtime1.executeTurn("first setup before compact");
     await runtime1.executeTurn("second setup before compact");
+    const goal = await store1.createTarget({ objective: OBJECTIVE, sessionID: sessionId });
+    await store1.updateTargetChengRef!({
+      chengRef: {
+        jobId: CHENG_JOB_ID,
+        task: "p02_min2",
+        runId: CHENG_RUN_ID,
+        planId: CHENG_PLAN_ID,
+      },
+      revision: goal!.revision,
+      sessionID: sessionId,
+      targetID: goal!.targetID,
+    });
 
     const compactPromptBefore = requests.some((request) =>
       request.messages
@@ -167,6 +257,8 @@ describe("compact recovery pointer", () => {
     expect(compactionPart).toBeDefined();
     expect(compactionPart!.compactBoundary!.recoveryPointer!.objective).toBe(OBJECTIVE);
     expect(compactionPart!.compactBoundary!.recoveryPointer!.recallSeedIds).toEqual([SEED_ID]);
+    expect(compactionPart!.compactBoundary!.recoveryPointer!.chengRunId).toBe(CHENG_RUN_ID);
+    expect(compactionPart!.compactBoundary!.recoveryPointer!.chengPlanId).toBe(CHENG_PLAN_ID);
 
     // 指针块从持久化的摘要文本里剥掉（模型看到的是 reminder 投影，不是裸 JSON 块）。
     const summaryText = persisted
@@ -201,6 +293,8 @@ describe("compact recovery pointer", () => {
     expect(postResumeContext).toContain(OBJECTIVE);
     expect(postResumeContext).toContain(CRITERION);
     expect(postResumeContext).toContain(SEED_ID);
+    expect(postResumeContext).toContain(`- run_id: ${CHENG_RUN_ID}`);
+    expect(postResumeContext).toContain(`- plan_id: ${CHENG_PLAN_ID}`);
   });
 
   it("does not re-hang an anchor when the compact summary carried no pointer", async () => {

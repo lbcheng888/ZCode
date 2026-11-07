@@ -41,6 +41,13 @@ export const DISPATCH_RETRY_CAP_MS = 15 * 60_000;
 export const DISPATCH_MAX_ATTEMPTS = 5;
 /** 认领超时回收：running=1 超过该时长仍未结算，视为持有者已崩溃，允许重新认领。 */
 export const CLAIM_STALE_MS = 10 * 60_000;
+/**
+ * automation run 台账 stale 窗口：claim 后既无 host 心跳、也无终态回写的 run 超过该时长，
+ * 由 scheduler reconciler 置 failed。host 运行期每 60s 心跳续租，长任务不会被误杀。
+ */
+export const AUTOMATION_RUN_STALE_MS = 10 * 60_000;
+/** stale reconciler 写入的稳定失败原因；不得映射成 completed。 */
+export const STALE_AUTOMATION_RUN_REASON = "stale_run_reconciled";
 
 /** 创建总数超过产品上限；错误码会跨 RPC 保留在 message 中供 UI 识别。 */
 export class AutomationCreateLimitError extends Error {
@@ -113,6 +120,17 @@ interface AutomationRunRow {
 export interface ClaimedManualAutomationRun {
   automation: ZCodeAutomation;
   run: ZCodeAutomationRun;
+}
+
+/** stale reconciler 命中的 run 台账身份（只含定位与触发方式，不含已失效的执行上下文）。 */
+export interface StaleAutomationRun {
+  runId: string;
+  automationId: string;
+  workspaceKey: string;
+  scheduledAt: number | null;
+  trigger: ZCodeAutomationTrigger;
+  dispatchStatus: "claimed" | "dispatched";
+  updatedAt: number;
 }
 
 function rowToAutomation(row: AutomationRow): ZCodeAutomation {
@@ -602,6 +620,28 @@ export class AutomationRepo {
       });
   }
 
+  /**
+   * 执行轮自暂停（CronPauseSelf）：只有 active 且 enabled 的任务才转 paused，返回是否真的改了状态。
+   * paused / completed / failed / 已删除都返回 false，避免把终态任务改写成 paused。
+   * 保留 next_run_at / run_count，恢复仍走 setEnabled(true)。
+   */
+  async pause(automationId: string, workspaceKey?: string): Promise<boolean> {
+    await this.ensureReady();
+    const result = this.getDatabase()
+      .prepare(
+        `UPDATE automations
+        SET enabled = 0,
+            lifecycle_status = 'paused',
+            updated_at = @now
+        WHERE automation_id = @id
+          AND (@workspace_key IS NULL OR workspace_key = @workspace_key)
+          AND lifecycle_status = 'active'
+          AND enabled = 1`,
+      )
+      .run({ id: automationId, now: Date.now(), workspace_key: workspaceKey ?? null });
+    return result.changes > 0;
+  }
+
   /** 终态任务手动重跑：回 active、清计数与重试态，nextRunAt 由调用方重算传入。 */
   async restart(
     automationId: string,
@@ -959,7 +999,8 @@ export class AutomationRepo {
   /**
    * 派发成功结算：展示总数与定时派发数各 +1、写 last_run_at、清重试态、复位 running；
    * 循环任务回 active（nextRunAt 由调用方按实际派发时间重算传入）；
-   * 有限次任务达 max_runs 转 completed（enabled=0、next_run_at=NULL）。
+   * 有限次任务达 max_runs 转 completed（enabled=0、next_run_at=NULL）；
+   * 派发窗口内已被暂停（CronPauseSelf / UI 暂停）的任务保持 paused，只记录本次派发。
    */
   async markDispatched(
     automationId: string,
@@ -975,6 +1016,12 @@ export class AutomationRepo {
     // scheduled_run_count；run_count 还包含 manual run，只能用于 Card 累计展示。
     const reachedMax = row.recurring === 0 && scheduledRunCount >= (row.max_runs ?? 1);
     const reachedEnd = row.end_at !== null && (options.nextRunAt ?? Infinity) > row.end_at;
+    const completed = reachedMax || reachedEnd ? 1 : 0;
+    // 修复原因：scheduler 回写与 Host 侧暂停（CronPauseSelf / UI setEnabled(false)）跑在两个
+    // 独立连接上，旧实现在这里无条件写 lifecycle_status='active'、enabled=1，会把派发窗口内
+    // 刚落下的 paused 复活成 active。改为在同一条 UPDATE 里按行的当前值判定（SQLite SET 表达式
+    // 读取的是更新前的旧值）：completed 优先收口；否则 enabled=0 的行保持原 lifecycle / enabled，
+    // 只记录本次派发；其余仍回 active。不引入二次读取或重试，避免再开新的竞态窗口。
     this.getDatabase()
       .prepare(
         `UPDATE automations
@@ -987,9 +1034,13 @@ export class AutomationRepo {
             last_error = NULL,
             running = 0,
             claimed_at = NULL,
-            lifecycle_status = @lifecycle_status,
-            enabled = @enabled,
-            next_run_at = @next_run_at,
+            lifecycle_status = CASE
+              WHEN @completed = 1 THEN 'completed'
+              WHEN enabled = 0 THEN lifecycle_status
+              ELSE 'active'
+            END,
+            enabled = CASE WHEN @completed = 1 THEN 0 ELSE enabled END,
+            next_run_at = CASE WHEN @completed = 1 THEN NULL ELSE @next_run_at END,
             updated_at = @now
         WHERE automation_id = @id`,
       )
@@ -998,9 +1049,8 @@ export class AutomationRepo {
         run_count: runCount,
         scheduled_run_count: scheduledRunCount,
         dispatched_at: options.dispatchedAt,
-        lifecycle_status: reachedMax || reachedEnd ? "completed" : "active",
-        enabled: reachedMax || reachedEnd ? 0 : 1,
-        next_run_at: reachedMax || reachedEnd ? null : options.nextRunAt,
+        completed,
+        next_run_at: options.nextRunAt,
         now: options.dispatchedAt,
       });
   }
@@ -1379,6 +1429,80 @@ export class AutomationRepo {
         WHERE run_id = @run_id`,
       )
       .run({ run_id: runId, outcome, error: error ?? null, now: Date.now() });
+  }
+
+  /**
+   * scheduler claim 后 host 既未回写终态、也无心跳续租的 run 置 failed。
+   * 只接受 dispatch_status ∈ {claimed,dispatched}、outcome ∈ {NULL,running} 且超过 stale 窗口的行；
+   * 事务内逐行 CAS 更新，已并发进入终态或刚被心跳刷新的行不会被覆盖。绝不写 completed。
+   * 返回真正由本次调用改写的行，供组合根同步 settle registry 并计数。
+   */
+  async reconcileStaleRuns(options: {
+    now: number;
+    staleAfterMs: number;
+    reason: string;
+  }): Promise<StaleAutomationRun[]> {
+    await this.ensureReady();
+    const db = this.getDatabase();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = db
+        .prepare(
+          `SELECT run_id, automation_id, workspace_key, scheduled_at,
+                  trigger, dispatch_status, updated_at
+           FROM automation_runs
+           WHERE dispatch_status IN ('claimed', 'dispatched')
+             AND (outcome IS NULL OR outcome = 'running')
+             AND updated_at <= @stale
+           ORDER BY updated_at ASC`,
+        )
+        .all({ stale: options.now - options.staleAfterMs }) as unknown as Array<
+        Pick<
+          AutomationRunRow,
+          | "run_id"
+          | "automation_id"
+          | "workspace_key"
+          | "scheduled_at"
+          | "trigger"
+          | "dispatch_status"
+          | "updated_at"
+        >
+      >;
+      const update = db.prepare(
+        `UPDATE automation_runs
+         SET dispatch_status = 'failed_to_dispatch',
+             outcome = 'failed',
+             error = @error,
+             updated_at = @now
+         WHERE run_id = @run_id
+           AND dispatch_status = @old_status
+           AND (outcome IS NULL OR outcome = 'running')`,
+      );
+      const reconciled: StaleAutomationRun[] = [];
+      for (const row of rows) {
+        const result = update.run({
+          run_id: row.run_id,
+          old_status: row.dispatch_status,
+          error: options.reason,
+          now: options.now,
+        });
+        if (Number(result.changes) === 0) continue;
+        reconciled.push({
+          runId: row.run_id,
+          automationId: row.automation_id,
+          workspaceKey: row.workspace_key,
+          scheduledAt: row.scheduled_at,
+          trigger: row.trigger as ZCodeAutomationTrigger,
+          dispatchStatus: row.dispatch_status as "claimed" | "dispatched",
+          updatedAt: row.updated_at,
+        });
+      }
+      db.exec("COMMIT");
+      return reconciled;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** 错过触发窗口：落一条 skipped run（session_id=null），不计 run_count。 */

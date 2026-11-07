@@ -40,6 +40,7 @@ import type { HookRunner } from "../../hooks/index.js";
 import type { PermissionService } from "../../permission/service.js";
 import type { RuntimeTaskRegistry } from "../../runtime-task/registry.js";
 import type { ToolRegistry } from "../registry.js";
+import type { ChengReadPort } from "../cheng-read-port.js";
 import type { ToolSchedule } from "../scheduler.js";
 import type {
   BackgroundTaskControlPort,
@@ -48,6 +49,7 @@ import type {
   ToolBatchEvent,
   ToolExecutionResult,
   ToolRuntimeScope,
+  WorkspaceWriteLeaseAdmissionPort,
 } from "../types.js";
 
 export interface BackgroundTaskNotificationCommand {
@@ -81,6 +83,8 @@ export interface ToolExecutorOptions {
   permissionService: PermissionService;
   permissionBroker?: PermissionBrokerPort;
   emitEvent: (event: SessionEvent) => Promise<void>;
+  /** 后台跟踪的真实完成链（含终态写入）属于 runtime，不能随工具返回丢失。 */
+  registerResidencyBlockingWork?: (work: Promise<void>) => void;
   enqueueBackgroundTaskNotification?: EnqueueBackgroundTaskNotification;
   shouldEnqueueBackgroundTaskNotification?: ShouldEnqueueBackgroundTaskNotification;
   sessionId: SessionId;
@@ -115,6 +119,8 @@ export interface ToolExecutorOptions {
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */
   dynamicWorkflowRunPort?: DynamicWorkflowRunPort;
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
+  /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
+  chengReadPort?: ChengReadPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
@@ -127,6 +133,10 @@ export interface ToolExecutorOptions {
   workingDirectory?: string;
   workspaceRoot?: string;
   workspaceIdentity?: string;
+  /** workspace 写工具 admission；缺省 = 未启用（feature flag 关）。 */
+  workspaceWriteLeaseAdmission?: WorkspaceWriteLeaseAdmissionPort;
+  /** 当前 runtime 所属 spec run 的 lease owner；手动会话为空。 */
+  getWriteLeaseOwnerRunId?: () => string | undefined;
   remoteSessionId?: string;
   clientMode?: "desktop-continuous" | "web-remote-replayable";
   deliveryKind?: "desktop-continuous" | "web-remote-replayable";
@@ -149,6 +159,15 @@ export interface ToolExecutor {
     entry: import("../types.js").ToolEntry,
     options?: ToolExecuteOptions,
   ): Promise<unknown>;
+
+  /**
+   * 不跑 hook、不弹确认、不发事件：按当前模式与权限规则逐个判定 Read 是否被拒绝（Read 未注册时全部算拒绝）。
+   * 和 Read 工具调用共用同一套静态判定，规则只加载一次；compaction 补回文件用它跳过读权限 deny 的文件。
+   */
+  areReadsDeniedWithoutPrompt(
+    filePaths: readonly string[],
+    traceContext: TraceContext,
+  ): Promise<boolean[]>;
 
   execute(toolCall: ExecutableToolCall, options?: ToolExecuteOptions): Promise<ToolExecutionResult>;
   executeBatch(
@@ -178,6 +197,7 @@ export interface ToolExecutor {
 export interface ToolExecuteOptions {
   toolSearch?: ToolSearchExecutionContext;
   automationTurn?: boolean;
+  automationId?: string;
   offPeakTurn?: boolean;
   signal?: AbortSignal;
   traceContext?: TraceContext;
@@ -196,6 +216,8 @@ export interface ToolExecutorDeps {
   permissionService: PermissionService;
   permissionBroker: PermissionBrokerPort;
   emitEvent: (event: SessionEvent) => Promise<void>;
+  /** 后台跟踪的真实完成链（含终态写入）属于 runtime，不能随工具返回丢失。 */
+  registerResidencyBlockingWork?: (work: Promise<void>) => void;
   enqueueBackgroundTaskNotification?: EnqueueBackgroundTaskNotification;
   shouldEnqueueBackgroundTaskNotification?: ShouldEnqueueBackgroundTaskNotification;
   sessionId: SessionId;
@@ -230,10 +252,14 @@ export interface ToolExecutorDeps {
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */
   dynamicWorkflowRunPort?: DynamicWorkflowRunPort;
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
+  /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
+  chengReadPort?: ChengReadPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
   readFileState: ReadFileStateMap;
+  /** 文件读取快照的下一个序号；执行器持有计数器，只增不减。 */
+  nextReadFileStateSnapshotIndex: () => number;
   hasLoadedSkill?: (skillName: string) => boolean;
   subagentBackgroundBashMaxMs?: number;
   bashShellSelection?: ExecutionShellSelection;
@@ -242,6 +268,10 @@ export interface ToolExecutorDeps {
   setWorkingDirectory?: (cwd: string) => Promise<void> | void;
   getWorkspaceRoot: () => string;
   workspaceIdentity?: string;
+  /** workspace 写工具 admission；缺省 = 未启用（feature flag 关）。 */
+  workspaceWriteLeaseAdmission?: WorkspaceWriteLeaseAdmissionPort;
+  /** 当前 runtime 所属 spec run 的 lease owner；手动会话为空。 */
+  getWriteLeaseOwnerRunId?: () => string | undefined;
   remoteSessionId?: string;
   clientMode?: "desktop-continuous" | "web-remote-replayable";
   deliveryKind?: "desktop-continuous" | "web-remote-replayable";

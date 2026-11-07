@@ -20,6 +20,7 @@ export {
 } from "./contract.js";
 export {
   normalizeSpecEgressAllowlist,
+  resolveSpecEgressAllowHosts,
   startEgressProxy,
   type EgressAllowlistEntry,
   type EgressProxyHandle,
@@ -27,10 +28,14 @@ export {
 export { createSuperAgentSpecLane } from "./spec-lane.js";
 export {
   createSpecRunDispatcher,
+  SPEC_RUN_WRITE_LEASE_TTL_MS,
+  SpecRunGateBlockedError,
   type SpecRunDispatchInput,
   type SpecRunDispatcherDeps,
+  type SpecRunGateVerdict,
   type SpecRunLaunchPort,
   type SpecRunLaunchRequest,
+  type SpecRunWriteLeasePort,
 } from "./dispatcher.js";
 export {
   createSpecRunSubagentLaunchPort,

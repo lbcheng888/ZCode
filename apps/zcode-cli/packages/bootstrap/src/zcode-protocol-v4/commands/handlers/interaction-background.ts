@@ -232,6 +232,34 @@ async function cancelBackgroundWork(
   return undefined;
 }
 
+/** runtime 关闭/分支收口时拒绝新通知；ACK 带 reasonCode，不伪装 accepted。 */
+class V4NotificationRejectedError extends Error {
+  readonly reasonCode = "fault.command.notificationRejected";
+  constructor(sessionId: string) {
+    super(`runtime rejected background task notification (session ${sessionId})`);
+    this.name = "V4NotificationRejectedError";
+  }
+}
+
+/**
+ * notifyUser：daemon watchdog 的用户通知直驱当前 session runtime 的唯一
+ * task-notification 队列。commandId 即通知幂等键；非输入命令，不进 queue。
+ */
+async function notifyUser(
+  host: V4CommandCoreHost,
+  envelope: CommandEnvelope,
+): Promise<CommandResult | undefined> {
+  const payload = envelope.payload as CommandPayloadMap["notifyUser"];
+  const record = requireRecord(host, envelope.sessionId);
+  const accepted = record.app.runtime.enqueueBackgroundTaskNotification({
+    commandId: envelope.commandId,
+    text: payload.text,
+    traceContext: record.traceContext,
+  });
+  if (!accepted) throw new V4NotificationRejectedError(record.app.sessionId);
+  return undefined;
+}
+
 /**
  * resumeWorkflowRun：workId ≡ runId 直传 app 能力。
  * - 能力缺席（journal 不可用 / 端口无 resume）→ 能力不支持错误（同 cancel 的语义）。
@@ -356,6 +384,7 @@ export const interactionBackgroundHandlers = {
   requestWorkspaceHookReview,
   snoozeInteractionAutoResolution,
   cancelBackgroundWork,
+  notifyUser,
   resumeWorkflowRun,
   startSavedWorkflow,
   amendWorkflowRunSettings,

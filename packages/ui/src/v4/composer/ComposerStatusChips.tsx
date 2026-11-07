@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   FileText,
@@ -17,7 +17,11 @@ import {
   describeWorkflowSubagentModel,
   type WorkflowSubagentModelLabel,
 } from "@/components/workflow-timeline/subagent-model-label.js";
-import { TID_V4_TODO_PANEL } from "@zcode/shared/test-ids";
+import {
+  TID_V4_GOAL_CHENG_PLAN_CARD,
+  TID_V4_GOAL_CHENG_PLAN_CARD_CONTINUE,
+  TID_V4_TODO_PANEL,
+} from "@zcode/shared/test-ids";
 import type { GoalState, PlanItem } from "@zcode/shared/zcode-protocol-v4";
 import { buildSessionPlanOpenRequest } from "../ConversationStatusPanel.js";
 import type { ConversationStatusPanelModel } from "../conversationStatusPanelModel.js";
@@ -65,6 +69,7 @@ export function ComposerStatusChips({
   onCancelGoal,
   onPauseGoal,
   onResumeGoal,
+  onContinueFromPlanCard,
   parentSessionId,
   onOpenPlanDetail,
   className,
@@ -80,6 +85,11 @@ export function ComposerStatusChips({
   onPauseGoal?: () => void;
   /** 继续目标；缺省表示宿主/旧 CLI 不支持，卡片不渲染该动作。 */
   onResumeGoal?: () => void;
+  /**
+   * S4 路线卡「按推荐接续」：一键触发 goal continuation（resumeGoal 通道；active 目标
+   * 幂等续跑）。缺省（旧宿主/只读面）时按钮不渲染，卡片保持只读证据。
+   */
+  onContinueFromPlanCard?: () => void;
   /** 计划详情 tab 的 parent session；缺省时计划行保持纯文本。 */
   parentSessionId?: string;
   /** 打开计划详情侧 tab；缺省时计划行保持纯文本（不跳转、不可点）。 */
@@ -125,10 +135,12 @@ export function ComposerStatusChips({
         <GoalCard
           goal={goal}
           elapsedSeconds={getConversationGoalElapsedSeconds(goal, now)}
+          liveOutputTokens={model.liveOutputTokens}
           intl={intl}
           onPauseGoal={onPauseGoal}
           onResumeGoal={onResumeGoal}
           onCancelGoal={onCancelGoal}
+          onContinueFromPlanCard={onContinueFromPlanCard}
           onClose={closeGoalCard}
         />
       ) : null}
@@ -192,23 +204,29 @@ const GOAL_PAUSABLE_STATUSES: ReadonlySet<GoalState["status"]> = new Set([
 function GoalCard({
   goal,
   elapsedSeconds,
+  liveOutputTokens,
   intl,
   onPauseGoal,
   onResumeGoal,
   onCancelGoal,
+  onContinueFromPlanCard,
   onClose,
 }: {
   goal: GoalState;
   elapsedSeconds: number;
+  liveOutputTokens?: number;
   intl: ReturnType<typeof useZCodeIntl>["intl"];
   onPauseGoal?: () => void;
   onResumeGoal?: () => void;
   onCancelGoal?: () => void;
+  onContinueFromPlanCard?: () => void;
   onClose: () => void;
 }) {
   const canPause = onPauseGoal !== undefined && GOAL_PAUSABLE_STATUSES.has(goal.status);
   const canResume = onResumeGoal !== undefined && goal.status === "paused";
-  const budgetLines = buildGoalBudgetLines(goal, elapsedSeconds, intl);
+  const goalRunning = GOAL_PAUSABLE_STATUSES.has(goal.status);
+  const liveRate = useLiveOutputTokenRate(liveOutputTokens, goalRunning, goal.targetId);
+  const budgetLines = buildGoalBudgetLines(goal, elapsedSeconds, liveRate, intl);
   return (
     <div
       data-composer-status-panel="goal"
@@ -274,6 +292,65 @@ function GoalCard({
           ))}
         </div>
       ) : null}
+      {goal.chengPlanCard ? (
+        <div
+          data-testid={TID_V4_GOAL_CHENG_PLAN_CARD}
+          data-goal-cheng-plan-id={goal.chengPlanCard.planId}
+          className="mt-2 rounded-lg border border-card-border bg-[var(--color-surface)] px-2.5 py-2"
+        >
+          <div className="flex min-w-0 items-center justify-between gap-2 text-ui-sm">
+            <span className="shrink-0 font-medium text-foreground">ChengPlan</span>
+            <span className="min-w-0 truncate font-mono text-ui-xs text-foreground-subtle">
+              {goal.chengPlanCard.planId}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-ui-sm text-foreground-subtle">
+            <span data-goal-cheng-frontier>
+              {goal.chengPlanCard.frontier.stage}@{goal.chengPlanCard.frontier.target}
+            </span>
+            <span data-goal-cheng-recommended>
+              {goal.chengPlanCard.recommended.action}@{goal.chengPlanCard.recommended.target}
+            </span>
+            {goal.chengPlanCard.runId ? (
+              <span
+                data-goal-cheng-run-id={goal.chengPlanCard.runId}
+                className="truncate font-mono text-ui-xs"
+              >
+                {goal.chengPlanCard.runId}
+              </span>
+            ) : null}
+          </div>
+          {onContinueFromPlanCard ? (
+            <div className="mt-1.5 flex justify-end">
+              <button
+                type="button"
+                data-testid={TID_V4_GOAL_CHENG_PLAN_CARD_CONTINUE}
+                data-goal-cheng-continue={`${goal.chengPlanCard.recommended.action}@${goal.chengPlanCard.recommended.target}`}
+                className="rounded-md border border-card-border px-2 py-0.5 text-ui-xs text-foreground-subtle hover:bg-[var(--color-hover)]"
+                onClick={onContinueFromPlanCard}
+              >
+                {intl.formatMessage({ id: "chat.target.chengCard.continue" })}
+                <span className="ml-1 font-mono">
+                  {goal.chengPlanCard.recommended.action}@{goal.chengPlanCard.recommended.target}
+                </span>
+              </button>
+            </div>
+          ) : null}
+          {goal.chengPlanCard.evidenceRefs.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-1 text-ui-xs text-foreground-subtlest">
+              {goal.chengPlanCard.evidenceRefs.map((evidenceRef) => (
+                <span
+                  key={evidenceRef}
+                  data-goal-cheng-evidence
+                  className="rounded border border-card-border px-1 py-0.5"
+                >
+                  {evidenceRef}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -313,6 +390,61 @@ const COMPACT_COUNT_FORMAT = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
 
+function formatTokenRate(rate: number): string {
+  return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1);
+}
+
+/**
+ * 目标级平均 decode 吞吐：累计 outputTokens 增量 / 有产出的采样时间。
+ * 只在 delta>0 的采样窗口累计，工具等待/空转不计入分母；因此生成时稳定、
+ * 工具执行时保持上一次平均值而不是掉到 0。目标切换（targetId 变）才清零。
+ */
+function useLiveOutputTokenRate(
+  outputTokens: number | undefined,
+  active: boolean,
+  resetKey: string | undefined,
+): number | undefined {
+  const [rate, setRate] = useState<number>();
+  const latest = useRef(outputTokens);
+  const sample = useRef<{ at: number; value: number } | null>(null);
+  const totals = useRef({ delta: 0, seconds: 0 });
+  const resetRef = useRef(resetKey);
+  latest.current = outputTokens;
+  const available = outputTokens !== undefined;
+  useEffect(() => {
+    if (resetRef.current !== resetKey) {
+      resetRef.current = resetKey;
+      totals.current = { delta: 0, seconds: 0 };
+      sample.current = null;
+      setRate(undefined);
+    }
+    if (!active || !available) {
+      sample.current = { at: performance.now(), value: latest.current ?? 0 };
+      setRate(
+        totals.current.seconds > 0 ? totals.current.delta / totals.current.seconds : undefined,
+      );
+      return;
+    }
+    sample.current = { at: performance.now(), value: latest.current ?? 0 };
+    const timer = window.setInterval(() => {
+      const previous = sample.current;
+      const current = latest.current;
+      if (previous === null || current === undefined) return;
+      const now = performance.now();
+      const seconds = (now - previous.at) / 1000;
+      const delta = Math.max(0, current - previous.value);
+      if (delta > 0 && seconds > 0.2) {
+        totals.current.delta += delta;
+        totals.current.seconds += seconds;
+        setRate(totals.current.delta / totals.current.seconds);
+      }
+      sample.current = { at: now, value: current };
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [active, available, resetKey]);
+  return rate;
+}
+
 /**
  * 预算行从快照的可选预算字段派生：旧快照/旧 CLI 没有这些键时整行不渲染，
  * 而不是显示「已用 0」或「不限」。tokensUsed 与 tokenBudget 同源（SessionGoal），
@@ -321,25 +453,34 @@ const COMPACT_COUNT_FORMAT = new Intl.NumberFormat(undefined, {
 function buildGoalBudgetLines(
   goal: GoalState,
   elapsedSeconds: number,
+  liveRate: number | undefined,
   intl: ReturnType<typeof useZCodeIntl>["intl"],
 ): { key: string; text: string }[] {
   const lines: { key: string; text: string }[] = [];
   if (goal.tokensUsed !== undefined) {
+    const tokenText =
+      goal.tokenBudget !== undefined && goal.tokenBudget !== null
+        ? intl.formatMessage(
+            { id: "chat.composerChips.goalBudgetTokens" },
+            {
+              used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed),
+              budget: COMPACT_COUNT_FORMAT.format(goal.tokenBudget),
+            },
+          )
+        : intl.formatMessage(
+            { id: "chat.composerChips.goalBudgetTokensUsed" },
+            { used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed) },
+          );
+    const rate = liveRate;
     lines.push({
       key: "tokens",
       text:
-        goal.tokenBudget !== undefined && goal.tokenBudget !== null
-          ? intl.formatMessage(
-              { id: "chat.composerChips.goalBudgetTokens" },
-              {
-                used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed),
-                budget: COMPACT_COUNT_FORMAT.format(goal.tokenBudget),
-              },
-            )
-          : intl.formatMessage(
-              { id: "chat.composerChips.goalBudgetTokensUsed" },
-              { used: COMPACT_COUNT_FORMAT.format(goal.tokensUsed) },
-            ),
+        rate === undefined
+          ? tokenText
+          : `${tokenText} · ${intl.formatMessage(
+              { id: "chat.composerChips.goalTokensPerSecond" },
+              { rate: formatTokenRate(rate) },
+            )}`,
     });
   }
   if (goal.turnBudget !== undefined && goal.turnBudget !== null && goal.turnsUsed !== undefined) {
@@ -555,19 +696,20 @@ function ProgressPanel({ items }: { items: readonly PlanItem[] }) {
   // 长清单沿用状态面板既有的聚焦窗口:当前项附近三条 + 前后折叠计数,
   // 保证展开面板不会把 composer 顶出视口,也不改变 snapshot 的原序。
   const window = getStatusPanelTodoFocusWindow(pending as PlanItem[]);
-  const rows = (list: readonly PlanItem[]) => list.map((item) => (
-    <li key={item.id} className="flex items-start gap-2">
-      <RunningDot active={item.status === "inProgress"} />
-      <span
-        className={cn(
-          "min-w-0 flex-1 text-ui-base",
-          item.status === "inProgress" ? "text-foreground" : "text-foreground-subtle",
-        )}
-      >
-        {item.content}
-      </span>
-    </li>
-  ));
+  const rows = (list: readonly PlanItem[]) =>
+    list.map((item) => (
+      <li key={item.id} className="flex items-start gap-2">
+        <RunningDot active={item.status === "inProgress"} />
+        <span
+          className={cn(
+            "min-w-0 flex-1 text-ui-base",
+            item.status === "inProgress" ? "text-foreground" : "text-foreground-subtle",
+          )}
+        >
+          {item.content}
+        </span>
+      </li>
+    ));
   return (
     <ul className="flex flex-col gap-1.5">
       {window.compact && window.precedingItems.length > 0 ? (

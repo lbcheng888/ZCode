@@ -110,10 +110,7 @@ import type { SessionTranscriptMessage } from "../session-transcript.js";
 import type { SpecFenceContract } from "../super-agent/spec-lane/index.js";
 import type { NodeReplBrowserBroker } from "./node-repl-browser-broker.js";
 import type { ProviderRegistryModelSource } from "./provider-registry-model-runtime.js";
-import type {
-  SuperAgentControlPlane,
-  SuperAgentHostPorts,
-} from "./super-agent-control-plane.js";
+import type { SuperAgentControlPlane, SuperAgentHostPorts } from "./super-agent-control-plane.js";
 import type { WorkspaceHookReviewCommandResult } from "./workspace-hook-review-controller.js";
 export type { ZCodeModelOption } from "@zcode/shared";
 
@@ -183,6 +180,15 @@ export interface ZCodeAppOptions {
   officialPluginRoots?: string[];
   pluginStorageRoot?: string;
   executionPort?: ExecutionPort;
+  /**
+   * 官方命令端点（技术方案 5.8）：返回本 session 的 Bash/tool 子进程要带的端点地址与 token。
+   * workspace 是本 session 的工作区，端点取身份头时据此让 host 路由。
+   * 由协议宿主注入；缺省时官方插件的 CLI 拿不到身份。
+   */
+  officialCommandEnv?: (
+    sessionId: string,
+    workspace: { workspacePath: string; workspaceIdentity?: string },
+  ) => Promise<Record<string, string>>;
   /** 资源遥测旁路；由协议宿主注入，主任务和 workflow 的执行适配器共用。 */
   onToolExecResource?: (sample: ZCodeToolExecResource) => void;
   /** browser-use 控制端口；注入后 node_repl 的 agent.browsers.* 可用。缺省则不可用。 */
@@ -205,6 +211,12 @@ export interface ZCodeAppOptions {
   eventSink?: SessionEventSink;
   onOffPeakLifecycleEvent?: (event: import("@zcode/shared").OffPeakLifecycleNotification) => void;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Cheng host 的入口文件（`cheng-host/dist/main.js`）。与 `ZCODE_CHENG_ROOT` 同时在场才
+   * 接线 `cheng.generate/verify/graph`；缺席时 cheng 节点以 `ChengHostUnavailable` 拒绝，
+   * 不是静默跳过。环境变量 `ZCODE_CHENG_HOST_ENTRY` 是同一入口的兜底。
+   */
+  chengHostEntry?: string;
   platform?: NodeJS.Platform | string;
   projectConfigPath?: string;
   skipUserConfig?: boolean;
@@ -365,6 +377,8 @@ export interface ZCodeApp {
    * coordinator 并重发 admission 状态，否则已信任 Hook 继续被拒、banner 不刷新。
    */
   reloadWorkspaceHookTrust(): Promise<void>;
+  /** 设置授权落盘后更新同工作区会话的提示；不自动连接。 */
+  reloadWorkspaceMcpTrust?(): Promise<void>;
   close?(): Promise<void>;
   /**
    * super-agent 控制面（features.eventRouter=true 时在场；缺席 = kill-switch 关，
@@ -435,6 +449,24 @@ export interface ZCodeApp {
   }): Promise<SessionGoal>;
   updateTargetStatus(status: GoalStatus): Promise<SessionGoal | null>;
   clearTarget(): Promise<boolean>;
+  /**
+   * S4 用户直改：只改 acceptanceLevel（revision CAS；过期/无目标返回 null 不写）。
+   * 与 GoalUpdate 工具同一 store 写路径，TargetChanged source="command"。
+   */
+  updateGoalAcceptance(input: {
+    targetID: string;
+    revision: number;
+    acceptanceLevel: "production" | "diagnostic";
+  }): Promise<SessionGoal | null>;
+  /**
+   * S4 用户直改：绑定/清除显式 Cheng 引用。绑定经真实 host inspect 复核（runId 取
+   * 回执）；chengRef=null 清除。cheng 端口缺席时抛错（capability absent，不伪绑定）。
+   */
+  bindGoalChengRef(input: {
+    targetID: string;
+    revision: number;
+    chengRef: { jobId: string; task: string } | null;
+  }): Promise<SessionGoal | null>;
   continueActiveTarget(options?: SubmitPromptOptions): Promise<TurnResult | null>;
   recordInputHistory(
     input: PromptInput,

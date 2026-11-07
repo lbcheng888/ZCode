@@ -248,9 +248,23 @@ export class EventReducer {
       const payload = e.payload as TargetChangedPayload;
       const targetChanged =
         payload.action === "set" && payload.previousTarget?.targetID !== payload.target?.targetID;
+      const isChengPlanCard = payload.action === "cheng_plan_card";
+      const isChengPlanCardForCurrentTarget =
+        isChengPlanCard &&
+        p.target !== null &&
+        p.target !== undefined &&
+        payload.target?.targetID === p.target.targetID;
+      const clearsChengPlanCard =
+        targetChanged || payload.target === null || payload.action === "cheng_ref_edited";
+      const targetChengPlanCard = isChengPlanCardForCurrentTarget
+        ? (payload.chengPlanCard ?? p.targetChengPlanCard)
+        : clearsChengPlanCard
+          ? undefined
+          : p.targetChengPlanCard;
       return {
         ...p,
-        target: payload.target,
+        target: isChengPlanCard ? p.target : payload.target,
+        targetChengPlanCard,
         targetCompletionVerifications: targetChanged ? [] : p.targetCompletionVerifications,
         targetCompletionVerificationTimeline: targetChanged
           ? []
@@ -352,6 +366,8 @@ export class EventReducer {
         source: payload.source ?? existing?.source,
         inputPresentation: payload.inputPresentation ?? existing?.inputPresentation,
         intent: payload.intent ?? existing?.intent,
+        // 编辑事件不是重新准入；未携带身份时保留原 automation attribution。
+        automationId: payload.automationId ?? existing?.automationId,
         toolDisallowlist: payload.toolDisallowlist ?? existing?.toolDisallowlist,
         // P6：编辑重发同 id queued 事件时 payload 不带 attachment，必须保留原入队事实。
         attachment: payload.attachment ?? existing?.attachment,

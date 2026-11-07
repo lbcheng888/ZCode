@@ -9,6 +9,7 @@ export {
   ADJUDICATION_PROMPT_PAYLOAD_MAX_CHARS,
 } from "./contract.js";
 export type {
+  AdjudicationChengPlanReceipt,
   AdjudicationDatabaseHandle,
   AdjudicationDeliveryPort,
   AdjudicationDisposition,

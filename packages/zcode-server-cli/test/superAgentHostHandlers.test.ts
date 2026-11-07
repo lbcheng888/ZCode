@@ -1,14 +1,11 @@
 /**
  * Core child→Core 回调处理器（B-SPEC §3.3）单测：用真实处理器 + 服务投影替身，
  * 验证 host.command 转发/ACK 原样、worker.find/resume 的 Core 投影查询、createTask/
- * autoReplyGuard 的窄方法转发，以及窄方法缺席时的 typed unimplemented。
+ * autoReplyGuard 的窄方法转发、watchdogCommand 的 cancel/pause 命令面，以及窄方法
+ * 缺席时的 typed unimplemented。
  */
 import { describe, expect, it } from "vitest";
-import {
-  IBotsService,
-  IZCodeAgentService,
-  type ServiceDescriptor,
-} from "@zcode/services";
+import { IBotsService, IZCodeAgentService, type ServiceDescriptor } from "@zcode/services";
 import type { BotContextState } from "@zcode/shared";
 import type { CommandAck, CommandEnvelope } from "@zcode/shared/zcode-protocol-v4";
 import { CONTROL_PLANE_RPC_ERROR_CODES } from "@zcode/shared/super-agent-control-plane-protocol";
@@ -50,6 +47,11 @@ interface FakeAgent {
     workspaceIdentity?: string;
     sessionId: string;
   }): Promise<{ session: { sessionId: string } }>;
+  pauseAutomation?(params: {
+    automationId: string;
+    workspacePath: string;
+    workspaceIdentity?: string;
+  }): Promise<boolean>;
 }
 
 function createServices(options: {
@@ -83,7 +85,11 @@ const REMOTE_IDENTITY = "remote:server:source-1:/srv/repo";
 
 describe("Core control-plane host handlers", () => {
   it("host.command：远程 identity 解析 workspacePath，lane 缺省补 requestedDelivery=queue", async () => {
-    const commands: Array<{ workspacePath: string; workspaceIdentity?: string; envelope: CommandEnvelope }> = [];
+    const commands: Array<{
+      workspacePath: string;
+      workspaceIdentity?: string;
+      envelope: CommandEnvelope;
+    }> = [];
     const agent: FakeAgent = {
       async sendConversationCommandV4(params) {
         commands.push(params);
@@ -107,9 +113,9 @@ describe("Core control-plane host handlers", () => {
     expect(result).toEqual(commandAck("cmd-1"));
     expect(commands).toHaveLength(1);
     expect(commands[0]!.workspacePath).toBe("/srv/repo");
-    expect((commands[0]!.envelope.payload as { requestedDelivery?: string }).requestedDelivery).toBe(
-      "queue",
-    );
+    expect(
+      (commands[0]!.envelope.payload as { requestedDelivery?: string }).requestedDelivery,
+    ).toBe("queue");
   });
 
   it("host.command：lane=guide 补 requestedDelivery=guide；显式 requestedDelivery 不被覆盖", async () => {
@@ -500,6 +506,200 @@ describe("Core control-plane host handlers", () => {
       reasonCode: "dispatch.runNotClaimed",
     });
     expect(settled).toHaveLength(1);
+  });
+
+  it("host.watchdogCommand：cancel-workflow 经 V4 cancelBackgroundWork 投到 owner session", async () => {
+    const commands: Array<{
+      workspacePath: string;
+      workspaceIdentity?: string;
+      envelope: CommandEnvelope;
+    }> = [];
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        commands.push(params);
+        return commandAck(params.envelope.commandId);
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+    };
+    const call = handler(createServices({ agent }));
+    const result = await call("host.watchdogCommand", {
+      action: "cancel-workflow",
+      workspaceIdentity: REMOTE_IDENTITY,
+      runId: "run-1",
+      sessionId: "session-1",
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.workspacePath).toBe("/srv/repo");
+    expect(commands[0]!.envelope).toMatchObject({
+      clientId: "super-agent-watchdog",
+      sessionId: "session-1",
+      type: "cancelBackgroundWork",
+      payload: { workId: "run-1" },
+    });
+  });
+
+  it("host.watchdogCommand：cancel-workflow 拒绝回执不虚报成功", async () => {
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        return {
+          ...commandAck(params.envelope.commandId, "rejected"),
+          reasonCode: "fault.command.backgroundWorkCancelRejected.not_found",
+          message: "background task not found",
+        };
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+    };
+    const call = handler(createServices({ agent }));
+    const result = await call("host.watchdogCommand", {
+      action: "cancel-workflow",
+      workspaceIdentity: REMOTE_IDENTITY,
+      runId: "run-1",
+      sessionId: "session-1",
+    });
+
+    expect(result).toEqual({ ok: false, error: "background task not found" });
+  });
+
+  it("host.watchdogCommand：notify-user 经 V4 notifyUser 投到 owner session", async () => {
+    const commands: Array<{
+      workspacePath: string;
+      workspaceIdentity?: string;
+      envelope: CommandEnvelope;
+    }> = [];
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        commands.push(params);
+        return commandAck(params.envelope.commandId);
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+    };
+    const call = handler(createServices({ agent }));
+    const result = await call("host.watchdogCommand", {
+      action: "notify-user",
+      workspaceIdentity: REMOTE_IDENTITY,
+      sessionId: "session-1",
+      message: "watchdog escalation",
+      commandId: "daemon-notify:1",
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.workspacePath).toBe("/srv/repo");
+    expect(commands[0]!.envelope).toMatchObject({
+      commandId: "daemon-notify:1",
+      clientId: "super-agent-watchdog",
+      sessionId: "session-1",
+      type: "notifyUser",
+      payload: { text: "watchdog escalation" },
+    });
+  });
+
+  it("host.watchdogCommand：notify-user 拒绝回执不虚报成功", async () => {
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        return {
+          ...commandAck(params.envelope.commandId, "failed"),
+          reasonCode: "fault.command.notificationRejected",
+          message: "runtime rejected notification",
+        };
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+    };
+    const call = handler(createServices({ agent }));
+    const result = await call("host.watchdogCommand", {
+      action: "notify-user",
+      workspaceIdentity: REMOTE_IDENTITY,
+      sessionId: "session-1",
+      message: "watchdog escalation",
+      commandId: "daemon-notify:1",
+    });
+
+    expect(result).toEqual({ ok: false, error: "runtime rejected notification" });
+  });
+
+  it("host.watchdogCommand：pause-automation 转发 agent.pauseAutomation 与 workspace", async () => {
+    const pauseAutomation = async (params: {
+      automationId: string;
+      workspacePath: string;
+      workspaceIdentity?: string;
+    }) => {
+      expect(params).toEqual({
+        automationId: "auto-1",
+        workspacePath: "/srv/repo",
+        workspaceIdentity: REMOTE_IDENTITY,
+      });
+      return true;
+    };
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        return commandAck(params.envelope.commandId);
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+      pauseAutomation,
+    };
+    const call = handler(createServices({ agent }));
+    await expect(
+      call("host.watchdogCommand", {
+        action: "pause-automation",
+        workspaceIdentity: REMOTE_IDENTITY,
+        automationId: "auto-1",
+      }),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it("host.watchdogCommand：automation pause 未生效返回显式失败", async () => {
+    const agent: FakeAgent = {
+      async sendConversationCommandV4(params) {
+        return commandAck(params.envelope.commandId);
+      },
+      async listSessions() {
+        return [];
+      },
+      async resumeSession() {
+        return { session: { sessionId: "session-1" } };
+      },
+      async pauseAutomation() {
+        return false;
+      },
+    };
+    const call = handler(createServices({ agent }));
+    await expect(
+      call("host.watchdogCommand", {
+        action: "pause-automation",
+        workspaceIdentity: REMOTE_IDENTITY,
+        automationId: "auto-1",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: "automation pause 未生效（非 active/不存在）：auto-1",
+    });
   });
 
   it("未知方法/未初始化 services：typed 错误，不把缺口伪装成可重试成功", async () => {

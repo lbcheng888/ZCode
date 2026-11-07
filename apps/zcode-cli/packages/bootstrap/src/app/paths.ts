@@ -28,6 +28,15 @@ export function getProjectMemoryRoot(
 }
 
 /**
+ * 全局数据根：`ZCODE_DATA_BASE_DIR → HOME → homedir()`。super-agent 库与 cheng-host 的
+ * artifact 卷都用它作为 `<dataBaseDir>/.chengcode/v2/...` 的前缀（宿主用 setDataBaseDir
+ * 覆盖时，调用方必须把结果显式传入，见 {@link getSuperAgentDatabasePath}）。
+ */
+export function resolveDataBaseDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ZCODE_DATA_BASE_DIR?.trim() || env.HOME?.trim() || homedir();
+}
+
+/**
  * daemon 域库路径：{dataBaseDir}/.zcode/v2/super-agent.sqlite（spec
  * super-agent-trigger-subsystem-spec §1.1/§7-6）。@zcode/bootstrap 不依赖
  * @zcode/services，读不到 services 的 setDataBaseDir() 进程内覆盖——凡调用过
@@ -37,11 +46,7 @@ export function getProjectMemoryRoot(
  * 一次性动作，现读才能让测试与宿主在导入后切换目录生效。
  */
 export function getSuperAgentDatabasePath(baseDir?: string): string {
-  const dataBaseDir =
-    baseDir?.trim() ||
-    process.env.ZCODE_DATA_BASE_DIR?.trim() ||
-    process.env.HOME?.trim() ||
-    homedir();
+  const dataBaseDir = baseDir?.trim() || resolveDataBaseDir();
   return join(dataBaseDir, ".chengcode", "v2", "super-agent.sqlite");
 }
 

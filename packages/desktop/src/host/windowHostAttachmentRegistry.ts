@@ -93,6 +93,7 @@ export interface WindowHostExposeAttachmentParams<TServices, TPort, TCapabilitie
   requestId: string;
   attachmentId: string;
   clientMode: ZCodeAgentV4ClientMode;
+  terminalOwnerId?: string;
   scope: WindowHostAttachmentScope;
   /**
    * 宿主派生的权威角色（P6 §1.3）。由 registry 在 attach 时写入；暴露层/准入层只能读它，
@@ -242,6 +243,7 @@ export function createWindowHostAttachmentRegistry<
     requestId: string;
     attachmentId: string;
     clientMode: ZCodeAgentV4ClientMode;
+    terminalOwnerId?: string;
     scope: WindowHostAttachmentScope;
     port: TPort;
   }): void {

@@ -72,6 +72,8 @@ readTarget 行，别的会话的 target ref 跟进必然 missing）；`wf-event`
 - `fileMap: string[]`（≤64 条，续跑最关键文件）。
 - `openQuestions: string[]`（≤32 条，阻塞进展的未决问题）。
 - `recallSeedIds: string[]`（≤32，必须是合法 Recall 资源 ID；只许抄真实见过的 ID）。
+- `chengRunId?: string` / `chengPlanId?: string`——本会话真实见过的 Cheng run/plan 引用；
+  可选，缺席不失败；模型不得编造。
 
 字段并入 `compactBoundaryPayloadSchema` 的可选 `recoveryPointer`。boundary 落在
 `CompactionPart.compactBoundary` 上——recoveryPointer 因此随既有 part 持久化，**不改**
@@ -85,7 +87,11 @@ readTarget 行，别的会话的 target ref 跟进必然 missing）；`wf-event`
 - `extractCompactRecoveryPointer(rawText)`：从模型原文剥离该块并解析。**宽进**：
   块缺失或 JSON 非法 → 不产生指针，compact 照常完成，只落 warn 日志（可观测）。
   决策记录见 §7。
-- `formatCompactRecoveryPointerForModel(pointer)`：重挂时给模型的固定投影。
+- `formatCompactRecoveryPointerForModel(pointer)`：重挂时给模型的固定投影；在场时
+  追加 “Cheng references” 段（`plan_id`/`run_id`），与 S4 路线卡同源。
+- `validateCompactRecoveryPointerForSession(pointer, entries, sessionStore, sessionId)`：
+  boundary 落库前从目标行 `chengRef` 与本会话成功 Cheng 工具回执收集真实 plan/run id；
+  pointer 的 `chengPlanId`/`chengRunId` 逐字段比对，未命中字段丢弃，其余 anchor 保留。
 
 ### 4.3 重挂（两条路径，都是程序机制）
 

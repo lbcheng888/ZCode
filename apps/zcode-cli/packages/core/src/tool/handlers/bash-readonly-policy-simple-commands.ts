@@ -10,6 +10,7 @@ import {
   ssCommandIsDangerous,
   testCommandIsDangerous,
   tputCommandIsDangerous,
+  uniqCommandIsDangerous,
   xargsCommandIsDangerous,
 } from "./bash-readonly-policy-callbacks.js";
 import {
@@ -141,7 +142,8 @@ export const READONLY_COMMAND_POLICIES = new Map<string, BashReadonlyCommandPoli
   ["tr", { allowAnyArgs: true }],
   ["tree", { safeFlags: TREE_SAFE_FLAGS }],
   ["true", { commandOnly: true }],
-  ["uniq", { allowAnyArgs: true }],
+  // 第二个位置参数即输出文件（uniq [input [output]]）：>1 个位置参数按写命令拒。
+  ["uniq", { allowAnyArgs: true, additionalCommandIsDangerousCallback: uniqCommandIsDangerous }],
   ["uname", { allowAnyArgs: true }],
   ["wc", { safeFlags: WC_SAFE_FLAGS }],
   ["which", { allowAnyArgs: true }],

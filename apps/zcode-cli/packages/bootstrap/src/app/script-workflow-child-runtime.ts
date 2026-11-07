@@ -12,6 +12,7 @@ import {
   type AgentRuntimeDeps,
   type ChildClientPortsContext,
   type PermissionService,
+  type WorkspaceWriteLeaseAdmissionPort,
 } from "@zcode/core";
 import {
   type AgentExecutionTelemetryPort,
@@ -57,6 +58,8 @@ export interface ScriptWorkflowAgentRuntimeDeps {
   /** 父会话的 model factory：child 与主 turn 从同一份 Registry 视图造 Model，不各自冻结。 */
   modelFactory: NonNullable<AgentRuntimeDeps["modelFactory"]>;
   permissionService: PermissionService;
+  /** 父会话的 workspace 写租约 admission；workflow child 不带 owner，写入口直接拒绝。 */
+  workspaceWriteLeaseAdmission: WorkspaceWriteLeaseAdmissionPort | undefined;
   /**
    * 插件的技能根（主会话 skill 端口的同一份 `pluginOutcome.skillRoots`）。捆绑技能根不在内：
    * 那里只有 dynamic-workflows，子代理不能起工作流。
@@ -351,6 +354,7 @@ function createRuntimeDeps(
         processEnv: processEnv ?? deps.appOptions.env ?? process.env,
       }),
     fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
+    workspaceWriteLeaseAdmission: deps.workspaceWriteLeaseAdmission,
     httpClientPort:
       deps.httpClientPort ??
       deps.appOptions.httpClientPort ??

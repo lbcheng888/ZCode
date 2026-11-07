@@ -1,3 +1,9 @@
+import {
+  appendRequestAnnouncements,
+  appendRuntimeContextAnnouncements,
+  appendRuntimeSkillsAnnouncement,
+  persistAnnouncements,
+} from "./context-refresh.js";
 import { getTurnTools } from "./turn-tool-visibility.js";
 import { refreshOffPeakTurnAfterTakeover } from "../off-peak/turn.js";
 import { appendRuntimeAgentListing } from "../helpers/agent-listing.js";
@@ -14,10 +20,11 @@ import {
   TurnMachineImpl,
 } from "../deps.js";
 import {
-  buildRuntimeModeReminderBody,
+  buildRuntimeModeReminderBodyForTask,
   buildPlanModeExitReminderBody,
   buildRuntimeOutputStyleReminderBody,
   buildTodoReminderBody,
+  buildSilentTurnReminderBody,
   buildRuntimeProviderRequestMessages,
   prepareRuntimeProviderRequest,
   createCompactRapidRefillError,
@@ -26,14 +33,17 @@ import {
   isGoalLayerEnabled,
   throwIfTurnAborted,
 } from "../helpers/index.js";
+import { isMainAgentTaskType } from "../helpers/project-memory.js";
 import {
+  isRuntimeAttachmentEntry,
   systemReminderAttachmentEntry,
   todoReminderRuntimeMetadata,
+  type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { runModelBackedTurnStep } from "./turn-model-step.js";
-import { persistRuntimeReminderMessage } from "./runtime-reminder-persistence.js";
-import { buildProjectionAnchor } from "./projection-anchor.js";
+import { querySourceForTask } from "./turn-model-step-usage.js";
+import { inputRoleOf } from "../helpers/provider-entry-origins.js";
 import {
   evaluateRapidRefill,
   MAX_CONSECUTIVE_RAPID_REFILLS,
@@ -44,13 +54,13 @@ import {
 import type { RegularTurnLoopState } from "./turn-loop-state.js";
 import { consumeSettledProjectMemoryRecall } from "../helpers/project-memory-recall.js";
 import { consumePendingProjectMemoryUpdate } from "../helpers/project-memory-dream.js";
-import { isMainAgentTaskType } from "../helpers/project-memory.js";
 import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../../memory/project-memory-retrieval-branch.js";
 import {
   appendTurnRequestEntries,
   commitTurnRequestEntries,
   filterOutputTokenContinuationEntries,
 } from "./turn-output-token-continuation.js";
+import { recordSessionFeatureFromToolSearchExposure } from "../session-features/contract.js";
 
 export async function runRegularTurnLoop(
   this: AgentRuntimeInternal,
@@ -59,14 +69,21 @@ export async function runRegularTurnLoop(
   while (true) {
     throwIfTurnAborted(state.turnAbortSignal);
     refreshOffPeakTurnAfterTakeover(this, state);
-    evaluateTurnTargetBudgetGuard(this, state);
+    await evaluateTurnTargetBudgetGuard(this, state);
     const outputTokenRecoveryActive = state.turnRequestState.outputTokenContinuationCount > 0;
     // guide 只允许由完整 tool result batch 设置这个一次性诊断；普通 queue 不在
     // model roundtrip 起点消费，避免把未来 turn 错并入当前 product turn。
     const drainedSteerForNextRequest = state.drainedSteerForNextRequest;
     state.drainedSteerForNextRequest = undefined;
 
-    if (state.modelStepCount > 0 && !outputTokenRecoveryActive) {
+    // 通知只在带新输入的请求前取出：完整工具批次之后、文本回复后续上 guide，与输入附件同一时机。
+    // 修复原因：每次迭代都取时，Stop hook 续跑、流重试、降级等重发同一份输入的请求也被插入通知；
+    // 所以其余时候通知留在队列里，本轮结束后开新一轮。
+    if (
+      state.inputAttachmentCollectionPending &&
+      state.modelStepCount > 0 &&
+      !outputTokenRecoveryActive
+    ) {
       const drainedRuntimeCommands = await this.drainPendingRuntimeCommandsForActiveLoop();
       state.backgroundSubagentResultConsumed ||=
         drainedRuntimeCommands.backgroundSubagentResultConsumed;
@@ -78,8 +95,31 @@ export async function runRegularTurnLoop(
       }
     }
 
+    const finishMcp = beginLocalTurnPreparation(state.turnTraceContext, "mcp");
+    await this.initializeMcp(state.turnTraceContext);
+    // tools/list_changed 只在回合开始前生效。
+    await this.refreshMcpToolsIfChanged(state.turnTraceContext);
+    finishMcp();
+    throwIfTurnAborted(state.turnAbortSignal);
+    const finishTools = beginLocalTurnPreparation(state.turnTraceContext, "tools");
+    const tools = getTurnTools(this, state);
+    finishTools();
+
+    // 输入附件在 compaction 之前运行：本轮输入或上一批工具结果产生的项属于 compaction
+    // 保留或摘要的历史。只在有新输入时收集（轮首、完整工具批次之后、文本回复后续上 guide）；
+    // 新轮通知的首个请求跳过。
+    // Stop hook 续跑、模型降级、流恢复、Start Plan 排队重试、上下文超限恢复、闲时换票
+    // 都重发同一份输入，不收集：每次收集都会多出一条 output_style 等不去重的附件。
+    if (state.inputAttachmentCollectionPending) {
+      state.inputAttachmentCollectionPending = false;
+      if (!endsWithNewTurnInput(state.turnRequestState.entries)) {
+        await collectInputAttachments(this, state, tools);
+      }
+    }
+
     if (state.completedRealToolResultBatch && !outputTokenRecoveryActive) {
       state.completedRealToolResultBatch = false;
+      // memory prefetch 排在输入附件之后。
       const recallEntry = consumeSettledProjectMemoryRecall(
         this,
         ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH,
@@ -103,7 +143,7 @@ export async function runRegularTurnLoop(
       state.events,
       state.turnAbortSignal,
       {
-        getAgentListingTools: () => getTurnTools(this, state),
+        getAgentListingTools: () => tools,
         compactReason: CompactReason.ContextLimit,
         modelStepIndex: state.modelStepCount,
         phase: compactPhase,
@@ -127,114 +167,15 @@ export async function runRegularTurnLoop(
     }
     throwIfTurnAborted(state.turnAbortSignal);
 
-    const finishMcp = beginLocalTurnPreparation(state.turnTraceContext, "mcp");
-    await this.initializeMcp(state.turnTraceContext);
-    // tools/list_changed 只在回合开始前生效。
-    await this.refreshMcpToolsIfChanged(state.turnTraceContext);
-    finishMcp();
-    throwIfTurnAborted(state.turnAbortSignal);
-    const finishTools = beginLocalTurnPreparation(state.turnTraceContext, "tools");
-    const tools = getTurnTools(this, state);
-    finishTools();
-    if (!outputTokenRecoveryActive) {
-      await appendRuntimeAgentListing(this, state.turnRequestState, tools, state.turnTraceContext);
-    }
-    if (!outputTokenRecoveryActive && this.needsPlanModeExitReminder) {
-      this.needsPlanModeExitReminder = false;
-      commitTurnRequestEntries(this, state.turnRequestState, [
-        systemReminderAttachmentEntry("plan_mode_exit", buildPlanModeExitReminderBody()),
-      ]);
-    }
-    const runtimeModeReminderBody = outputTokenRecoveryActive
-      ? null
-      : buildRuntimeModeReminderBody(
-          state.turnRequestState.entries,
-          this.getMode(),
-          this.getPlanEnabled(),
-        );
-    if (runtimeModeReminderBody) {
-      commitTurnRequestEntries(this, state.turnRequestState, [
-        systemReminderAttachmentEntry("runtime_mode", runtimeModeReminderBody),
-      ]);
-    }
-    const goalLayerEnabled = isGoalLayerEnabled(this.config);
-    // 开旗：todo 提醒只服务会话主 agent，按 taskType 排除子代理与 workflow 子会话。不能用
-    // parentSessionId 判断——fork / selection_side_chat 主会话同样带它（session-fork 的父子
-    // 事实），会误伤用户可直接交互的主会话。这是开旗时的行为变化；关旗恢复旧行为：
-    // 子代理 / workflow child 重新收到提醒。
-    const todoReminderEligible =
-      !outputTokenRecoveryActive &&
-      (goalLayerEnabled ? isMainAgentTaskType(this.config.taskType) : true) &&
-      tools.some((tool) => tool.name === "TodoWrite");
-    const dueTodoReminderTurns = todoReminderEligible
-      ? getDueTodoReminderTurnsSinceWrite(state.turnRequestState.entries, goalLayerEnabled)
-      : null;
-    if (dueTodoReminderTurns !== null) {
-      const currentTodos = await this.readSessionTodosForContext(state.turnTraceContext);
-      // 开旗：空清单或全部 completed 时没有可提醒的开放项，只提醒“该更新清单”，不提醒
-      // “该建清单”；关旗恢复旧行为（无开放项也提醒）。未提醒时 cadence 不重置，同一 turn
-      // 的后续 model step 会再次读到同一结论（单次有索引的 SELECT）；这里刻意不缓存
-      // “无开放项”，避免为 TodoWrite 中途清表引入缓存失效状态。
-      if (!goalLayerEnabled || hasOpenTodoItems(currentTodos)) {
-        const reminderBody = goalLayerEnabled
-          ? buildTodoReminderBody(currentTodos, dueTodoReminderTurns)
-          : buildTodoReminderBody(currentTodos);
-        commitTurnRequestEntries(this, state.turnRequestState, [
-          systemReminderAttachmentEntry("todo_reminder", reminderBody),
-        ]);
-        await this.persistSyntheticUserNoticeForSession({
-          messageID: createMessageId(),
-          metadata: { runtimeMessage: todoReminderRuntimeMetadata() },
-          sessionId: this.sessionId,
-          source: "todo_reminder",
-          text: reminderBody,
-          traceContext: state.turnTraceContext,
-        });
-      }
-    }
-    const outputStyleReminderBody =
-      state.modelStepCount === 0
-        ? buildRuntimeOutputStyleReminderBody(state.turnOutputStyle)
-        : null;
-    if (outputStyleReminderBody) {
-      // output_style 是 provider-visible 的当前 turn runtime attachment，
-      // 需要进入内存历史参与后续 request 的增量轨迹；但不把它落 session。
-      commitTurnRequestEntries(this, state.turnRequestState, [
-        systemReminderAttachmentEntry("output_style", outputStyleReminderBody),
-      ]);
-    }
-    if (!outputTokenRecoveryActive) {
-      const announcement = buildToolSearchAnnouncement({
-        model: state.model,
-        mode: this.config.toolSearch?.mode,
-        tools,
-        registry: this.getToolRegistry(),
-        entries: state.turnRequestState.entries,
-      });
-      if (announcement) {
-        // 公告正文和增量事实必须先一起落盘；否则 fork/resume 会把已公告工具重新当成首次出现。
-        const messageId = await persistRuntimeReminderMessage.call(
-          this,
-          announcement,
-          state.turnTraceContext,
-          {
-            model: state.model,
-            anchor: buildProjectionAnchor(state.turnTraceContext, "synthetic"),
-          },
-        );
-        if (messageId) this.latestConversationMessageId = messageId;
-        commitTurnRequestEntries(this, state.turnRequestState, [announcement]);
-      }
-    }
-    // （2026-09-12）：原"回合开始注入 plugin_ui_state reminder"已删除，插件给模型的信息
-    // 一律走 ui/update-model-context。
-    const providerEntries = [...state.turnRequestState.entries];
-    // Dream 可能在同一 turn 的首个模型请求期间完成；每次 attachment collection 都检查，
-    // 才能把一次性更新放进紧随其后的模型请求，而不是延迟到下一次用户输入。
-    const memoryUpdate = outputTokenRecoveryActive
-      ? undefined
-      : consumePendingProjectMemoryUpdate(this);
-    const requestEntries = memoryUpdate ? [...providerEntries, memoryUpdate] : providerEntries;
+    // 请求前公告在 compaction 之后运行，
+    // 不受输入附件跳过规则影响；按类型对历史去重，通常为空。
+    await appendRequestAnnouncements(
+      this,
+      state.turnRequestState,
+      state.turnTraceContext,
+      state.turnAbortSignal,
+    );
+    const requestEntries = [...state.turnRequestState.entries];
     const prepared = prepareRuntimeProviderRequest(this, {
       model: state.model,
       tools,
@@ -250,6 +191,13 @@ export async function runRegularTurnLoop(
       catalogSize: prepared.toolSearch.catalog.length,
       schemaCount: prepared.request.tools.length,
     });
+    // 能力标签取本次主循环请求的生效模式，在模型调用前打，本次请求就带上。请求准备环节本身不写状态，
+    // 所以在调用方打；compact、目标校验、Memory 的请求准备不经过这里。
+    recordSessionFeatureFromToolSearchExposure.call(
+      this,
+      prepared.toolSearch,
+      state.turnTraceContext,
+    );
     // 修复原因：provider-visible user ordering projection 会改变最终 latest user 落点，
     // cache-control 必须在 projection 后统一设置，避免 raw synthetic entry 抢占缓存锚点。
     const providerProjection = prepared.projection;
@@ -299,6 +247,176 @@ export async function runRegularTurnLoop(
   }
 }
 
+/**
+ * 新轮通知与 peer 消息开启的轮次，首个请求不收集输入附件。
+ * 请求前公告不受影响，照常运行并在投影时冒泡到通知之前。只看历史判断，resume/fork/rewind 后
+ * 自然一致；调用工具后最后一条变成 tool result，后续请求照常收集。
+ */
+function endsWithNewTurnInput(entries: readonly RuntimeMessageEntry[]): boolean {
+  const latest = entries.findLast((entry) => !isRuntimeAttachmentEntry(entry));
+  return latest !== undefined && inputRoleOf(latest) === "new_turn";
+}
+
+/**
+ * 输入附件收集，按固定顺序依次执行；各项保留自己的触发条件。
+ * 全部写入历史，resume 后前缀不变。todo 提醒先提交再落盘，其余先持久化成功再提交。
+ */
+async function collectInputAttachments(
+  runtime: AgentRuntimeInternal,
+  state: RegularTurnLoopState,
+  tools: ReturnType<typeof getTurnTools>,
+): Promise<void> {
+  await appendRuntimeContextAnnouncements(
+    runtime,
+    state.turnRequestState,
+    state.model,
+    state.turnOutputStyle,
+    state.turnTraceContext,
+    state.turnAbortSignal,
+  );
+  // ToolSearch 公告（deferred tools 增量）在模型之后、agent listing 之前。
+  await appendToolSearchAnnouncement(runtime, state, tools);
+  await appendRuntimeAgentListing(runtime, state.turnRequestState, tools, state.turnTraceContext);
+  await appendRuntimeSkillsAnnouncement(runtime, state.turnRequestState, state.turnTraceContext);
+  // 退出提醒由历史推导（最近的 plan 提醒之后没有退出提醒），内存标记只是额外触发。
+  // 修复原因：只看内存标记时，冷恢复后标记丢失，计划模式的退出提醒不会发出。
+  if (
+    !runtime.getPlanEnabled() &&
+    (runtime.needsPlanModeExitReminder || isPlanModeExitPending(state.turnRequestState.entries))
+  ) {
+    await persistAnnouncements(
+      runtime,
+      state.turnRequestState,
+      [systemReminderAttachmentEntry("plan_mode_exit", buildPlanModeExitReminderBody())],
+      state.turnTraceContext,
+    );
+    runtime.needsPlanModeExitReminder = false;
+  }
+  const runtimeModeReminderBody = buildRuntimeModeReminderBodyForTask(
+    state.turnRequestState.entries,
+    {
+      mode: runtime.getMode(),
+      planEnabled: runtime.getPlanEnabled(),
+      taskType: runtime.config.taskType,
+      tools,
+    },
+  );
+  if (runtimeModeReminderBody) {
+    // 只写内存会在冷恢复时丢失提醒与计数边界；复用动态公告的持久化和 hydration。
+    await persistAnnouncements(
+      runtime,
+      state.turnRequestState,
+      [systemReminderAttachmentEntry("runtime_mode", runtimeModeReminderBody)],
+      state.turnTraceContext,
+    );
+  }
+  const goalLayerEnabled = isGoalLayerEnabled(runtime.config);
+  // 开旗：todo 提醒只服务会话主 agent，按 taskType 排除子代理与 workflow 子会话。不能用
+  // parentSessionId 判断——fork / selection_side_chat 主会话同样带它（session-fork 的父子
+  // 事实），会误伤用户可直接交互的主会话。这是开旗时的行为变化；关旗恢复旧行为：
+  // 子代理 / workflow child 重新收到提醒。
+  const todoReminderEligible =
+    (goalLayerEnabled ? isMainAgentTaskType(runtime.config.taskType) : true) &&
+    tools.some((tool) => tool.name === "TodoWrite");
+  const dueTodoReminderTurns = todoReminderEligible
+    ? getDueTodoReminderTurnsSinceWrite(state.turnRequestState.entries, goalLayerEnabled)
+    : null;
+  if (dueTodoReminderTurns !== null) {
+    const currentTodos = await runtime.readSessionTodosForContext(state.turnTraceContext);
+    // 开旗：空清单或全部 completed 时没有可提醒的开放项，只提醒“该更新清单”，不提醒
+    // “该建清单”；关旗恢复旧行为（无开放项也提醒）。未提醒时 cadence 不重置，同一 turn
+    // 的后续 model step 会再次读到同一结论（单次有索引的 SELECT）；这里刻意不缓存
+    // “无开放项”，避免为 TodoWrite 中途清表引入缓存失效状态。
+    if (!goalLayerEnabled || hasOpenTodoItems(currentTodos)) {
+      const reminderBody = goalLayerEnabled
+        ? buildTodoReminderBody(currentTodos, dueTodoReminderTurns)
+        : buildTodoReminderBody(currentTodos);
+      commitTurnRequestEntries(runtime, state.turnRequestState, [
+        systemReminderAttachmentEntry("todo_reminder", reminderBody),
+      ]);
+      await runtime.persistSyntheticUserNoticeForSession({
+        messageID: createMessageId(),
+        metadata: { runtimeMessage: todoReminderRuntimeMetadata() },
+        sessionId: runtime.sessionId,
+        source: "todo_reminder",
+        text: reminderBody,
+        traceContext: state.turnTraceContext,
+      });
+    }
+  }
+  const silentReminderBody =
+    state.modelStepCount > 0 && querySourceForTask(runtime.config.taskType) === "main_turn"
+      ? buildSilentTurnReminderBody(state.turnRequestState.entries)
+      : null;
+  if (silentReminderBody) {
+    // 历史是计数的唯一来源；先持久化再提交，避免失败后留下已提醒的虚假标记。
+    await persistAnnouncements(
+      runtime,
+      state.turnRequestState,
+      [systemReminderAttachmentEntry("silent_turn_reminder", silentReminderBody)],
+      state.turnTraceContext,
+    );
+  }
+  // （2026-09-12）：原"回合开始注入 plugin_ui_state reminder"已删除，插件给模型的信息
+  // 一律走 ui/update-model-context。
+  // output_style 每次收集都产出，不去重。修复原因：只在首步发且不落 session 时，
+  // 工具批次后的请求缺少它，resume 后的前缀也会变化。
+  const outputStyleReminderBody = buildRuntimeOutputStyleReminderBody(state.turnOutputStyle);
+  // Dream 可能在同一 turn 的首个模型请求期间完成；每次收集都检查，把一次性更新放进紧随其后的请求。
+  // 修复原因：作为只属于单次请求的 entry 时，后续请求缺少它，同一会话内的请求前缀因此变化。
+  const pendingMemoryUpdate = runtime.pendingMemoryUpdate;
+  const memoryUpdate = consumePendingProjectMemoryUpdate(runtime);
+  try {
+    await persistAnnouncements(
+      runtime,
+      state.turnRequestState,
+      [
+        ...(outputStyleReminderBody
+          ? [systemReminderAttachmentEntry("output_style", outputStyleReminderBody)]
+          : []),
+        ...(memoryUpdate ? [memoryUpdate] : []),
+      ],
+      state.turnTraceContext,
+    );
+  } catch (error) {
+    // 修复原因：更新先取出再写库，写库失败时这条一次性更新会永久丢失。
+    // 放回去由下一次收集再发；期间 Dream 产生了更新的版本时保留新的。
+    runtime.pendingMemoryUpdate ??= pendingMemoryUpdate;
+    throw error;
+  }
+}
+
+async function appendToolSearchAnnouncement(
+  runtime: AgentRuntimeInternal,
+  state: RegularTurnLoopState,
+  tools: ReturnType<typeof getTurnTools>,
+): Promise<void> {
+  const announcement = buildToolSearchAnnouncement({
+    model: state.model,
+    mode: runtime.config.toolSearch?.mode,
+    tools,
+    registry: runtime.getToolRegistry(),
+    entries: state.turnRequestState.entries,
+  });
+  // 公告正文和增量事实必须先一起落盘；否则 fork/resume 会把已公告工具重新当成首次出现。
+  await persistAnnouncements(
+    runtime,
+    state.turnRequestState,
+    announcement ? [announcement] : [],
+    state.turnTraceContext,
+    state.model,
+  );
+}
+
+function isPlanModeExitPending(entries: readonly RuntimeMessageEntry[]): boolean {
+  const latest = entries.findLast(
+    (entry) =>
+      isRuntimeAttachmentEntry(entry) &&
+      (entry.metadata.source === "runtime_mode" || entry.metadata.source === "plan_mode_exit"),
+  );
+  return latest?.metadata?.source === "runtime_mode";
+}
+
 function liveTargetBudgetDeltas(state: RegularTurnLoopState) {
   const guard = state.targetBudget;
   if (!guard) return {};
@@ -319,10 +437,10 @@ function liveTargetBudgetDeltas(state: RegularTurnLoopState) {
  *   exhausted,本回合剩余请求不再暴露工具(getTurnTools),并注入一次终局提示;
  * - 回合首步(active 且未耗尽)注入目标锚点:objective + 三维用量 + 75% 收敛指引。
  */
-function evaluateTurnTargetBudgetGuard(
+async function evaluateTurnTargetBudgetGuard(
   runtime: AgentRuntimeInternal,
   state: RegularTurnLoopState,
-): void {
+): Promise<void> {
   // 关旗时三维预算整体缺席（turn.ts 不挂 targetBudget）;这里再显式早退，
   // 保证 target_anchor 的注入点也只在开旗时可达。
   if (!isGoalLayerEnabled(runtime.config)) return;
@@ -330,6 +448,25 @@ function evaluateTurnTargetBudgetGuard(
   if (!guard) return;
   const live = liveTargetBudgetDeltas(state);
   const exhausted = findExhaustedTargetBudgetDimension(guard.goal, live);
+  // 目标卡片要看到回合内的实时用量：DB 只在回合结束记账，若等结算再发，
+  // 长回合会一直显示 Token 0。这里按 model step 发布权威投影事件（绝对用量），
+  // 不写 DB；回合结束的 run_finished/usage_accounted 会以持久值收口。
+  if (guard.liveTokensUsed !== state.tokenCount) {
+    guard.liveTokensUsed = state.tokenCount;
+    await runtime.recordTargetChanged({
+      action: "usage_accounted",
+      previousTarget: guard.goal,
+      reason: "live-usage",
+      source: "runtime",
+      target: {
+        ...guard.goal,
+        activeRunStartedAtMs: guard.goal.activeRunStartedAtMs ?? guard.turnStartedAtMs,
+        timeUsedSeconds: guard.goal.timeUsedSeconds + (live.timeUsedSecondsDelta ?? 0),
+        tokensUsed: guard.goal.tokensUsed + (live.tokensUsedDelta ?? 0),
+      },
+      traceContext: state.turnTraceContext,
+    });
+  }
   if (!exhausted) {
     if (state.modelStepCount === 0) {
       // 只进 turn-local request history(appendTurnRequestEntries),不写 canonical

@@ -201,7 +201,7 @@ describe("applyVerdicts M4 档位分派 + M6 方案门", () => {
     seedTriggerEvent(db, "t-1");
     const sink: TriggerDecisionLogEntryInput[] = [];
 
-    expect(() =>
+    await expect(
       applyVerdicts(
         {
           db,
@@ -213,7 +213,7 @@ describe("applyVerdicts M4 档位分派 + M6 方案门", () => {
         "batch-1",
         [{ triggerId: "t-1", disposition: "accept", scheme: VALID_SCHEME }],
       ),
-    ).toThrow(/未注入 specRun 端口/);
+    ).rejects.toThrow(/未注入 specRun 端口/);
 
     expect(sink).toHaveLength(0);
     const status = db
@@ -302,5 +302,85 @@ describe("applyVerdicts M4 档位分派 + M6 方案门", () => {
     await flushAsync();
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("subagent 启动失败");
+  });
+
+  it("真实 red ChengGate：不启动 spec run，decision_log 留 record_only 计数，状态收敛", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    seedTriggerEvent(db, "t-gate-red");
+    db.prepare("update trigger_events set payload = ? where id = ?").run(
+      JSON.stringify({ text: "hi", chengJobId: "job-red" }),
+      "t-gate-red",
+    );
+    const sink: TriggerDecisionLogEntryInput[] = [];
+    const starts: TriggerSpecRunInput[] = [];
+    await applyVerdicts(
+      {
+        db,
+        decisionLog: makeDecisionLog(sink),
+        now: () => NOW,
+        mandate: mandateReturning("speculative"),
+        proposalGate: true,
+        specRun: {
+          start: async (input) => {
+            starts.push(input);
+          },
+        },
+        resolveSpecRunGate: async (jobId) => {
+          expect(jobId).toBe("job-red");
+          // 真实 evaluateChengGate 的红结果形状；由 host verify 产出。
+          return { ok: false, level: "BLOCKED", reasons: ["settle_not_solved"] };
+        },
+      },
+      "batch-gate-red",
+      [{ triggerId: "t-gate-red", disposition: "accept", scheme: VALID_SCHEME }],
+    );
+    await flushAsync();
+
+    expect(starts).toEqual([]);
+    // 出站门在事务前/落库前生效：连 accept 卡行都不写，只留 record_only 审计。
+    expect(sink.map((entry) => entry.disposition)).toEqual(["record_only"]);
+    expect(sink[0]?.reason).toBe("cheng_gate_blocked:settle_not_solved");
+    const status = db
+      .prepare("select adjudication_status from trigger_events where id = 't-gate-red'")
+      .get() as { adjudication_status: string };
+    expect(status.adjudication_status).toBe("record_only");
+  });
+
+  it("真实 green ChengGate 随 specRun 输入传递", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    seedTriggerEvent(db, "t-gate-green");
+    db.prepare("update trigger_events set payload = ? where id = ?").run(
+      JSON.stringify({ text: "hi", chengJobId: "job-green" }),
+      "t-gate-green",
+    );
+    const starts: TriggerSpecRunInput[] = [];
+    await applyVerdicts(
+      {
+        db,
+        decisionLog: makeDecisionLog([]),
+        now: () => NOW,
+        mandate: mandateReturning("speculative"),
+        proposalGate: true,
+        specRun: {
+          start: async (input) => {
+            starts.push(input);
+          },
+        },
+        resolveSpecRunGate: async () => ({
+          ok: true,
+          level: "DIAGNOSTIC_NOT_ACCEPTANCE",
+          reasons: [],
+        }),
+      },
+      "batch-gate-green",
+      [{ triggerId: "t-gate-green", disposition: "accept", scheme: VALID_SCHEME }],
+    );
+    await flushAsync();
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      chengJobId: "job-green",
+      chengGate: { ok: true, level: "DIAGNOSTIC_NOT_ACCEPTANCE" },
+    });
   });
 });

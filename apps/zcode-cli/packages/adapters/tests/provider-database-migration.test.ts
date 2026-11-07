@@ -88,8 +88,9 @@ describe("DB109 会话库正式数据迁移", () => {
     const ledger = db.prepare("SELECT * FROM schema_migration ORDER BY id").all();
     entry({ providerId: legacyProvider, modelId: "GLM-5.3" });
     store = await createSqliteSessionStore({ dbPath: path });
-    // 0025 为 session_target 增列并 backfill 回合预算默认值、0026 增 revision;升级打开会
-    // 连带应用这两条迁移,无关表比对时对 session_target 的演进列做等价归一,其余表必须逐行不变。
+    // 0025 为 session_target 增列并 backfill 回合预算默认值、0026 增 revision;
+    // 0027 增 acceptance_level、0028 增 cheng 引用三列;升级打开会连带应用这些迁移,
+    // 无关表比对时对 session_target 的演进列做等价归一,其余表必须逐行不变。
     expect(unrelated.map((table) => db.prepare(`SELECT * FROM ${table}`).all())).toEqual(
       before.map((rows, index) =>
         unrelated[index] === "session_target"
@@ -99,6 +100,10 @@ describe("DB109 会话库正式数据迁移", () => {
               turn_budget: 256,
               turns_used: 0,
               wall_clock_budget_seconds: null,
+              acceptance_level: "production",
+              cheng_job_id: null,
+              cheng_task: null,
+              cheng_run_id: null,
             }))
           : rows,
       ),

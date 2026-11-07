@@ -15,17 +15,21 @@ afterEach(() => {
 
 const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
 
-function seedTriggerEvent(database: DatabaseSync, id: string): void {
+function seedTriggerEvent(
+  database: DatabaseSync,
+  id: string,
+  payload = '{"text":"hi"}',
+): void {
   database
     .prepare(
       `insert into trigger_events (
         id, workspace_identity, source, thread_key, actor_kind, actor_id, payload,
         payload_digest, taint, provider, provider_message_id, fast_path,
         adjudication_status, final_disposition, settled_at, created_at, updated_at
-      ) values (?, 'ws-a', 'im', 'bot:bot-1:u1:t1', 'human', 'u1', '{"text":"hi"}',
+      ) values (?, 'ws-a', 'im', 'bot:bot-1:u1:t1', 'human', 'u1', ?,
         'digest', 1, 'feishu', ?, 'unowned_candidate', 'pending', null, null, ?, ?)`,
     )
-    .run(id, `pm-${id}`, NOW, NOW);
+    .run(id, payload, `pm-${id}`, NOW, NOW);
 }
 
 function makeDecisionLog(sink: TriggerDecisionLogEntryInput[]): {
@@ -84,12 +88,114 @@ describe("super-agent-trigger applyVerdicts（§2.1，P2 全收敛 would-accept�
     expect(Number(subs.n)).toBe(0);
   });
 
+  it("verdict chengPlanId 写 trigger_events 引用列，并与 decision_log 同事务", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    seedTriggerEvent(db, "t-plan");
+
+    const sink: TriggerDecisionLogEntryInput[] = [];
+    await applyVerdicts(
+      { db, decisionLog: makeDecisionLog(sink), now: () => NOW },
+      "batch-plan",
+      [
+        {
+          triggerId: "t-plan",
+          disposition: "record-only",
+          chengPlanId: "cheng-plan://job-1",
+        },
+      ],
+    );
+
+    expect(
+      db
+        .prepare(
+          "select adjudication_status, cheng_plan_id from trigger_events where id = 't-plan'",
+        )
+        .get(),
+    ).toEqual({ adjudication_status: "record_only", cheng_plan_id: "cheng-plan://job-1" });
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toMatchObject({
+      triggerId: "t-plan",
+      chengPlanId: "cheng-plan://job-1",
+    });
+  });
+
+  it("红 ChengGate 丢弃 would-accept 卡：只落 record_only 审计，不产出卡", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    seedTriggerEvent(
+      db,
+      "t-card-gate",
+      JSON.stringify({ text: "card candidate", chengJobId: "job-red" }),
+    );
+
+    const sink: TriggerDecisionLogEntryInput[] = [];
+    await applyVerdicts(
+      {
+        db,
+        decisionLog: makeDecisionLog(sink),
+        now: () => NOW,
+        resolveSpecRunGate: async () => ({
+          ok: false,
+          level: "BLOCKED",
+          reasons: ["settle_not_solved"],
+        }),
+      },
+      "batch-card-gate",
+      [{ triggerId: "t-card-gate", disposition: "record-only", reason: "would accept" }],
+    );
+
+    expect(sink).toHaveLength(1);
+    expect(sink[0]).toMatchObject({
+      triggerId: "t-card-gate",
+      disposition: "record_only",
+      reason: "cheng_gate_blocked:settle_not_solved",
+    });
+    expect(
+      db
+        .prepare(
+          "select adjudication_status, final_disposition from trigger_events where id = 't-card-gate'",
+        )
+        .get(),
+    ).toEqual({ adjudication_status: "record_only", final_disposition: null });
+    const cards = db
+      .prepare(
+        "select count(*) as n from decision_log where workspace_identity = 'ws-a' and disposition = 'would_accept'",
+      )
+      .get() as { n: number };
+    expect(Number(cards.n)).toBe(0);
+  });
+
+  it("带 chengJobId 但未注入 outbound gate resolver → 事务前抛错，零卡零写入", async () => {
+    db = await openSuperAgentDatabase({ databasePath: ":memory:" });
+    seedTriggerEvent(
+      db,
+      "t-card-no-gate",
+      JSON.stringify({ text: "card candidate", chengJobId: "job-red" }),
+    );
+    const sink: TriggerDecisionLogEntryInput[] = [];
+
+    await expect(
+      applyVerdicts(
+        { db, decisionLog: makeDecisionLog(sink), now: () => NOW },
+        "batch-no-gate",
+        [{ triggerId: "t-card-no-gate", disposition: "record-only" }],
+      ),
+    ).rejects.toThrow(/未注入 outbound gate resolver/);
+    expect(sink).toHaveLength(0);
+    expect(
+      db
+        .prepare(
+          "select adjudication_status, final_disposition from trigger_events where id = 't-card-no-gate'",
+        )
+        .get(),
+    ).toEqual({ adjudication_status: "pending", final_disposition: null });
+  });
+
   it("FK 不命中整批拒绝：零写入（fail-closed，不部分执行）", async () => {
     db = await openSuperAgentDatabase({ databasePath: ":memory:" });
     seedTriggerEvent(db, "t-valid");
 
     const sink: TriggerDecisionLogEntryInput[] = [];
-    expect(() =>
+    await expect(
       applyVerdicts(
         { db, decisionLog: makeDecisionLog(sink), now: () => NOW },
         "batch-2",
@@ -98,7 +204,7 @@ describe("super-agent-trigger applyVerdicts（§2.1，P2 全收敛 would-accept�
           { triggerId: "t-missing", disposition: "accept" },
         ],
       ),
-    ).toThrow(/整批拒绝执行/);
+    ).rejects.toThrow(/整批拒绝执行/);
 
     expect(sink).toHaveLength(0);
     const status = db
@@ -127,7 +233,7 @@ describe("super-agent-trigger applyVerdicts（§2.1，P2 全收敛 would-accept�
       },
     };
 
-    expect(() =>
+    await expect(
       applyVerdicts(
         { db, decisionLog: failingDecisionLog, now: () => NOW },
         "batch-rollback",
@@ -136,7 +242,7 @@ describe("super-agent-trigger applyVerdicts（§2.1，P2 全收敛 would-accept�
           { triggerId: "t-second", disposition: "reject" },
         ],
       ),
-    ).toThrow(/decision_log 写入冲突/);
+    ).rejects.toThrow(/decision_log 写入冲突/);
 
     const statuses = db
       .prepare(

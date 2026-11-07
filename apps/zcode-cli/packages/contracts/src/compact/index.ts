@@ -189,6 +189,10 @@ export const compactRecoveryPointerSchema = z
     fileMap: z.array(z.string().min(1).max(512)).max(64).default([]),
     openQuestions: z.array(z.string().min(1).max(1_000)).max(32).default([]),
     recallSeedIds: z.array(RecallResourceIdSchema).max(32).default([]),
+    /** 显式 Cheng run 引用；只允许抄本会话真实见过的 run id。 */
+    chengRunId: z.string().min(1).max(512).optional(),
+    /** 显式 ChengPlan 引用；与 goal 的 chengRef/绿 gate 卡同源。 */
+    chengPlanId: z.string().min(1).max(512).optional(),
   })
   .strict();
 

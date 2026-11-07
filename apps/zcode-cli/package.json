@@ -1,6 +1,6 @@
 {
   "name": "zcode-cli",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "private": true,
   "description": "ChengCode Agent CLI: a cross-platform TypeScript Node.js CLI with a small TUI and optional SEA packaging.",
   "type": "module",

@@ -1,0 +1,5 @@
+csg_spec_v2_cli_run: verdict=FAIL metric=gap
+csg_spec_v2_cli_run: reason=p06_fib not solved (M5 spec search exhausted (exhausted(budget)): task=p06_fib status=exhausted(budget) expansions=11044292 settles=0 backtracks=0 noul_prunes=0 type_prunes=78 round_cuts=0 own_prunes=0 illformed=0 true_while_cuts=0 const_val_cuts=0 cut_const_pair=0 quota_cuts=0 quota_boxes=4 quota_used_max=0 stage3_settles=0 stage3_compile_fails=0 stage3_cache_hits=0 settle_passed=18 settle_final=18 settle_cases=18 settle_sha=06f807d05c0d09cea004d7e982be092aa63e9cd970d886b61f8f40b2c481274f fair_cuts=0 fair_passes=2 spec_sha=not_owned spec_got= spec_want=c60281d1fd330e56ee9349f1e2d3e349d83a0bc0dd81053106cb56df37c38827 syn_row_evals=5403477)
+csg_spec_v2_cli_run: mode=diagnostic
+csg_spec_v2_cli_run: production_acceptance=0
+csg_spec_v2_cli_run: driver_sha256=bd9a95ce76df79715be6fa172c0d8f31c56726ad0649c2a115f16ff7c13766b4

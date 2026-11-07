@@ -13,13 +13,15 @@ const INTRO =
   "Create and run a dynamic workflow: a TypeScript script that orchestrates multiple model-driven subagents with plain control flow (loops, conditionals, fan-out) and typed intermediate results. The script is typechecked, the user is asked to confirm it, and the run starts in the background; you are notified with its final result when it settles. Compilation errors come back as diagnostics.";
 
 /**
- * 只按「用户是否点名」路由（用户裁决 2026-09-16，docs/dynamic-workflow/launch.md「When the
- * model may call it」）：工作流只能由 `/workflow` 或明确请求发起，模型不得自行决定开一条。
+ * 路由按用户 2026-11-06 裁决：ChengCode 内多步、并行、长跑或必须跨重启的工作优先工作流。
+ * 原因：workflow run 有 journal，重启后可恢复；Agent/Task 子代理只在内存，进程结束即消失。
+ * 工作流启动前会弹确认，用户仍掌握规模与 token 的最终决定权。
  */
 const WHEN_TO_USE = [
   "When to use:",
   '- The user explicitly asks for a workflow — "use a workflow", "with a workflow", "使用 workflow", "用工作流", or any phrasing that names workflow/工作流 as the means: this tool is mandatory. Do not substitute the Agent/Task subagent tools, do not do the work inline yourself, and do not judge the task too small for a workflow — the user chose the tool, and that choice is theirs. Size only decides how many subagents the script gets, never whether it is written.',
-  "- Without such an explicit request, do not start a workflow: delegate with the Agent tool or do the work yourself, even for multi-step or multi-subagent tasks.",
+  "- Prefer a workflow by default for multi-step, parallel, long-running, or restart-durable work: runs are journaled and resume after restart; Agent/Task subagents are memory-only and disappear when the process exits.",
+  "- Use Agent/Task only for a single short delegation, or when the user explicitly asks for a subagent. CreateWorkflow confirms the script first, so the user controls scale.",
 ].join("\n");
 
 const SKILL_GATE = `Before writing or revising a script, load the \`${DYNAMIC_WORKFLOW_SKILL_NAME}\` skill with the Skill tool: it carries the facade declarations the script is checked against, the authoring rules, and this tool's full contract. A call that submits a script is refused until that skill has been loaded in this session; running a saved workflow by name is exempt.`;

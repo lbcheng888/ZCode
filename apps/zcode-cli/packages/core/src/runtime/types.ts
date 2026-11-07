@@ -1,11 +1,17 @@
-import type { ToolSearchExecutionContext, ToolSearchMode } from "@zcode/contracts";
-import type { RequestVerificationReason } from "@zcode/shared";
+import type {
+  GoalContinuationChengPlanCard,
+  SessionGoal,
+  ToolSearchExecutionContext,
+  ToolSearchMode,
+} from "@zcode/contracts";
+import type { ExecutionState, RequestVerificationReason } from "@zcode/shared";
 import type {
   HostAttachmentAdmissionFacts,
   PromptTriggerSource,
 } from "@zcode/shared/zcode-protocol-v4";
 import type { PermissionMandateFacts } from "../permission/service.js";
 import type { CapabilityTicketAuthorization } from "../permission/capability-ticket.js";
+import type { WorkspaceWriteLeaseAdmissionPort } from "../tool/types.js";
 import type { GetAgentDefinitions, LoadAgentDefinitions } from "../subagent/definitions.js";
 import type { RuntimeInputPresentation, TurnExecutionModelFallbackReason } from "@zcode/contracts";
 /* eslint-disable max-lines -- Runtime 类型集中承载 core/runtime 对外结构，拆分需要单独迁移。 */
@@ -32,6 +38,8 @@ import type {
 import type { ZCodeProviderAccountAccess } from "@zcode/shared";
 import type { EffectiveModelSelectionResult } from "@zcode/shared/model-selection";
 import type { RuntimeMessageEntry } from "../agent/message-history.js";
+import type { ProviderToolRound } from "./provider-tool-rounds/contract.js";
+import type { ChengReadPort } from "../tool/cheng-read-port.js";
 import type {
   CompactPhase,
   CompactReason,
@@ -275,8 +283,17 @@ export interface AgentRuntimeConfig {
   workspacePath?: string;
   /** 仅用于持久化隔离；文件与命令执行仍使用 workingDirectory。 */
   workspaceIdentity?: WorkspaceId;
+  /**
+   * 本 runtime 所属 spec run 的写租约 owner（triggerId）。仅程序化 spec child 设置；
+   * 手动会话/subagent 不设，写工具 admission 据此识别第二写者。
+   */
+  writeLeaseOwnerRunId?: string;
   envInfo?: EnvInfo; // Optional, will be auto-detected if not provided
-  currentDate?: string; // YYYY-MM-DD, resolved by adapter when omitted
+  /**
+   * YYYY-MM-DD，缺省由 adapter 解析。只用于 ContextBuilder 日期段的用量统计；
+   * 模型看到的日期公告一律取运行时时钟（固定日期请注入 `now`）。
+   */
+  currentDate?: string;
   userInstructions?: UserInstructionsOptions; // P1: AGENTS.md
   projectContext?: ProjectContext; // P2: auto-detected if not provided
   skillMetadataBudget?: number;
@@ -293,6 +310,11 @@ export interface ResumeSessionOptions {
    * 必须高于历史 session mode；交互式 resume 未指定时保持 undefined，让历史 mode 生效。
    */
   modeOverride?: CollaborationMode;
+  /**
+   * 调用方已算出的完整执行状态（模式与 Plan），覆盖历史 mode 与落盘的执行状态。子会话恢复时传入：
+   * 子会话模式必须按父会话当前状态重算，不能沿用子会话落盘时的模式。
+   */
+  executionStateOverride?: ExecutionState;
 }
 
 export interface MainTurnCacheHitAggregate {
@@ -340,6 +362,12 @@ export interface MemoryRuntimeConfig {
   workspaceIdentity?: string;
 }
 
+export interface RuntimeChengGateVerdict {
+  readonly ok: boolean;
+  readonly level: "PRODUCTION" | "DIAGNOSTIC_NOT_ACCEPTANCE" | "BLOCKED";
+  readonly reasons: readonly string[];
+}
+
 export interface AgentRuntimeDeps {
   /** 只读目录入口；必须同步读取内存，不在请求收集阶段进行 I/O。 */
   getAgentDefinitions?: GetAgentDefinitions;
@@ -365,6 +393,27 @@ export interface AgentRuntimeDeps {
   hookRunner?: HookRunner;
   workspaceHookAdmission?: WorkspaceHookRuntimeAdmissionPort;
   workspaceHookSnapshot?: WorkspaceHookBundleSnapshot;
+  /**
+   * goal 完成门的程序谓词（S4）：在 LLM completion verifier 之前求值。红 gate 直接返回
+   * passed=false，LLM 不参与、不能翻案；undefined = 该目标没有 ChengGate 事实。
+   */
+  targetCompletionChengGate?: (
+    target: SessionGoal,
+  ) => Promise<RuntimeChengGateVerdict | undefined>;
+  /**
+   * 完成门要求的最低 acceptance 等级（S4）：缺省 production——diagnostic 绿即使 ok=true
+   * 也不能过门；diagnostic 仅供显式开发/回归目标关闭该门。
+   */
+  targetCompletionAcceptanceLevel?: "diagnostic" | "production";
+  /**
+   * goal continuation 的 ChengPlan 路线卡（compact，只注入 plan_id/frontier/recommended/
+   * evidence_refs）。undefined = 无 plan 事实；不伪造空卡。
+   */
+  goalContinuationChengPlan?: (
+    target: SessionGoal,
+  ) => Promise<GoalContinuationChengPlanCard | undefined>;
+  /** workspace 写工具 admission；缺省 = 未启用（feature flag 关）。 */
+  workspaceWriteLeaseAdmission?: WorkspaceWriteLeaseAdmissionPort;
   executionPort?: ExecutionPort;
   /** browser-use 控制端口；透传到 ToolExecutionContext.browserControlPort 供 node_repl 使用。 */
   browserControlPort?: BrowserControlPort;
@@ -395,6 +444,12 @@ export interface AgentRuntimeDeps {
    * 包装（受闸门约束），主 runtime 拿治理器的 observer（只喂信号）；缺席即不设闸门。
    */
   modelRequestAdmission?: ModelRequestAdmission;
+  /**
+   * 主代理 subagent（`Agent` 工具）的准入端口工厂：派生 subagent 时以**当前**父 sessionId 调用，
+   * 结果作为子 runtime 的 `modelRequestAdmission`（受闸门约束，同一父会话的 subagent 共用一条队列）。
+   * 缺席时子 runtime 沿用父的 `modelRequestAdmission`。
+   */
+  subagentModelRequestAdmission?: (parentSessionId: string) => ModelRequestAdmission;
   onOffPeakLifecycleEvent?: (
     event: import("./off-peak/lifecycle.js").OffPeakLifecycleEvent,
   ) => void;
@@ -402,6 +457,8 @@ export interface AgentRuntimeDeps {
   /** workflow run 的提交/观察/取消端口；存在即 CreateWorkflow 真启动，缺席则回占位诊断。 */
   dynamicWorkflowRunPort?: DynamicWorkflowRunPort;
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
+  /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
+  chengReadPort?: ChengReadPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
@@ -861,7 +918,6 @@ export interface ResumeSessionResult extends SessionHistoryHydrationResult {
   /** resume 是否写回了当前 materialization 无法完整反映的 compact 修补事实。 */
   persistedMessagesReloadRequired: boolean;
   readFileStateRestoredCount: number;
-  readFileStateSkippedRangeReadCount: number;
   readFileStateSkippedUnreadableEditCount: number;
   traceId: TraceId;
 }
@@ -876,6 +932,7 @@ export interface PermissionDecisionResult {
 export interface ExecuteToolsOptions {
   toolSearch?: ToolSearchExecutionContext;
   automationTurn?: boolean;
+  automationId?: string;
   offPeakTurn?: boolean;
   signal?: AbortSignal;
   traceContext?: TraceContext;
@@ -977,8 +1034,10 @@ export interface RunModelTextRequestOptions {
 }
 
 export interface RuntimeModelStreamSnapshot {
+  /** 当前轮（最后一个服务端内置工具之后）的内容；之前的轮在 providerToolRounds。 */
   reasoning: ModelReasoningContentBlock[];
   text: string;
+  providerToolRounds?: readonly ProviderToolRound[];
 }
 
 export interface StreamedToolExecutionResult {
@@ -996,6 +1055,8 @@ export interface RuntimeModelTextResult {
   reasoning?: ModelReasoningContentBlock[];
   text: string;
   toolCalls?: ModelToolCall[];
+  /** 服务端内置工具切出的前序轮次；text/reasoning 只保留最后一轮。 */
+  providerToolRounds?: ProviderToolRound[];
   usage: ModelUsage;
 }
 

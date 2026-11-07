@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { HostError } from "../src/errors.js";
-import { projectGraph, projectSettle, projectVerify } from "../src/projections.js";
+import {
+  evaluateVerifyGate,
+  evaluateVerifyPlan,
+  projectGraph,
+  projectSettle,
+  projectVerify,
+} from "../src/projections.js";
 import { jobRecord, tempDir } from "./helpers.js";
 
 const FIXTURES = fileURLToPath(new URL("../../cheng-contract/tests/fixtures", import.meta.url));
@@ -41,6 +47,21 @@ describe("projections", () => {
     expect(result.structure).toBeNull();
     expect(result.structureReason).toContain("modules.tsv");
     expect(result.artifactRef).toBe(P02_RUN);
+    // 真实 ChengGate：缺 settle 回执 = 红，不是从摘要推断的“看起来可以”。
+    const gate = evaluateVerifyGate(result);
+    expect(gate.level).toBe("BLOCKED");
+    expect(gate.ok).toBe(false);
+    expect(gate.reasons).toContain("settle_receipt_missing");
+    const plan = evaluateVerifyPlan({
+      receipt: result.receipt,
+      settle: result.settle,
+      structure: result.structure,
+      task: "p02_min2",
+      jobId: "a".repeat(64),
+    });
+    expect(plan.plan.kind).toBe("cheng_plan");
+    expect(plan.plan.candidates.length).toBeGreaterThan(0);
+    expect(plan.gate.level).toBe("BLOCKED");
   });
 
   it("projects a real trace into settle and decision graph receipts", () => {

@@ -1,4 +1,5 @@
 export { createWriteLeases } from "./repo.js";
+export { WriteLeaseConflictError } from "./contract.js";
 export type {
   AcquireWriteLeaseInput,
   SuperAgentWriteLeasesContract,

@@ -34,6 +34,11 @@ export interface SpecRunDispatchInput {
   tier: "speculative" | "auto";
   reason?: string;
   evidence?: readonly string[];
+  /**
+   * S1 交付门预检：ChengGate 结果（结构兼容 `ChengGateResult`，避免 spec-lane 直接依赖
+   * cheng-contract 包）。红 gate = 静默丢弃：不 acquire 租约、不 prepare egress、不 launch。
+   */
+  chengGate?: SpecRunGateVerdict;
   card?: {
     currentEvidence: string;
     candidateOptions: readonly { option: string; cost: string }[];
@@ -42,6 +47,42 @@ export interface SpecRunDispatchInput {
     verification: string;
   };
 }
+
+/** ChengGate 判定结果的最小结构；ok=false 即红（BLOCKED）。 */
+export interface SpecRunGateVerdict {
+  readonly ok: boolean;
+  readonly level: "PRODUCTION" | "DIAGNOSTIC_NOT_ACCEPTANCE" | "BLOCKED";
+  readonly reasons: readonly string[];
+}
+
+/** 红 gate 拒绝启动：零租约、零 egress、零 launch。 */
+export class SpecRunGateBlockedError extends Error {
+  readonly code = "spec_run_gate_blocked";
+  constructor(
+    readonly triggerId: string,
+    readonly gate: SpecRunGateVerdict,
+  ) {
+    super(
+      `spec run 拒绝启动：ChengGate=${gate.level} 红（${gate.reasons.join(", ") || "no reason"}）`,
+    );
+    this.name = "SpecRunGateBlockedError";
+  }
+}
+
+/** write_leases 最小端口（结构兼容 SuperAgentWriteLeasesContract）。 */
+export interface SpecRunWriteLeasePort {
+  acquire(input: {
+    workspaceIdentity: string;
+    ownerRunId: string;
+    scope: string;
+    leaseExpiresAt: number;
+    now: number;
+  }): { id: string };
+  release(id: string, now?: number): boolean;
+}
+
+/** spec run 写租约默认持有 30 分钟；终态/取消时立即释放，过期由 sweepExpired 兜底。 */
+export const SPEC_RUN_WRITE_LEASE_TTL_MS = 30 * 60_000;
 
 /** subagent run 启动端口：组合根把既有 subagent 启动路径包成该形状（spec §6-1）。 */
 export interface SpecRunLaunchPort {
@@ -73,6 +114,15 @@ export interface SpecRunDispatcherDeps {
   resolveWorkspaceRoot: (input: SpecRunDispatchInput) => string;
   /** per-repo 依赖镜像白名单（spec §4.3）；缺省 [] = 零 egress。 */
   resolveAllowHosts?: (workspaceRoot: string) => readonly string[];
+  /**
+   * S1 写租约：在 queue/egress 之前 acquire，第二写者抛 `WriteLeaseConflictError`；
+   * run 终态/失败都在 finally release。缺省 = 不启用（P2 字节兼容）。
+   */
+  writeLease?: SpecRunWriteLeasePort;
+  /** 写租约 TTL；缺省 {@link SPEC_RUN_WRITE_LEASE_TTL_MS}。 */
+  leaseTtlMs?: number;
+  /** 固定时钟（测试）；缺省 Date.now。 */
+  now?: () => number;
   /**
    * P6 OS 级 egress 围栏（spec §3）。缺省 = 现状协作式代理（flag off）。
    * 提供时强制：prepare 失败（平台不支持/权限不足/探测不确定）抛 typed
@@ -216,18 +266,34 @@ export function createSpecRunDispatcher(deps: SpecRunDispatcherDeps): {
       if (workspaceRoot.trim().length === 0) {
         throw new Error("spec run 拒绝启动：workspaceRoot 为空");
       }
-      const previous = queues.get(workspaceRoot) ?? Promise.resolve();
-      // 前一个 run 的失败不阻断后续排队 run（各自 error 原样上抛给各自调用方）。
-      const current = previous.catch(() => undefined).then(() => runOnce(input, workspaceRoot));
-      const tail = current.then(
-        () => undefined,
-        () => undefined,
-      );
-      queues.set(workspaceRoot, tail);
+      // S1 交付门预检先于租约/egress/queue：红 gate 不产生任何出站或写入。
+      if (input.chengGate && !input.chengGate.ok) {
+        throw new SpecRunGateBlockedError(input.triggerId, input.chengGate);
+      }
+      const now = deps.now?.() ?? Date.now();
+      const lease = deps.writeLease?.acquire({
+        workspaceIdentity: input.workspaceIdentity,
+        ownerRunId: input.triggerId,
+        scope: JSON.stringify([workspaceRoot]),
+        leaseExpiresAt: now + (deps.leaseTtlMs ?? SPEC_RUN_WRITE_LEASE_TTL_MS),
+        now,
+      });
       try {
-        await current;
+        const previous = queues.get(workspaceRoot) ?? Promise.resolve();
+        // 前一个 run 的失败不阻断后续排队 run（各自 error 原样上抛给各自调用方）。
+        const current = previous.catch(() => undefined).then(() => runOnce(input, workspaceRoot));
+        const tail = current.then(
+          () => undefined,
+          () => undefined,
+        );
+        queues.set(workspaceRoot, tail);
+        try {
+          await current;
+        } finally {
+          if (queues.get(workspaceRoot) === tail) queues.delete(workspaceRoot);
+        }
       } finally {
-        if (queues.get(workspaceRoot) === tail) queues.delete(workspaceRoot);
+        if (lease) deps.writeLease!.release(lease.id, deps.now?.() ?? Date.now());
       }
     },
   };

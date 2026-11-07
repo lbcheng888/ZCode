@@ -20,12 +20,21 @@ would-accept）、per-workspace leader 租约门控。热路径零 LLM（spec A1
   decision_log routed 行由 Intake 在 ingest 时落（§3.1 步 2），分派器不重复落行。
 - routeOwned 回执全为 admitted|duplicate 才落 final_disposition=routed；任一
   rejected → 终态保持未决（NULL，供启动重放扫描 §4 流五 3 覆盖）并返回
-  delivery_failed，调用方不得按已路由消费。
+  delivery_failed，调用方不得按已路由消费。payload 带 `chengJobId` 时 fan-out 前
+  求真实 gate；红 gate 返回 `gate_blocked`、final_disposition=record_only、零投递；
+  缺 resolver 抛错（fail-closed）。
 - applyVerdicts fail-closed：decision.triggerId 全量校验 + 写入整段包在
   BEGIN IMMEDIATE 事务内，任一行未命中或任一写失败整体 ROLLBACK 后上浮、零部分
   执行（前提：decisionLog 端口与域库同句柄）；P2 无 Mandate 行为，accept/record-only
   收敛 decision_log(would_accept) + adjudication_status=record_only，reject 落
-  decision_log(reject) + rejected，不建订阅不触发执行。
+  decision_log(reject) + rejected，不建订阅不触发执行。decision 带 `chengPlanId`
+  时同一 UPDATE 写 `trigger_events.cheng_plan_id`（migration 0006），与
+  `decision_log.cheng_plan_id` 同事务；引用真实性由裁决驱动器对 tool-loop 回执先行校验。
+- ChengGate 出站前置：payload 带 `chengJobId` 时，非 reject 决议在事务前经
+  `resolveSpecRunGate` 求 gate。红 gate = 静默丢弃：只落
+  decision_log(record_only, reason=cheng_gate_blocked)、不写 would-accept 卡、不启动
+  run；绿 gate 随 `TriggerSpecRunInput.chengGate` 进 dispatcher 预检。带 chengJobId
+  但未注入 resolver = 事务前抛错（零写入）。
 - leader 租约：BEGIN IMMEDIATE + upsert WHERE 守卫 + changes()>0 断言（§3.3）；
   断言不过 = follower（回滚，不启动控制面循环）。heartbeat 掉锁即主动降级。
 - 订阅租约：唯一 active 约束（partial unique）保回填/写入幂等（§5.1）；upsert =

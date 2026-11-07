@@ -3,15 +3,20 @@
  *
  * 双闸设计：
  * - toolAllowlist（会话级，fail-closed 主闸）：只放行 M3 钦定的只读面——
- *   trigger/订阅/目标摘要/recall。P2 现存工具中只有 Recall 与 GoalRead 属于该面；
- *   trigger/订阅读工具落地后在此追加。未知未来工具默认排除。
+ *   trigger/订阅/目标摘要/recall + Cheng 只读事实（ChengInspect/ChengPlan）。
+ *   未知未来工具默认排除。
  * - toolDisallowlist（turn 级纵深，automation/off-peak sendPrompt 同型）：
  *   枚举全部已知执行/副作用工具——即便宿主只接了 turn 级黑名单（sendPrompt 只有
  *   toolDisallowlist 面），verdict JSON 之外也零副作用（T1）。
  */
 
 /** 会话级只读工具白名单（M3 工具面）。空/缺席 = 零工具。 */
-export const ADJUDICATION_TOOL_ALLOWLIST = ["Recall", "GoalRead"] as const;
+export const ADJUDICATION_TOOL_ALLOWLIST = [
+  "Recall",
+  "GoalRead",
+  "ChengInspect",
+  "ChengPlan",
+] as const;
 
 /**
  * turn 级执行工具黑名单（T1：裁决会话无任何执行工具）。
@@ -27,6 +32,12 @@ export const ADJUDICATION_TOOL_DISALLOWLIST = [
   "Read",
   "Glob",
   "Grep",
+  // Cheng 生成/验证面（只读 ChengInspect/ChengPlan 在主闸白名单）
+  "ChengGenerate",
+  "ChengVerify",
+  "ChengExplain",
+  "cheng.generate",
+  "cheng.verify",
   // 子代理/技能/外发
   "Agent",
   "Skill",
@@ -62,6 +73,7 @@ export const ADJUDICATION_TOOL_DISALLOWLIST = [
   "GoalCreate",
   "GoalUpdate",
   "GoalBlock",
+  "GoalChengBind",
   // 交互/模式/协调
   "AskUserQuestion",
   "EnterPlanMode",

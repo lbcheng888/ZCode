@@ -17,6 +17,27 @@ import type { SiteTable } from "./sites.js";
 /** world.run 非字面量 cmd 的诊断码（9001 = facade-siting、9002 = schema，顺延）。 */
 export const WORLD_RUN_LITERAL_CODE = 9003;
 
+/** world.run 调 Cheng 生成/判分脚本的诊断码。 */
+export const WORLD_RUN_DENIED_CODE = 9004;
+
+/**
+ * Cheng 生成面的 runner 脚本 basename。生成必须以 `cheng.generate` 走 host（journal 效应 +
+ * manifest pin）；在 workflow 里用 `world.run` 调这些脚本会绕过 journal、预算帽与 manifest。
+ * 命中 cmd 本身或任一字符串字面量实参的 basename 即拒。
+ */
+export const CHENG_RUNNER_BASENAMES = [
+  "csg_generate.sh",
+  "csg_spec_v2_cli_run",
+  "csg_ast_m5_run.sh",
+  "cheng_decide.sh",
+] as const;
+
+function deniedRunnerBasename(value: string): string | undefined {
+  const parts = value.split(/[\\/]/);
+  const base = parts[parts.length - 1] ?? value;
+  return (CHENG_RUNNER_BASENAMES as readonly string[]).includes(base) ? base : undefined;
+}
+
 export interface WorldRunCommands {
   /** 脚本声明的命令集：去重、字典序（确认窗与 driver 复验共用的形状）。 */
   commands: string[];
@@ -39,6 +60,37 @@ export function collectWorldRunCommands(
     const cmd = site.args[0];
     if (cmd !== undefined && ts.isStringLiteralLike(cmd)) {
       commands.add(cmd.text);
+      const denied = deniedRunnerBasename(cmd.text);
+      if (denied !== undefined) {
+        const loc = workflow.toScriptLoc(cmd.getStart());
+        diagnostics.push({
+          code: WORLD_RUN_DENIED_CODE,
+          column: loc.column,
+          line: loc.line,
+          message: `world.run must not invoke the Cheng runner script "${denied}": generation/verification must go through cheng.generate/cheng.verify so the job is journaled, budgeted and manifest-pinned.`,
+        });
+        continue;
+      }
+      // `world.run("bash", ["tools/csg_generate.sh", ...])`：cmd 是通用 shell，脚本名在字面量实参里。
+      for (const arg of site.args.slice(1)) {
+        const elements = ts.isArrayLiteralExpression(arg) ? arg.elements : [arg];
+        let reported = false;
+        for (const element of elements) {
+          if (!ts.isStringLiteralLike(element)) continue;
+          const deniedArg = deniedRunnerBasename(element.text);
+          if (deniedArg === undefined) continue;
+          const loc = workflow.toScriptLoc(element.getStart());
+          diagnostics.push({
+            code: WORLD_RUN_DENIED_CODE,
+            column: loc.column,
+            line: loc.line,
+            message: `world.run must not invoke the Cheng runner script "${deniedArg}" (even as an argument to a shell): use cheng.generate/cheng.verify so the job is journaled, budgeted and manifest-pinned.`,
+          });
+          reported = true;
+          break;
+        }
+        if (reported) break;
+      }
       continue;
     }
     // 元数错误（cmd 缺席）由类型检查先拦：能走到这里的缺席意味着调用点连编译都不该过，

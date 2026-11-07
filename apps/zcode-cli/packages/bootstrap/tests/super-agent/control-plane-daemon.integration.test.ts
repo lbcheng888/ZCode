@@ -36,7 +36,10 @@ afterEach(async () => {
 
 interface ChildMessages {
   messages: Array<Record<string, unknown>>;
-  waiting: Array<{ predicate: (m: Record<string, unknown>) => boolean; resolve: (m: Record<string, unknown>) => void }>;
+  waiting: Array<{
+    predicate: (m: Record<string, unknown>) => boolean;
+    resolve: (m: Record<string, unknown>) => void;
+  }>;
   exited: Promise<{ code: number | null; signal: string | null }>;
 }
 
@@ -185,7 +188,9 @@ async function connectRpc(
       // child 反向请求（host.* / backfill.seeds）：测试作为 Core 侧回执。
       if (typeof frame.id === "string" && typeof frame.method === "string") {
         const result = hostResult(frame.method, frame.params);
-        socket.write(`${JSON.stringify({ v: CONTROL_PLANE_RPC_VERSION, id: frame.id, ok: true, result })}\n`);
+        socket.write(
+          `${JSON.stringify({ v: CONTROL_PLANE_RPC_VERSION, id: frame.id, ok: true, result })}\n`,
+        );
       }
     }
   });
@@ -266,7 +271,11 @@ describe("super-agent control-plane child", () => {
         await writeFile(endpoint, "stale", "utf8");
       }
 
-      const { child, ipc } = await spawnDaemon({ dataBaseDir, serverRoot, trustedPid: process.pid });
+      const { child, ipc } = await spawnDaemon({
+        dataBaseDir,
+        serverRoot,
+        trustedPid: process.pid,
+      });
       const ready = await waitForMessage(ipc, (m) => m.type === "ready");
       expect(ready.protocolVersion).toBe(CONTROL_PLANE_PROTOCOL_VERSION);
       if (process.platform !== "win32") {
@@ -370,7 +379,7 @@ describe("super-agent control-plane child", () => {
         expect(existsSync(endpoint)).toBe(false);
       }
 
-      const dbPath = join(dataBaseDir, ".zcode", "v2", "super-agent.sqlite");
+      const dbPath = join(dataBaseDir, ".chengcode", "v2", "super-agent.sqlite");
       const db = new DatabaseSync(dbPath);
       try {
         const events = db
@@ -509,9 +518,7 @@ describe("super-agent control-plane child", () => {
 
       // params 不符合 shared schema 必须映射为 proto.invalidParams（不是 workspace.failed），
       // 且只回错误、不断开连接。
-      await expect(client.request("lease.get", {})).rejects.toThrow(
-        /proto\.invalidParams/,
-      );
+      await expect(client.request("lease.get", {})).rejects.toThrow(/proto\.invalidParams/);
       const afterInvalidParams = (await client.request("lease.list", {})) as {
         workspaces: unknown[];
       };
@@ -533,7 +540,11 @@ describe("super-agent control-plane child", () => {
       const dataBaseDir = join(root, "data");
       const serverRoot = join(root, "server");
       const endpoint = resolveControlPlaneSocketPath(serverRoot);
-      const { child, ipc } = await spawnDaemon({ dataBaseDir, serverRoot, trustedPid: process.pid });
+      const { child, ipc } = await spawnDaemon({
+        dataBaseDir,
+        serverRoot,
+        trustedPid: process.pid,
+      });
       await waitForMessage(ipc, (m) => m.type === "ready");
       const client = await connectRpc(endpoint);
 
@@ -618,7 +629,7 @@ describe("super-agent control-plane child", () => {
           method: "workspace.ensure",
           params: {
             workspaceIdentity: "ws-1",
-            tasksIndexDatabasePath: join(root, "other", ".zcode", "v2", "tasks-index.sqlite"),
+            tasksIndexDatabasePath: join(root, "other", ".chengcode", "v2", "tasks-index.sqlite"),
           },
         })}\n`,
       );
@@ -702,7 +713,12 @@ describe("super-agent control-plane child", () => {
           providerMessageId: "m-resume",
           threadKeyHint: "bot:bot-1+user-1",
           actor: { kind: "human", id: "user-1" },
-          payload: { botId: "bot-1", chatType: "private", chatId: "user-1", text: "hello m-resume" },
+          payload: {
+            botId: "bot-1",
+            chatType: "private",
+            chatId: "user-1",
+            text: "hello m-resume",
+          },
           taint: true,
         })) as { handled: boolean; triggerId: string; route: string; delivery?: string };
         expect(result).toMatchObject({

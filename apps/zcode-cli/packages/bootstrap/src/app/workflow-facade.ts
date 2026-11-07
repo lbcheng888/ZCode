@@ -19,6 +19,7 @@ import {
   type AgentRuntimeDeps,
   type PermissionService,
   type WorkflowAgentRunner,
+  type WorkspaceWriteLeaseAdmissionPort,
 } from "@zcode/core";
 import {
   type AgentExecutionTelemetryPort,
@@ -71,6 +72,8 @@ interface CreateWorkflowFacadeDeps {
   sessionStore: SessionStorePort;
   storageRoot: string;
   traceContext: TraceContext;
+  /** 父会话的 workspace 写租约 admission；workflow child 不带 owner，写入口直接拒绝。 */
+  workspaceWriteLeaseAdmission: WorkspaceWriteLeaseAdmissionPort | undefined;
   workingDirectory: string;
 }
 
@@ -88,7 +91,8 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
       await deps.prepareUserExecutionBoundary({ traceContext: request.traceContext });
       const workflowKind = request.workflowKind ?? builtInExpertWorkflowDefinition.kind;
       const childSessionId = createSessionId(`workflow_${request.activityId}`);
-      const childTraceContext = createChildTraceContext(request.traceContext ?? deps.traceContext, {
+      const parentTraceContext = request.traceContext ?? deps.traceContext;
+      const childTraceContext = createChildTraceContext(parentTraceContext, {
         attributes: {
           parentSessionId: deps.sessionId,
           workflowActivityId: request.activityId,
@@ -97,6 +101,7 @@ export function createWorkflowFacade(deps: CreateWorkflowFacadeDeps): WorkflowFa
           workflowRunId: request.runId,
         },
         sessionId: childSessionId,
+        rootSessionId: parentTraceContext.rootSessionId ?? deps.sessionId,
       });
       const parentSelection = deps.runtime.getSessionModelSelection();
       await request.onChildSessionStarted?.({
@@ -403,6 +408,7 @@ export function createWorkflowChildRuntime(
           processEnv: options.processEnv ?? deps.appOptions.env ?? process.env,
         }),
       fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
+      workspaceWriteLeaseAdmission: deps.workspaceWriteLeaseAdmission,
       httpClientPort:
         deps.appOptions.httpClientPort ??
         createNodeWebFetchHttpClientAdapter({

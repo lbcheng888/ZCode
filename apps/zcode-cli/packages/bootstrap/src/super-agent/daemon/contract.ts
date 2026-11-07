@@ -32,6 +32,15 @@ export {
 } from "./planeManager.js";
 
 export {
+  DAEMON_TASK_NOTIFICATION_BLOCKED,
+  createDaemonWatchdog,
+  type DaemonNotificationChannel,
+  type DaemonTaskNotificationPort,
+  type DaemonWatchdogAssembly,
+  type DaemonWatchdogOptions,
+} from "./watchdog.js";
+
+export {
   ADJUDICATION_MAX_OUTPUT_TOKENS,
   AdjudicationSessionUnavailableError,
   type AdjudicationSessionAssembly,

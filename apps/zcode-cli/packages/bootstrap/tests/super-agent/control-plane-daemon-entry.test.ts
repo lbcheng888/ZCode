@@ -49,9 +49,7 @@ describe("parseControlPlaneEntryConfig", () => {
   });
 
   it("显式 peer 门开关由 env 投影，缺省关闭", () => {
-    expect(
-      parseControlPlaneEntryConfig({ argv: [], env: ENV }).peerMode,
-    ).toBe(false);
+    expect(parseControlPlaneEntryConfig({ argv: [], env: ENV }).peerMode).toBe(false);
     expect(
       parseControlPlaneEntryConfig({
         argv: [],
@@ -77,12 +75,12 @@ describe("parseControlPlaneEntryConfig", () => {
   });
 
   it("未知参数 / 缺值响亮失败", () => {
-    expect(() =>
-      parseControlPlaneEntryConfig({ argv: ["--unknown=1"], env: ENV }),
-    ).toThrow(/unknown control-plane argument/);
-    expect(() =>
-      parseControlPlaneEntryConfig({ argv: ["--data-base-dir"], env: ENV }),
-    ).toThrow(/requires a value/);
+    expect(() => parseControlPlaneEntryConfig({ argv: ["--unknown=1"], env: ENV })).toThrow(
+      /unknown control-plane argument/,
+    );
+    expect(() => parseControlPlaneEntryConfig({ argv: ["--data-base-dir"], env: ENV })).toThrow(
+      /requires a value/,
+    );
   });
 
   it("generation/数据目录缺失时拒绝启动", () => {
@@ -146,9 +144,9 @@ describe("control-plane 端点与生命周期 schema", () => {
       notEnsuredIngestCount: 6,
     };
     expect(controlPlaneMessageSchema.safeParse(health).success).toBe(true);
-    expect(
-      controlPlaneMessageSchema.safeParse({ ...health, unexpected: true }).success,
-    ).toBe(false);
+    expect(controlPlaneMessageSchema.safeParse({ ...health, unexpected: true }).success).toBe(
+      false,
+    );
     expect(
       controlPlaneMessageSchema.safeParse({
         ...health,
@@ -203,8 +201,8 @@ describe("assertControlPlaneStorageRoot", () => {
     const root = await mkdtemp(join(tmpdir(), "zcode-cp-root-"));
     roots.push(root);
     const paths = assertControlPlaneStorageRoot(root);
-    expect(paths.superAgentDatabasePath).toBe(join(root, ".zcode", "v2", "super-agent.sqlite"));
-    expect(paths.tasksIndexDatabasePath).toBe(join(root, ".zcode", "v2", "tasks-index.sqlite"));
+    expect(paths.superAgentDatabasePath).toBe(join(root, ".chengcode", "v2", "super-agent.sqlite"));
+    expect(paths.tasksIndexDatabasePath).toBe(join(root, ".chengcode", "v2", "tasks-index.sqlite"));
   });
 });
 

@@ -1,7 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { RouteOwnedOutcome, TriggerDeliveryReceipt } from "./contract.js";
+import type {
+  RouteOwnedOutcome,
+  TriggerChengGateVerdict,
+  TriggerDeliveryReceipt,
+} from "./contract.js";
 import type { TriggerHostDeliveryPort } from "./ports.js";
+import { evaluateTriggerOutboundChengGate } from "./outbound-gate.js";
 import { extractPayloadText, TRIGGER_DISPATCH_TEXT_MAX_CHARS } from "./payload-text.js";
 import { getTriggerEvent, setTriggerEventFinalDisposition } from "./trigger-events-access.js";
 import type { createTriggerSubscriptions } from "./subscriptions.js";
@@ -20,6 +25,8 @@ export interface EventRouterDeps {
   db: DatabaseSync;
   subscriptions: TriggerSubscriptions;
   delivery: TriggerHostDeliveryPort;
+  /** trigger payload 带 chengJobId 时的真实 gate；缺席 = 带 job 的 reply 装配错误。 */
+  resolveGate?: (jobId: string) => Promise<TriggerChengGateVerdict>;
   now?: () => number;
 }
 
@@ -41,6 +48,16 @@ export async function routeOwned(
   const now = deps.now?.() ?? Date.now();
   const event = getTriggerEvent(deps.db, triggerId);
   if (!event) return { kind: "not_found", triggerId };
+
+  // 回复出站门：带 chengJobId 的 owned 事件先求真实 gate；红 gate 静默丢弃，
+  // final_disposition=record_only（owner 无订阅投递）。
+  const gate = await evaluateTriggerOutboundChengGate(event, {
+    resolveGate: deps.resolveGate,
+  });
+  if (!gate.allowed) {
+    setTriggerEventFinalDisposition(deps.db, triggerId, "record_only", now);
+    return { kind: "gate_blocked", triggerId, reason: gate.reason };
+  }
 
   const subscribers = deps.subscriptions.listActive(
     event.workspaceIdentity,

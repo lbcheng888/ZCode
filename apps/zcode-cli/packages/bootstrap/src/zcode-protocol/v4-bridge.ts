@@ -1,3 +1,5 @@
+import { SessionLifecycleError } from "../session-lifecycle/index.js";
+import { closeSessionRuntime, getSessionLifecycle } from "./session-residency.js";
 import { isReadonlyAgentSessionKind } from "@zcode/shared";
 import { readBackgroundBashOutputFromOwner } from "./background-work-owner.js";
 // v4 网关 binder。
@@ -17,7 +19,7 @@ import {
   type ZCodeSessionContextUsage,
   type ZCodeWorkspaceRef,
 } from "@zcode/shared";
-import { createExternalTurnFaultError } from "@zcode/core";
+import { createExternalTurnFaultError, normalizeGenUiInput } from "@zcode/core";
 import type { GoalStatus } from "@zcode/contracts";
 import {
   V4_NOTIFICATIONS,
@@ -106,7 +108,7 @@ import {
 } from "./workspace-model-runtime.js";
 import {
   afterStateMutation,
-  activateSessionForResume,
+  activateSessionRuntime,
   discardFailedSessionResume,
   createSessionRecordForV4,
   ensureSessionModelAvailableForNextTurn,
@@ -290,6 +292,7 @@ interface InputCommandForAdmission {
   kind: ConversationInputIntent["kind"];
   text: string;
   attachments: readonly AttachmentRef[];
+  genUiContext?: ConversationInputIntent["genUiContext"];
   sharedContextRefs?: ConversationInputIntent["sharedContextRefs"];
   requestedDelivery?: ConversationInputIntent["delivery"]["requested"];
   admittedDelivery?: ConversationInputIntent["delivery"]["admitted"];
@@ -366,6 +369,7 @@ export function resolveInputCommandForAdmission(
       text: string;
       attachments?: AttachmentRef[];
       context_refs?: ConversationInputIntent["sharedContextRefs"];
+      genUiContext?: ConversationInputIntent["genUiContext"];
       highspeedMeta?: ConversationInputIntent["highspeed"];
       inputOrigin?: "desktop" | "mobile";
       conversationQuotes?: import("@zcode/contracts").TurnInputIntentMetadata["conversationQuotes"];
@@ -373,7 +377,9 @@ export function resolveInputCommandForAdmission(
     };
     return {
       kind: envelope.type,
-      text: payload.text,
+      ...(envelope.type === "sendText"
+        ? normalizeGenUiInput(payload.text, payload.genUiContext)
+        : { text: payload.text }),
       attachments: payload.attachments ?? [],
       ...(payload.context_refs ? { sharedContextRefs: payload.context_refs } : {}),
       ...(payload.highspeedMeta ? { highspeed: payload.highspeedMeta } : {}),
@@ -402,6 +408,9 @@ export function resolveInputCommandForAdmission(
     canonical.intent.provenance?.sourceCommandId ?? canonical.intent.sourceCommandId;
   return {
     kind: canonical.intent.kind,
+    ...(canonical.intent.genUiContext !== undefined
+      ? { genUiContext: canonical.intent.genUiContext }
+      : {}),
     ...(canonical.intent.inputOrigin ? { inputOrigin: canonical.intent.inputOrigin } : {}),
     ...((payload.conversationQuotes ?? canonical.intent.conversationQuotes)
       ? { conversationQuotes: payload.conversationQuotes ?? canonical.intent.conversationQuotes }
@@ -466,6 +475,7 @@ function buildForkInitialInput(
     ...(input.conversationQuotes ? { conversationQuotes: input.conversationQuotes } : {}),
     ...(input.botGroupSource ? { botGroupSource: input.botGroupSource } : {}),
     text: input.text,
+    ...(input.genUiContext !== undefined ? { genUiContext: input.genUiContext } : {}),
     attachments: input.attachments,
     delivery: {
       requested,
@@ -740,6 +750,22 @@ export function createConversationV4Gateway(
       scheduleAutoDrainRetry(record);
       return;
     }
+    // 冷恢复后队列里可能残留上次已消费的 /goal 命令；它一旦被自动提升会把
+    // 已暂停的目标重新拉起，违反「重启必须暂停」。goal 命令只在目标仍 active 时
+    // 允许自动排空；paused/complete/读取失败一律留给用户显式发送。
+    if (head.kind === "sendGoalCommand") {
+      try {
+        const target = await record.app.readTarget();
+        if (!target || target.status !== "active") return;
+      } catch (error) {
+        context.logger?.warn("v4 auto-drain held because target state could not be read", {
+          error: error instanceof Error ? error.message : String(error),
+          queueItemId: head.queueItemId,
+          sessionId: record.app.sessionId,
+        });
+        return;
+      }
+    }
     // 开旗：目标状态不参与排队顺序（驱动器在空闲沿让位），这里传 null 即旧条件的
     // 放行分支。关旗：恢复旧行为，读真实目标状态；读失败时按“未知且未完成”继续 hold，
     // 避免 goal 终态尚未可证时普通 queue 偷跑。
@@ -913,6 +939,7 @@ export function createConversationV4Gateway(
         clientId: envelope.clientId || "cli",
         kind,
         text: input.text ?? "",
+        ...(input.genUiContext !== undefined ? { genUiContext: input.genUiContext } : {}),
         attachments: attachmentRefs,
         ...(input.sharedContextRefs ? { sharedContextRefs: input.sharedContextRefs } : {}),
         delivery: {
@@ -949,6 +976,9 @@ export function createConversationV4Gateway(
             admittedDelivery: conversationInputIntent.delivery.admitted,
             ...(fallbackReasonCode ? { fallbackReasonCode } : {}),
             attachmentRefs,
+            ...(conversationInputIntent.genUiContext !== undefined
+              ? { genUiContext: conversationInputIntent.genUiContext }
+              : {}),
             ...(conversationInputIntent.sharedContextRefs
               ? { sharedContextRefs: conversationInputIntent.sharedContextRefs }
               : {}),
@@ -1262,16 +1292,8 @@ export function createConversationV4Gateway(
         // handler 已校验存在性；此处只兜并发竞态（重复删除幂等成功）。
         return;
       }
-      record.unsubscribe?.();
-      await record.app.close?.();
-      // v4 通道：会话关闭同时清 publisher / 订阅调度；重开会话走 snapshot 冷启动。
-      // disposeSession 必须在注册表删除之前调用——
-      // gateway 靠 getSessionWorkspaceId（读 context.sessions）定位 workspace 才能把
-      // session.removed 推给 sessions-index 订阅者；先 delete 再 dispose 时 workspaceId
-      // 恒为 null，删除会话后侧栏列表项永不消失（e2e conversation-session-v4-sidebar 抓出）。
-      context.v4Gateway?.disposeSession(sessionId, { deleted: true });
+      await closeSessionRuntime(context, sessionId, true);
       queuedTurnExecutions.delete(sessionId);
-      context.sessions.delete(sessionId);
     },
     // createSession 的执行面：record 建立/事件接线/catalog 同步/失败自清理全在旧
     // createSession op 内（半初始化 record 的回收顺序修过 bug，不重复实现）。
@@ -1633,7 +1655,9 @@ export function createConversationV4Gateway(
   };
   return new ConversationV4Gateway({
     cliVersion: context.deps.version,
-    sessionExists: (sessionId) => context.sessions.has(sessionId),
+    isSessionStopping: (sessionId) => context.sessionLifecycle?.isStopping(sessionId) ?? false,
+    sessionExists: (sessionId) =>
+      context.sessions.has(sessionId) && (context.sessionLifecycle?.isReady(sessionId) ?? true),
     reconcileSessions: async ({ workspaceId, sessionIds }) => {
       const store = context.deps.sessionStore;
       if (!store) throw new Error("Session store is unavailable");
@@ -1718,8 +1742,35 @@ export function createConversationV4Gateway(
       additionalDirectories?: string[],
       persistedMessages?: MessageWithParts[],
     ) => {
-      const persisted = await context.deps.sessionStore?.getSession(sessionId as SessionId);
-      if (!persisted || persisted.time.deleted !== undefined) {
+      const existingRecord = context.sessions.get(sessionId);
+      let activated: Awaited<ReturnType<typeof activateSessionRuntime>> | undefined;
+      try {
+        // 必须先登记生命周期，再读取启动信息。否则 restart 会等待旧 opening，
+        // 迟到的旧读取又加入 restart，双方永久等待。
+        await getSessionLifecycle(context).initialize(
+          sessionId,
+          async () => {
+            const persisted = await context.deps.sessionStore?.getSession(sessionId as SessionId);
+            if (!persisted || persisted.time.deleted !== undefined) {
+              throw new SessionLifecycleError("sessionNotFound", `Session not found: ${sessionId}`);
+            }
+            activated = await activateSessionRuntime(
+              context,
+              {
+                sessionId,
+                // attachment 的 workspace 身份与附加目录仍由原恢复入口传递。
+                ...(workspace ? { workspace } : {}),
+                ...(additionalDirectories !== undefined ? { additionalDirectories } : {}),
+                ...(resumeThoughtLevel ? { thoughtLevel: resumeThoughtLevel } : {}),
+              },
+              { reusePersistedMessages: true, persistedMessages },
+            );
+          },
+          workspace,
+        );
+      } catch (error) {
+        if (!(error instanceof SessionLifecycleError) || error.code !== "sessionNotFound")
+          throw error;
         context.logger?.warn("ZCode Protocol v4 cold resume has no persisted session", {
           activeSessionCount: context.sessions.size,
           event: "zcode_protocol.v4.resume_persisted_missing",
@@ -1728,27 +1779,13 @@ export function createConversationV4Gateway(
         });
         return { status: "notFound" };
       }
-      const existingRecord = context.sessions.get(sessionId);
-      const activated = await activateSessionForResume(
-        context,
-        {
-          sessionId,
-          // session.path 可能是规范化后的执行 cwd，不能覆盖当前 attachment
-          // 已知的 workspace 身份。旧 session 没有 attachment 上下文时仍走原有持久化回退。
-          ...(workspace ? { workspace } : {}),
-          ...(additionalDirectories !== undefined ? { additionalDirectories } : {}),
-          ...(resumeThoughtLevel ? { thoughtLevel: resumeThoughtLevel } : {}),
-        },
-        { reusePersistedMessages: true, persistedMessages },
-      );
+      const record = activated?.record ?? context.sessions.get(sessionId);
+      if (!record) throw new Error("Session runtime unavailable after initialization");
       return {
         status: "resumed",
-        persistedMessages: activated.persistedMessages,
+        persistedMessages: activated?.persistedMessages,
         ...(!existingRecord
-          ? {
-              disposeOnFailure: () =>
-                discardFailedSessionResume(context, sessionId, activated.record),
-            }
+          ? { disposeOnFailure: () => discardFailedSessionResume(context, sessionId, record) }
           : {}),
       };
     },
@@ -1780,6 +1817,10 @@ export function createConversationV4Gateway(
     // 快照不发布 pendingWouldAccept，UI 按 unknown≠0 不渲染）。
     getSessionWouldAcceptSeed: (sessionId) =>
       context.sessions.get(sessionId)?.app.superAgentControlPlane?.listPendingWouldAccept() ??
+      null,
+    // backgroundRuns 同源：控制面 registry 读面；[] = 已发布零行，null = 不发布。
+    getSessionBackgroundRunsSeed: (sessionId) =>
+      context.sessions.get(sessionId)?.app.superAgentControlPlane?.listBackgroundRuns() ??
       null,
     getSessionConfigSeed: (sessionId) => {
       const record = context.sessions.get(sessionId);

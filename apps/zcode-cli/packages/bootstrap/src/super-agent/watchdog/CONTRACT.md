@@ -11,11 +11,12 @@
 - LLM 无进展裁决缺省 OFF（`llmNoProgressAdjudication: false`，不进 contracts config）；OFF 时裁决器零调用。裁决产出 `{ proposal, targetId? }`：枚举（`validateRepairAction`）与目标（targetId 解析到真实可执行的 registry 行）两级程序校验，任一不过即拒绝执行、不计入熔断。goalHint 半边缺席（端口缺席 / undefined / 空关键词）⇒ 该轮跳过比较，streak 保持，`TickReport.progressSkippedReason` 带原因。
 - 看门狗无提示词/策略编辑权：progress-vs-objective 只读，模块内不存在 prompt/策略写路径。
 - 熔断：连续 N（默认 3）次**状态变更类**（cancel-stalled / pause-automation）已执行 repair 失败 ⇒ `pauseGoal` + `notifyUser`；升级后冷却（默认 10min）。校验/目标拒绝不计入 N；notify-user 成败都不进计数（成功不重置、失败不累加）。
-- registry-stall 只判 register 时声明 `heartbeat` 的行（owner 承诺周期回写）；running 行均未声明 ⇒ 该探针 skipped（数据源缺席不造数）。分工（spec §9 实施偏差）：仅 runtime-background-task 行声明并周期 touch（周期严格 < stalenessCapMs，留轮询粒度余量）；workflow 行禁止声明——其 updatedAt 是 20min cancel-stalled 独立时钟，心跳双计 liveness→progress 会永久压掉 cancel-stalled。
+- registry-stall 只判 register 时声明 `heartbeat` 的行（owner 承诺周期回写）；running 行均未声明 ⇒ 该探针 skipped（数据源缺席不造数）。分工（spec §9 实施偏差）：仅 runtime-background-task 行声明并周期 touch（周期严格 < stalenessCapMs，留轮询粒度余量）；workflow 行禁止声明——其 updatedAt 是 20min cancel-stalled 独立时钟，心跳双计 liveness→progress 会永久压掉 cancel-stalled；cheng-job 由独立 run-stalled 探针处理，registry-stall 显式排除，避免同一 stall 双 repair。
+- 生产 stall 命令面：`createStallRepairCommands` 按行 kind 分派——cheng-job → host.cancel（仅 `cancelled` 成功），workflow → run service cancel（true = abort 已发出，终态由 owner 回写）；notify-user → runtime task-notification 队列（enqueue 返回 true 才成功，未入队/异常失败，不写 registry）；pause-automation → 从 automation runId 解析 automationId，复核 row kind/workspaceKey 后调 `AutomationPort.pause`（仅 paused=true 成功）。当前 automation run 生产 projection 仍在 services/宿主进程，未绑定到本进程 super-agent registry，属已登记阻塞；pause-goal 未接时显式 unsupported；`createChengStallRepairCommands` 保留为仅 cheng 的兼容面。
 - 宿主无关：生命周期只经 `start()/stop()`；不 import 宿主 API，迁 daemon 只动组合根。
 
 与其它模块的交集（hook 点，全部经组合根接缝，spec §7-2/§7-3）：
 
 - 注册：core `background-task-registry.ts`、core `dynamic-workflow-run-track.ts`、`automationService.ts`、`offPeakTaskService.ts` 各自调结构兼容投影端口（`composition.ts` 的 `BackgroundRunProjectionPort`）；接缝未挂载 = 钩子 no-op。
 - 数据源端口：`goalState` / `triggerBacklog` / `goalHint` / `adjudicator` 缺席时对应探针显式 skipped 或 progress 休眠。
-- 升级信道绑既有 goal pause 命令面；`pause-automation` 绑 `automationService.setEnabled(false)`（组合根）。
+- 升级信道 = `createWatchdogGoalControl`（sessionStore `updateTargetStatus(paused)` + 中止前台执行 + 记录 `target_changed`）；`pause-automation` 绑 `AutomationPort.pause`（行 id 解析 automationId）。automation run projection 的跨进程绑定仍是已登记阻塞。

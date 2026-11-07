@@ -1,6 +1,7 @@
 import { scopeConversationShareServiceForAttachment } from "@zcode/services/node";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { hostname, userInfo } from "node:os";
+import { hostname } from "node:os";
+import { resolveServerOsUser } from "@zcode/shared/node";
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { Hono } from "hono";
@@ -241,7 +242,7 @@ export async function createCoreHttpServer(
     workspaces: [],
     compatibility: ZCODE_COMPATIBILITY_MANIFEST,
     migration: { failedPathCount: options.migrationFailedPathCount ?? 0 },
-    identity: { osUser: userInfo().username, hostname: hostname() },
+    identity: { osUser: resolveServerOsUser(), hostname: hostname() },
     capabilities: {
       desktopContinuous: true,
       websocketRpc: true,
@@ -250,6 +251,7 @@ export async function createCoreHttpServer(
       // P6 C2：本 Core 能在 desktop-continuous host 连接上挂载票据 admission 反向频道。
       // Desktop Host 必须看到该能力才宣告 credentialInjection 并签发票据资源。
       capabilityTicketAdmission: true,
+      remoteConversationTelemetry: true,
     },
   });
   // 裸 Set 无法落实 expiresAt，未消费的 capability 会一直有效并持续累积。

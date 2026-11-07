@@ -354,7 +354,8 @@ async function startDaemonHarness(options: {
   const dataBaseDir = join(options.root, "data");
   const serverRoot = join(options.root, "server");
   await mkdir(serverRoot, { recursive: true });
-  const tasksIndexDir = join(dataBaseDir, ".zcode", "v2");
+  // 30d725bc 迁移后数据根为 .chengcode（与 resolveTasksIndexDatabasePath 同源）。
+  const tasksIndexDir = join(dataBaseDir, ".chengcode", "v2");
   await mkdir(tasksIndexDir, { recursive: true });
   const tasksIndexPath = join(tasksIndexDir, "tasks-index.sqlite");
   const db = openTasksIndex(tasksIndexPath);

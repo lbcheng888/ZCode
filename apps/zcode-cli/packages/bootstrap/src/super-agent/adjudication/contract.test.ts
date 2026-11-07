@@ -32,7 +32,12 @@ describe("super-agent-adjudication contract", () => {
   });
 
   it("工具面双闸：白名单只有 M3 只读面，黑名单覆盖全部已知执行工具且与白名单零交集", () => {
-    expect([...ADJUDICATION_TOOL_ALLOWLIST]).toEqual(["Recall", "GoalRead"]);
+    expect([...ADJUDICATION_TOOL_ALLOWLIST]).toEqual([
+      "Recall",
+      "GoalRead",
+      "ChengInspect",
+      "ChengPlan",
+    ]);
     // fail-closed 主闸：任何执行/副作用工具都不得出现在白名单。
     for (const tool of ["Bash", "Write", "Edit", "Read", "Agent", "WebFetch", "js"]) {
       expect(ADJUDICATION_TOOL_ALLOWLIST).not.toContain(tool);
@@ -55,6 +60,7 @@ describe("super-agent-adjudication contract", () => {
       "GoalCreate",
       "GoalUpdate",
       "GoalBlock",
+      "GoalChengBind",
       "AskUserQuestion",
       "Workflow",
       "ListModels",

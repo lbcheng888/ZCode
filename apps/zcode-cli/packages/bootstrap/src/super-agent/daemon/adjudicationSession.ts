@@ -1,7 +1,8 @@
 /**
- * headless child 的裁决 model-only 会话装配（milestone-b-spec §8-7）：
- * 复用 bootstrap 既有 model-only 面（`createRuntimeAdjudicationSession` +
- * `AgentRuntime.generateWorkspaceText`，tools 恒 `[]`），不 import
+ * headless child 的裁决会话装配（milestone-b-spec §8-7）：
+ * 复用 bootstrap 既有裁决面：有只读 Cheng host 端口时走 `createToolAdjudicationSession`
+ * （allowlist 过滤后的只读工具 + 真实 ChengPlan 回执）；没有端口时保持
+ * `createRuntimeAdjudicationSession` 的零工具 model-only。不 import
  * `@zcode/services` / `@zcode/server-cli`。
  *
  * provider 装配沿用 `create-app` 的同一条链：进程 Provider Registry
@@ -20,17 +21,24 @@
  *
  * 已知接缝（如实登记，不假装已接）：① 轻量档 pin = Registry 最低推理档，不是产品级
  * 「adjudicator 模型档位」配置（design 开放问题①）；② `scheduling=background-low-priority`
- * 无独立低优先槽，走同一 provider 通道（与里程碑 A §8-3 同缺口）；③ 请求的
- * toolAllowlist/toolDisallowlist 被忽略——tools 恒 `[]` 是更严的零工具主闸。
+ * 无独立低优先槽，走同一 provider 通道（与里程碑 A §8-3 同缺口）；③ Cheng host 未配置
+ * （`ZCODE_CHENG_ROOT`/host entry 缺席）时保持零工具 model-only——请求的
+ * toolAllowlist/toolDisallowlist 不生效，ChengPlan 引用无回执可命中并 fail-closed 降级。
  */
 import { join } from "node:path";
 
 import { createInMemorySessionEventStore } from "@zcode/adapters/storage";
-import { createSessionId, type ModelSelection } from "@zcode/contracts";
+import {
+  createSessionId,
+  modelMessageContentToText,
+  type ModelSelection,
+  type ModelToolCall,
+} from "@zcode/contracts";
 import {
   AgentRuntime,
   type AgentRuntimeConfig,
   type AgentRuntimeDeps,
+  type ChengReadPort,
   type ProviderRuntimeHeadersPort,
 } from "@zcode/core";
 import {
@@ -41,6 +49,8 @@ import {
 
 import { createModelAdapter } from "../../model-factory.js";
 import { createRuntimeAiSdkModelExecutionConfig } from "../../model-config.js";
+import { resolveChengHostPortForApp } from "../../app/cheng-host-config.js";
+import { createChengReadPort } from "../../app/workflow-cheng-read-port.js";
 import { startProcessProviderRegistryRuntime } from "../../app/process-provider-registry-runtime.js";
 import {
   completeAuxiliaryRegistryModelSelection,
@@ -49,6 +59,7 @@ import {
 import { ApiProviderModelRuntime } from "../../app/provider-registry-model-runtime.js";
 import {
   createRuntimeAdjudicationSession,
+  createToolAdjudicationSession,
 } from "../../app/super-agent-control-plane.js";
 import {
   ADJUDICATION_MAX_BATCH_SIZE,
@@ -132,39 +143,112 @@ export function createUnavailableAdjudicationSession(
 }
 
 /**
- * 用既有 model-only 面构造裁决会话：`AgentRuntime.generateWorkspaceText`（tools 恒
- * `[]`，比 toolAllowlist 更严的零工具主闸）+ `createRuntimeAdjudicationSession`
+ * 构造裁决会话：未接 Cheng host 时用 model-only 面（`AgentRuntime.generateWorkspaceText`，
+ * tools 恒 `[]`，比 toolAllowlist 更严的零工具主闸）+ `createRuntimeAdjudicationSession`
  * 的 abort/缺模型检查。事件存储用内存实现（短命回合，不落会话历史）。
+ *
+ * 传入只读 `chengReadPort` 时改用与前台同型的 `createToolAdjudicationSession`：
+ * 每批一个隔离 runtime，只暴露 request allowlist 过滤后的只读 contracts；ChengPlan
+ * 真实执行后的回执随会话结果返回，供驱动器交叉校验。没有 Cheng host 时保持零工具
+ * model-only（能力缺席，不伪造 plan 回执）。
  */
 export function createHeadlessAdjudicationSession(input: {
   modelSource: HeadlessAdjudicationModelSource;
   abortSignal: AbortSignal;
   workingDirectory: string;
+  chengReadPort?: ChengReadPort;
 }): AdjudicationModelSessionPort {
-  const config: AgentRuntimeConfig = {
-    workingDirectory: input.workingDirectory,
+  const maxOutputTokensFor = (request: { candidateCount: number }) => {
+    const budget = adjudicationOutputTokenBudget(request.candidateCount);
+    const specLimit = input.modelSource.maxOutputTokensSpecLimit;
+    return specLimit === undefined ? budget : Math.min(budget, specLimit);
   };
-  const runtime = new AgentRuntime(
-    createSessionId("super-agent-adjudication"),
-    config,
-    {
+  if (input.chengReadPort === undefined) {
+    const config: AgentRuntimeConfig = {
+      workingDirectory: input.workingDirectory,
+    };
+    const runtime = new AgentRuntime(createSessionId("super-agent-adjudication"), config, {
       eventStore: createInMemorySessionEventStore(),
       modelFactory: input.modelSource.modelFactory,
       ...(input.modelSource.providerRuntimeHeadersPort
         ? { providerRuntimeHeadersPort: input.modelSource.providerRuntimeHeadersPort }
         : {}),
-    },
-  );
-  return createRuntimeAdjudicationSession({
-    // model-only 辅助生成不经过 turn 的输出预算绑定，adapter 要求显式值；预算按本批
-    // 实际候选数推导（tools=[] / prompt 语义保持组合根 helper 原样）。
-    generateWorkspaceText: (textInput, options) => runtime.generateWorkspaceText(textInput, options),
-    resolveSelection: () => input.modelSource.resolveSelection(),
+    });
+    return createRuntimeAdjudicationSession({
+      // model-only 辅助生成不经过 turn 的输出预算绑定，adapter 要求显式值；预算按本批
+      // 实际候选数推导（tools=[] / prompt 语义保持组合根 helper 原样）。
+      generateWorkspaceText: (textInput, options) =>
+        runtime.generateWorkspaceText(textInput, options),
+      resolveSelection: () => input.modelSource.resolveSelection(),
+      abortSignal: input.abortSignal,
+      resolveMaxOutputTokens: maxOutputTokensFor,
+    });
+  }
+
+  return createToolAdjudicationSession({
     abortSignal: input.abortSignal,
-    resolveMaxOutputTokens: (request) => {
-      const budget = adjudicationOutputTokenBudget(request.candidateCount);
-      const specLimit = input.modelSource.maxOutputTokensSpecLimit;
-      return specLimit === undefined ? budget : Math.min(budget, specLimit);
+    resolveMaxOutputTokens: maxOutputTokensFor,
+    createRuntime(request) {
+      const selection = input.modelSource.resolveSelection();
+      if (!selection) {
+        throw new Error("裁决会话缺模型选择（会话 Selection 与默认 Selection 均未绑定）");
+      }
+      const runtime = new AgentRuntime(
+        createSessionId("super-agent-adjudication"),
+        {
+          workingDirectory: input.workingDirectory,
+          modelSelection: selection,
+          toolAllowlist: request.toolAllowlist,
+          toolDisallowlist: request.toolDisallowlist,
+          maxTurns: 4,
+        },
+        {
+          eventStore: createInMemorySessionEventStore(),
+          modelFactory: input.modelSource.modelFactory,
+          ...(input.modelSource.providerRuntimeHeadersPort
+            ? { providerRuntimeHeadersPort: input.modelSource.providerRuntimeHeadersPort }
+            : {}),
+          chengReadPort: input.chengReadPort,
+        },
+      );
+      const toolContracts = runtime
+        .getToolRegistry()
+        .toContracts()
+        .filter(
+          (contract) =>
+            request.toolAllowlist.includes(contract.name) &&
+            !request.toolDisallowlist.includes(contract.name),
+        );
+      return {
+        toolContracts,
+        async generateText({ messages, tools, maxOutputTokens, abortSignal }) {
+          return await runtime.generateWorkspaceText(
+            {
+              selection,
+              messages,
+              tools: [...tools],
+              querySource: "super_agent_adjudication",
+              ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+            },
+            { abortSignal },
+          );
+        },
+        async executeToolCall(call, abortSignal) {
+          const toolCall: ModelToolCall = { id: call.id, name: call.name, input: call.input };
+          const schedule = await runtime.scheduleTools([toolCall]);
+          const executed = await runtime.executeTools([toolCall], schedule, {
+            signal: abortSignal,
+          });
+          const result = executed.results[0];
+          const content = result?.modelContent
+            ? modelMessageContentToText(result.modelContent)
+            : (result?.serialization?.content ?? JSON.stringify(result?.output ?? null));
+          return { content, isError: result?.success !== true };
+        },
+        async close() {
+          await runtime.close();
+        },
+      };
     },
   });
 }
@@ -264,8 +348,9 @@ export function createLazyAdjudicationSession(deps: {
 
 /**
  * 生产装配：解析 provider 配置路径 → standalone Provider Registry（含凭据 store）→
- * 真 adapter/modelFactory → pin 轻量档选择 → model-only 会话。
- * 任一步失败返回 typed 不可用端口（候选留 pending），不静默降级。
+ * 真 adapter/modelFactory → pin 轻量档选择 → 只读 Cheng host（可选）→ 裁决会话。
+ * provider/model 任一步失败返回 typed 不可用端口（候选留 pending），不静默降级；
+ * Cheng host 缺席是能力缺席，保持零工具 model-only。
  */
 export async function createEnvironmentAdjudicationSessionAssembly(input: {
   env: Record<string, string | undefined>;
@@ -305,6 +390,12 @@ export async function createEnvironmentAdjudicationSessionAssembly(input: {
   }
 
   let modelRuntime: ApiProviderModelRuntime | undefined;
+  let chengResolution: ReturnType<typeof resolveChengHostPortForApp> | undefined;
+  const closeChengHost = () => {
+    if (chengResolution?.kind === "wired") {
+      void Promise.resolve(chengResolution.port.close?.()).catch(() => undefined);
+    }
+  };
   try {
     const modelAdapter = createModelAdapter({
       env: providerEnv,
@@ -343,19 +434,32 @@ export async function createEnvironmentAdjudicationSessionAssembly(input: {
         providerRuntime.dispose();
       },
     };
+    // 只读 Cheng host 端口：与前台同一 resolver；缺 root/entry = 能力缺席，保持
+    // 零工具 model-only，不伪造 plan 回执。wired 时随会话释放底层 host。
+    chengResolution = resolveChengHostPortForApp({
+      env: input.env,
+      dataBaseDir: input.dataBaseDir,
+    });
+    const chengReadPort =
+      chengResolution.kind === "wired" ? createChengReadPort(chengResolution.port) : undefined;
     return {
       session: createHeadlessAdjudicationSession({
         modelSource,
         abortSignal: input.abortSignal,
         workingDirectory: input.dataBaseDir,
+        ...(chengReadPort === undefined ? {} : { chengReadPort }),
       }),
-      dispose: () => modelSource.dispose(),
+      dispose: () => {
+        modelSource.dispose();
+        closeChengHost();
+      },
     };
   } catch (error) {
     try {
       modelRuntime?.dispose();
     } finally {
       providerRuntime.dispose();
+      closeChengHost();
     }
     input.onUnavailable(error);
     return {

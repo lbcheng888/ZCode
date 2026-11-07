@@ -7,6 +7,12 @@ export {
   CONTROL_PLANE_LEASE_TTL_MS,
 } from "./control-plane-lease.js";
 export { routeOwned, triggerDeliveryCommandId } from "./event-router.js";
+export {
+  chengJobIdOfTriggerEvent,
+  evaluateTriggerOutboundChengGate,
+  type TriggerOutboundGateDeps,
+  type TriggerOutboundGateResult,
+} from "./outbound-gate.js";
 export { dispatchHumanExplicit } from "./human-explicit-dispatch.js";
 export { applyVerdicts } from "./verdict-interpret.js";
 export {
@@ -32,6 +38,7 @@ export type {
   RouteOwnedOutcome,
   SuperAgentTriggerContract,
   TriggerDecisionLogEntryInput,
+  TriggerChengGateVerdict,
   TriggerDeliveryInput,
   TriggerDeliveryReceipt,
   TriggerMandatePort,

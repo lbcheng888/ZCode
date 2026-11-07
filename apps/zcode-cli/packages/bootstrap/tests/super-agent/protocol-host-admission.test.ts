@@ -15,8 +15,8 @@ import { ZCodeProtocolAgentServer } from "../../src/zcode-protocol/server.js";
 import type { ZCodeApp, ZCodeAppOptions } from "../../src/app/types.js";
 import { createRegistryBackedTestApp } from "../helpers/registry-backed-test-app.js";
 
-const EVENT_ROUTER_CONFIG_SEGMENTS = [".zcode", "cli", "config.json"] as const;
-const ZCODE_V2_SEGMENTS = [".zcode", "v2"] as const;
+const EVENT_ROUTER_CONFIG_SEGMENTS = [".chengcode", "cli", "config.json"] as const;
+const ZCODE_V2_SEGMENTS = [".chengcode", "v2"] as const;
 
 let home = "";
 let cwd = "";
@@ -30,7 +30,7 @@ beforeEach(async () => {
   cwd = await mkdtemp(join(tmpdir(), "zcode-protocol-admission-ws-"));
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
-  // createConfig 的用户配置缺省路径 = ~/.zcode/cli/config.json（homedir() 取 $HOME），
+  // createConfig 的用户配置缺省路径 = ~/.chengcode/cli/config.json（homedir() 取 $HOME），
   // super-agent/tasks-index 库同理；隔离 HOME 才能让 flag 与库路径落在临时目录。
   process.env.HOME = home;
   process.env.USERPROFILE = home;
@@ -159,7 +159,7 @@ describe("协议宿主 super-agent 准入接线（spec §8-10①）", () => {
     expect(hostPorts).toBeDefined();
     expect(typeof hostPorts?.handleCommand).toBe("function");
     expect(typeof hostPorts?.autoReplyGuard?.admit).toBe("function");
-    // 库路径与 super-agent 同根解析到隔离 HOME（services 同式 {dataBaseDir}/.zcode/v2）。
+    // 库路径与 super-agent 同根解析到隔离 HOME（services 同式 {dataBaseDir}/.chengcode/v2）。
     expect(hostPorts?.superAgentDatabasePath).toBe(
       join(home, ...ZCODE_V2_SEGMENTS, "super-agent.sqlite"),
     );
@@ -171,9 +171,9 @@ describe("协议宿主 super-agent 准入接线（spec §8-10①）", () => {
     expect(plane).toBeDefined();
     expect(plane?.isLeader()).toBe(true);
     expect(plane?.listPendingWouldAccept()).toEqual([]);
-    const row = plane?.database
-      .prepare("select count(*) as n from trigger_events")
-      .get() as { n: number } | undefined;
+    const row = plane?.database.prepare("select count(*) as n from trigger_events").get() as
+      | { n: number }
+      | undefined;
     expect(row?.n).toBe(0);
   });
 

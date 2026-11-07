@@ -108,6 +108,8 @@ export function createSpecRunSubagentLaunchPort(
           {
             profile: request.profile,
             executionPort,
+            // dispatcher 用 triggerId 作写租约 owner；child 写工具 admission 凭它豁免。
+            writeLeaseOwnerRunId: request.trigger.triggerId,
             ...(deps.signal ? { signal: deps.signal } : {}),
           },
         );

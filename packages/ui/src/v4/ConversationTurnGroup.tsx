@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { BotTopicPreparation } from "@/v4/BotTopicPreparation.js";
 import { useBotTopicInterruption } from "@/v4/botGroupDeliveryContext.js";
 import { ConnectedBotGroupDeliveryAction } from "@/v4/BotGroupDeliveryAction.js";
@@ -13,7 +14,11 @@ import {
   useSyncExternalStore,
 } from "react";
 import { ChevronRightIcon, EyeIcon } from "lucide-react";
-import { type HighspeedMessageMeta, type ZCodeApiRetryStatus } from "@zcode/shared";
+import {
+  zcodeProviderRuntimeHeadersErrorCode,
+  type HighspeedMessageMeta,
+  type ZCodeApiRetryStatus,
+} from "@zcode/shared";
 import {
   TID_CHAT_ASSISTANT_HISTORY_CONTENT,
   TID_CHAT_ASSISTANT_HISTORY_TRIGGER,
@@ -57,7 +62,7 @@ import { isHighspeedShareEligible } from "@/highspeed/highspeedShare.js";
 import {
   aggregateHighspeedCardMetrics,
   getHighspeedTurnByCommandId,
-  getHighspeedTurnVersion,
+  getHighspeedTurnDependencies,
   subscribeHighspeedTurns,
   type HighspeedShareMetrics,
 } from "@/highspeed/highspeedTurnStore.js";
@@ -76,6 +81,7 @@ import {
   ENABLE_CUA_TOOL_CALL_GROUPING,
   ENABLE_EXPLORE_TOOL_CALL_GROUPING,
   ENABLE_TERMINAL_TOOL_CALL_GROUPING,
+  isCodeAssistantWorkItem,
   type ConversationAssistantWorkRenderItem,
 } from "@/v4/conversationAssistantWorkItems.js";
 import type { ConversationCuaGroupEvent } from "@/v4/conversationCuaGroups.js";
@@ -128,6 +134,8 @@ interface ConversationTurnGroupProps {
     attachments?: readonly AttachmentRef[],
     workspaceMode?: "preserve" | "rewind",
   ) => Promise<CommandAck | boolean | void> | CommandAck | boolean | void;
+  /** 会话首轮：顶部留白由 Timeline 的状态胶囊 inset 提供，本轮不再留顶部 padding。 */
+  topClearedByTimeline?: boolean;
 }
 
 interface CronAutomationTurnCard {
@@ -212,17 +220,24 @@ function toRetryStatus(apiRetry: ApiRetryState): ZCodeApiRetryStatus {
 function TurnChatLoadingSlot({
   apiRetry,
   eligible,
+  initialElapsedMs,
 }: {
   apiRetry: ApiRetryState | null;
   eligible: boolean;
+  initialElapsedMs: number;
 }) {
   const { intl, locale } = useZCodeIntl();
   const retryStatus = useMemo(() => (apiRetry ? toRetryStatus(apiRetry) : null), [apiRetry]);
-  // 前两次短暂恢复对用户等价于普通加载；保留 apiRetry 运行态，但只在
+  // 配置读取尚未发出模型请求，首次恢复就显示进度，避免用户误以为消息已发送。
+  // 其余前两次短暂恢复对用户等价于普通加载；保留 apiRetry 运行态，但只在
   // 第三次重试开始后显示计数。必须在 retry/loading 分支前收敛，否则会留下空 slot，
   // 而不是回退到 ChatLoading。
   const visibleRetryStatus =
-    retryStatus && retryStatus.attempt >= MIN_VISIBLE_API_RETRY_ATTEMPT ? retryStatus : null;
+    retryStatus &&
+    (apiRetry?.reasonCode === zcodeProviderRuntimeHeadersErrorCode.configNetwork ||
+      retryStatus.attempt >= MIN_VISIBLE_API_RETRY_ATTEMPT)
+      ? retryStatus
+      : null;
   if (!visibleRetryStatus && !eligible) return null;
   return (
     <div data-zcode-chat-loading-slot="true" className="min-h-5">
@@ -231,7 +246,7 @@ function TurnChatLoadingSlot({
       ) : (
         // running 是 ChatLoading 的权威事实；额外静默计时会让 projection
         // 更新反复重启可见性，并使 UI 晚于真实状态。
-        <ChatLoading loading data-testid={TID_CHAT_LOADING} size="sm" />
+        <ChatLoading loading data-testid={TID_CHAT_LOADING} initialElapsedMs={initialElapsedMs} />
       )}
     </div>
   );
@@ -387,6 +402,278 @@ function ConversationCuaGroupRow({
   );
 }
 
+function renderAssistantWorkItem(
+  item: ConversationAssistantWorkRenderItem,
+  context: ConversationRowRenderContext,
+  assistantCodeCommentProjectionEnabled: boolean,
+) {
+  if (item.kind === "row") {
+    return (
+      <ConversationTurnRow
+        key={item.key}
+        row={item.row}
+        context={context}
+        hideAssistantActions={item.row.kind === "assistantText"}
+        assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
+      />
+    );
+  }
+  if (item.kind === "agentToolCall") {
+    return <ConversationAgentToolCallRow key={item.key} item={item} context={context} />;
+  }
+  if (item.kind === "exploreGroup") {
+    return <ConversationExploreGroupRow key={item.key} item={item} context={context} />;
+  }
+  return <ConversationToolGroupRow key={item.key} item={item} context={context} />;
+}
+
+type AssistantWorkChunk =
+  | { kind: "item"; item: ConversationAssistantWorkRenderItem }
+  | { kind: "group"; key: string; items: ConversationAssistantWorkRenderItem[] };
+
+/**
+ * 「思考带输出配对折叠」：一个思考段连同它后面产生的终端/代码行收进同一个组，
+ * 折叠时一起隐藏，展开时按原顺序看到「思考 → 输出」。思考之后如果已经出现过
+ * 输出、又来了新的思考，则开启下一个配对组。没有配对输出的孤立思考行保持原样，
+ * 避免为单行多套一层。
+ */
+function groupAssistantWorkRenderItems(
+  items: readonly ConversationAssistantWorkRenderItem[],
+): AssistantWorkChunk[] {
+  const chunks: AssistantWorkChunk[] = [];
+  let group: ConversationAssistantWorkRenderItem[] | null = null;
+  let groupHasCode = false;
+  let sawCodeInGroup = false;
+  const flush = () => {
+    if (!group) return;
+    if (group.length === 1 && !groupHasCode) {
+      chunks.push({ kind: "item", item: group[0]! });
+    } else {
+      chunks.push({
+        kind: "group",
+        key: `thinking-output:${group[0]!.key}:${group.at(-1)!.key}`,
+        items: group,
+      });
+    }
+    group = null;
+    groupHasCode = false;
+    sawCodeInGroup = false;
+  };
+  for (const item of items) {
+    const code = isCodeAssistantWorkItem(item);
+    if (!code) {
+      if (group && sawCodeInGroup) flush();
+      group ??= [];
+      group.push(item);
+      continue;
+    }
+    if (group) {
+      group.push(item);
+      groupHasCode = true;
+      sawCodeInGroup = true;
+    } else {
+      chunks.push({ kind: "item", item });
+    }
+  }
+  flush();
+  return chunks;
+}
+
+interface AssistantWorkSummary {
+  files: number;
+  searches: number;
+  commands: number;
+  edits: number;
+  agents: number;
+  other: number;
+}
+
+/** 回合级汇总的计数口径：只数代码/工具工作，不计思考行本身。 */
+function summarizeAssistantWorkItems(
+  items: readonly ConversationAssistantWorkRenderItem[],
+): AssistantWorkSummary {
+  const summary: AssistantWorkSummary = {
+    files: 0,
+    searches: 0,
+    commands: 0,
+    edits: 0,
+    agents: 0,
+    other: 0,
+  };
+  const countTool = (toolName: string, count = 1) => {
+    switch (toolName) {
+      case "Read":
+        summary.files += count;
+        return;
+      case "Glob":
+      case "Grep":
+      case "Explore":
+      case "LocalToolSearch":
+      case "ToolSearch":
+        summary.searches += count;
+        return;
+      case "Bash":
+      case "Execute":
+      case "Terminal":
+        summary.commands += count;
+        return;
+      case "ApplyPatch":
+      case "Edit":
+      case "MultiEdit":
+      case "NotebookEdit":
+      case "Write":
+        summary.edits += count;
+        return;
+      case "Agent":
+      case "Task":
+        summary.agents += count;
+        return;
+      default:
+        summary.other += count;
+    }
+  };
+  for (const item of items) {
+    switch (item.kind) {
+      case "executeGroup":
+        for (const row of item.rows) countTool(row.toolName);
+        break;
+      case "changesGroup":
+        for (const row of item.rows) countTool(row.toolName);
+        break;
+      case "exploreGroup":
+        for (const row of item.rows) countTool(row.toolName);
+        break;
+      case "cuaGroup":
+        summary.other += item.rows.length;
+        break;
+      case "agentToolCall":
+        summary.agents += 1;
+        break;
+      case "row":
+        if (item.row.kind === "toolCall") countTool(item.row.toolName);
+        break;
+    }
+  }
+  return summary;
+}
+
+function formatWorkSummary(
+  intl: ReturnType<typeof useZCodeIntl>["intl"],
+  locale: string,
+  summary: AssistantWorkSummary,
+): string {
+  const parts: string[] = [];
+  if (summary.files > 0)
+    parts.push(intl.formatMessage({ id: "chat.history.summaryFiles" }, { count: summary.files }));
+  if (summary.searches > 0)
+    parts.push(
+      intl.formatMessage({ id: "chat.history.summarySearches" }, { count: summary.searches }),
+    );
+  if (summary.commands > 0)
+    parts.push(
+      intl.formatMessage({ id: "chat.history.summaryCommands" }, { count: summary.commands }),
+    );
+  if (summary.edits > 0)
+    parts.push(intl.formatMessage({ id: "chat.history.summaryEdits" }, { count: summary.edits }));
+  if (summary.agents > 0)
+    parts.push(intl.formatMessage({ id: "chat.history.summaryAgents" }, { count: summary.agents }));
+  if (summary.other > 0)
+    parts.push(intl.formatMessage({ id: "chat.history.summaryOther" }, { count: summary.other }));
+  return parts.join(locale.startsWith("zh") ? "、" : ", ");
+}
+
+function ConversationWorkSummaryGroup({
+  summary,
+  items,
+  context,
+  assistantCodeCommentProjectionEnabled,
+}: {
+  summary: AssistantWorkSummary;
+  items: readonly ConversationAssistantWorkRenderItem[];
+  context: ConversationRowRenderContext;
+  assistantCodeCommentProjectionEnabled: boolean;
+}) {
+  const { intl, locale } = useZCodeIntl();
+  const [open, setOpen] = useState(false);
+  const chunks = groupAssistantWorkRenderItems(items);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="w-full">
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="group/work-summary inline-flex max-w-full items-center gap-1.5 self-start text-left text-ui-base text-foreground-subtle transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className={cn(
+              "size-4 shrink-0 transition-transform",
+              open ? "rotate-90" : "rotate-0",
+            )}
+          />
+          <span className="truncate">{formatWorkSummary(intl, locale, summary)}</span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="mt-1 flex flex-col gap-2">
+          {chunks.map((chunk) =>
+            chunk.kind === "group" ? (
+              <ConversationNonCodeWorkGroup
+                key={chunk.key}
+                items={chunk.items}
+                context={context}
+                assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
+              />
+            ) : (
+              renderAssistantWorkItem(chunk.item, context, assistantCodeCommentProjectionEnabled)
+            ),
+          )}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function ConversationNonCodeWorkGroup({
+  items,
+  context,
+  assistantCodeCommentProjectionEnabled,
+}: {
+  items: readonly ConversationAssistantWorkRenderItem[];
+  context: ConversationRowRenderContext;
+  assistantCodeCommentProjectionEnabled: boolean;
+}) {
+  const { intl } = useZCodeIntl();
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="w-full">
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="group/process inline-flex max-w-full items-center gap-1.5 self-start text-left text-ui-base text-foreground-subtlest transition-colors hover:text-foreground-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className={cn(
+              "size-4 shrink-0 transition-transform",
+              open ? "rotate-90" : "rotate-0",
+            )}
+          />
+          <span className="truncate">
+            {intl.formatMessage({ id: "chat.history.nonCodeGroup" }, { count: items.length })}
+          </span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="mt-1 ml-2 flex flex-col gap-2 border-border border-l pl-3.5">
+          {items.map((item) =>
+            renderAssistantWorkItem(item, context, assistantCodeCommentProjectionEnabled),
+          )}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function ConversationAssistantWorkItems({
   rows,
   context,
@@ -447,27 +734,58 @@ function ConversationAssistantWorkItems({
 
   // 连续工作项（工具/explore/reasoning）统一 gap-2 组容器，取代继承父级
   // gap-5/gap-2 + 每行 py-2 的双重且不一致的间距；gap-2 让长工具流的行距更紧凑。
-  const content = (
-    <div className="flex flex-col gap-2">
-      {items.map((item) =>
-        item.kind === "row" ? (
-          <ConversationTurnRow
-            key={item.key}
-            row={item.row}
-            context={context}
-            hideAssistantActions={item.row.kind === "assistantText"}
-            assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
-          />
-        ) : item.kind === "agentToolCall" ? (
-          <ConversationAgentToolCallRow key={item.key} item={item} context={context} />
-        ) : item.kind === "exploreGroup" ? (
-          <ConversationExploreGroupRow key={item.key} item={item} context={context} />
-        ) : (
-          <ConversationToolGroupRow key={item.key} item={item} context={context} />
-        ),
-      )}
-    </div>
-  );
+  // 正文行是回复内容，必须始终可见；工作项按正文切成若干段，每段独立汇总折叠，
+  // 这样历史里「工具 → 正文 → 工具」的长回合也不会退化成一行行配对组。
+  const contentParts: React.ReactNode[] = [];
+  let workRun: ConversationAssistantWorkRenderItem[] = [];
+  const flushWorkRun = () => {
+    if (workRun.length === 0) return;
+    const run = workRun;
+    workRun = [];
+    const summary = summarizeAssistantWorkItems(run);
+    const hasCodeSummary =
+      summary.files + summary.searches + summary.commands + summary.edits + summary.agents > 0;
+    if (hasCodeSummary) {
+      contentParts.push(
+        <ConversationWorkSummaryGroup
+          key={`work-summary:${run[0]!.key}:${run.at(-1)!.key}`}
+          summary={summary}
+          items={run}
+          context={context}
+          assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
+        />,
+      );
+      return;
+    }
+    contentParts.push(
+      <div key={`work-thoughts:${run[0]!.key}:${run.at(-1)!.key}`} className="flex flex-col gap-2">
+        {groupAssistantWorkRenderItems(run).map((chunk) =>
+          chunk.kind === "group" ? (
+            <ConversationNonCodeWorkGroup
+              key={chunk.key}
+              items={chunk.items}
+              context={context}
+              assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
+            />
+          ) : (
+            renderAssistantWorkItem(chunk.item, context, assistantCodeCommentProjectionEnabled)
+          ),
+        )}
+      </div>,
+    );
+  };
+  for (const item of items) {
+    if (item.kind === "row" && item.row.kind === "assistantText") {
+      flushWorkRun();
+      contentParts.push(
+        renderAssistantWorkItem(item, context, assistantCodeCommentProjectionEnabled),
+      );
+      continue;
+    }
+    workRun.push(item);
+  }
+  flushWorkRun();
+  const content = <div className="flex flex-col gap-2">{contentParts}</div>;
 
   if (!historyContainer) {
     return content;
@@ -735,6 +1053,7 @@ function AssistantHistoryStatus({
 
 function ConversationWorkSegmentFlow({
   segment,
+  turnRunning,
   sourceCommandIds,
   context,
   onFork,
@@ -752,6 +1071,7 @@ function ConversationWorkSegmentFlow({
   highspeedMeta,
 }: {
   segment: ConversationTurnWorkSegment;
+  turnRunning: boolean;
   sourceCommandIds: readonly string[];
   context: ConversationRowRenderContext;
   onFork?: (target: ConversationRowTarget) => void;
@@ -773,17 +1093,18 @@ function ConversationWorkSegmentFlow({
     setHistoryOpen(segment.assistantHistoryDefaultOpen);
   }, [segment.assistantHistoryDefaultOpen, segment.key]);
 
-  const shouldShowHistoryStatus = segment.workStatus !== undefined;
+  const shouldShowHistoryStatus =
+    !turnRunning && segment.workStatus !== undefined && segment.workStatus.state !== "running";
   const firstAssistantFlowItemIndex = segment.flowItems.findIndex(
     (item) => item.kind !== "userInput",
   );
   let historyChunkIndex = 0;
-  const open = segment.assistantHistoryDefaultOpen ? true : historyOpen;
+  const open = turnRunning || segment.assistantHistoryDefaultOpen || historyOpen;
 
   return (
     <Collapsible
       open={open}
-      onOpenChange={segment.assistantHistoryDefaultOpen ? undefined : setHistoryOpen}
+      onOpenChange={turnRunning || segment.assistantHistoryDefaultOpen ? undefined : setHistoryOpen}
       // 外层 flex gap 不属于 Radix 测量的 content 高度，收起到 0 后会在
       // display:none 的最后一帧再少 20px。普通兄弟用外边距保持原盒模型，history
       // 的间距则放进动画层。
@@ -959,7 +1280,11 @@ function ConversationTurnFlow({
           stageTailIsRunning={unit.isRunning}
           assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
         />
-        <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
+        <TurnChatLoadingSlot
+          apiRetry={apiRetry}
+          eligible={showLoading}
+          initialElapsedMs={unit.workStatus?.durationMs ?? 0}
+        />
       </div>
     );
   }
@@ -1004,11 +1329,12 @@ function ConversationTurnFlow({
   // 即使恢复了 guide 的 row 全序，也不能让所有 history chunk 共享同一个
   // Collapsible。accepted guide 现在由 CLI workSegments 定界，每段组件自行维护折叠状态。
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-5 [&>[data-zcode-chat-loading-slot]:not(:first-child)]:-mt-2">
       {workSegments.map((segment) => (
         <ConversationWorkSegmentFlow
           key={segment.key}
           segment={segment}
+          turnRunning={unit.isRunning}
           sourceCommandIds={[
             ...segment.flowItems.flatMap((item) =>
               item.kind === "userInput" && item.row.sourceCommandId
@@ -1035,7 +1361,11 @@ function ConversationTurnFlow({
           highspeedMeta={highspeedMeta}
         />
       ))}
-      <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
+      <TurnChatLoadingSlot
+        apiRetry={apiRetry}
+        eligible={showLoading}
+        initialElapsedMs={unit.workStatus?.durationMs ?? 0}
+      />
     </div>
   );
 }
@@ -1106,6 +1436,22 @@ function ConversationBackgroundResultWork({
   assistantCodeCommentProjectionEnabled: boolean;
   assistantPreviewCardsAutoOpenKey?: string;
 }) {
+  const [historyOpen, setHistoryOpen] = useState(unit.assistantHistoryDefaultOpen);
+  useEffect(() => {
+    setHistoryOpen(unit.assistantHistoryDefaultOpen);
+  }, [unit.assistantHistoryDefaultOpen, unit.key]);
+  const open =
+    !unit.workStatus || unit.isRunning || unit.assistantHistoryDefaultOpen || historyOpen;
+  const historySegment: ConversationTurnWorkSegment = {
+    key: unit.key,
+    flowItems: unit.flowItems,
+    assistantWorkRows: unit.assistantWorkRows,
+    assistantHistoryRows: unit.assistantHistoryRows,
+    assistantFollowingRows: unit.assistantFollowingRows,
+    assistantHistoryDefaultOpen: unit.assistantHistoryDefaultOpen,
+    toolCallCount: countSegmentToolCalls(unit.assistantWorkRows),
+    ...(unit.workStatus ? { workStatus: unit.workStatus } : {}),
+  };
   const hasHistory = unit.assistantHistoryRows.length > 0;
   const hasFollowing = unit.assistantFollowingRows.length > 0;
   const showLoading = shouldShowTurnChatLoading({
@@ -1130,8 +1476,7 @@ function ConversationBackgroundResultWork({
     fetchFileChanges: context.fetchFileChanges,
   });
 
-  // 后台结果已经由独立唤醒轮总结过；复用普通 assistant 的工时折叠
-  // 会显示不准确的分段耗时，并让一段短总结产生没有意义的收起状态。
+  // 后台唤醒轮与普通回复使用相同的完成态折叠；耗时只统计本次唤醒轮。
   //
   // workflow run 的 workflow 通知带结构化载荷时改渲染既有工具卡语法的通知行（替换裸标题行）；
   // 载荷缺席（批量轮、旧 transcript、bash/subagent）→ 原样退回标题行。
@@ -1185,7 +1530,19 @@ function ConversationBackgroundResultWork({
       : undefined;
 
   return (
-    <div className="flex flex-col gap-5">
+    <Collapsible
+      open={open}
+      onOpenChange={setHistoryOpen}
+      className="flex flex-col gap-5 [&>[data-zcode-chat-loading-slot]:not(:first-child)]:-mt-2"
+    >
+      {!unit.isRunning && unit.workStatus ? (
+        <AssistantHistoryStatus
+          segment={historySegment}
+          open={open}
+          highspeed={false}
+          sourceCommandIds={unit.header?.sourceCommandId ? [unit.header.sourceCommandId] : []}
+        />
+      ) : null}
       {workflowNotification ? (
         <WorkflowNotificationToolRow
           notification={workflowNotification}
@@ -1202,7 +1559,7 @@ function ConversationBackgroundResultWork({
           }
         />
       ) : (
-        <div className="flex w-full border-b border-[var(--color-border)]/50 pb-2">
+        <div className="flex w-full">
           <div
             data-testid={testId(TID_CHAT_BACKGROUND_RESULT_TITLE, unit.key)}
             className="min-w-0 whitespace-pre-wrap break-words text-left text-ui-base text-[var(--color-foreground-subtle)]"
@@ -1211,15 +1568,19 @@ function ConversationBackgroundResultWork({
           </div>
         </div>
       )}
-      {hasHistory ? (
-        <div className="flex flex-col gap-2">
-          <ConversationAssistantWorkItems
-            rows={unit.assistantHistoryRows}
-            context={context}
-            assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
-          />
+      <CollapsibleContent data-testid={testId(TID_CHAT_ASSISTANT_HISTORY_CONTENT, unit.key)}>
+        <div className="flex flex-col gap-5">
+          {hasHistory ? (
+            <div className="flex flex-col gap-2">
+              <ConversationAssistantWorkItems
+                rows={unit.assistantHistoryRows}
+                context={context}
+                assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
+              />
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </CollapsibleContent>
       {latestAssistantTextRow ? (
         <ConversationTurnRow
           key={`${latestAssistantTextRow.rowId}:${latestAssistantTextRow.entityId ?? ""}`}
@@ -1242,8 +1603,12 @@ function ConversationBackgroundResultWork({
           assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
         />
       ) : null}
-      <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
-    </div>
+      <TurnChatLoadingSlot
+        apiRetry={apiRetry}
+        eligible={showLoading}
+        initialElapsedMs={unit.workStatus?.durationMs ?? 0}
+      />
+    </Collapsible>
   );
 }
 
@@ -1256,12 +1621,18 @@ function ConversationTurnGroupImpl({
   onRetry,
   onFeedbackChange,
   onEdit,
+  topClearedByTimeline = false,
 }: ConversationTurnGroupProps) {
   const isOfficeMode = useIsOfficeMode();
   const { intl } = useZCodeIntl();
   const visibleUserRows = useMemo(() => unit.visibleUserInputs, [unit.visibleUserInputs]);
-  useSyncExternalStore(subscribeHighspeedTurns, getHighspeedTurnVersion, getHighspeedTurnVersion);
   const sourceCommandId = unit.header?.sourceCommandId ?? visibleUserRows[0]?.sourceCommandId;
+  const selectHighspeed = useShallow(getHighspeedTurnDependencies);
+  const highspeedState = useSyncExternalStore(
+    subscribeHighspeedTurns,
+    () => selectHighspeed(sourceCommandId),
+    () => selectHighspeed(sourceCommandId),
+  );
   const highspeedTurn = getHighspeedTurnByCommandId(sourceCommandId);
   // Bug 根因：历史标识过去只依赖 Renderer 内存；卡过期或冷恢复后记录不可用，
   // 即使 transcript 已持久化 highspeed metadata，也会把 accelerated output 渲染成普通工时。
@@ -1318,7 +1689,7 @@ function ConversationTurnGroupImpl({
     }
     // 卡片和历史标识继续保留，但不超过 1.2x 或缺少完整耗时数据时不提供分享入口。
     return target && isHighspeedShareEligible(target.metrics) ? target : null;
-  }, [highspeedMeta, highspeedTurn, unit.highspeedOutputFooterTarget]);
+  }, [highspeedMeta, highspeedTurn, highspeedState, unit.highspeedOutputFooterTarget]);
   const [highspeedShareDialogOpen, setHighspeedShareDialogOpen] = useState(false);
   const firstReasoningRowId = useMemo(
     () => unit.assistantWorkRows.find((row) => row.kind === "reasoning")?.rowId,
@@ -1482,7 +1853,7 @@ function ConversationTurnGroupImpl({
       data-highspeed-gradient={showHighspeedAnimatedGradient ? "true" : undefined}
       className={cn(
         "relative mx-auto flex w-full flex-col gap-5 px-4 @md/conversation:px-6 pb-5",
-        startsWithoutUserBubble ? "pt-0" : "pt-14",
+        startsWithoutUserBubble || topClearedByTimeline ? "pt-0" : "pt-14",
         showHighspeedAnimatedGradient && "highspeed-animated-gradient-text",
       )}
     >

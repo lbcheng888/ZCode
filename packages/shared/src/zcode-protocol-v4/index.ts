@@ -10,6 +10,7 @@ export * from "./toolDisplay.js";
 export * from "./create-workflow-display.js";
 export * from "./workflow-observation-display.js";
 export * from "./snapshot.js";
+export * from "./background-run-view.js";
 export * from "./workflow-runs.js";
 export * from "./workflow-runs-reducer.js";
 export * from "./workflow-runs-holes.js";
@@ -34,6 +35,8 @@ export * from "./coalesce.js";
 export * from "./profiles.js";
 export * from "./apply.js";
 export * from "./transport.js";
+export * from "./input-prediction/contract.js";
+export * from "./session-data/index.js";
 export * from "./wire.js";
 export * from "./wire-codec.js";
 export * from "./wire-reassembly.js";
@@ -63,4 +66,4 @@ export {
 export { bashOutputDisplaySchema } from "../bash-output-display.js";
 export { modelSelectionSchema, type ModelSelection } from "../model-selection.js";
 
-export * from "../localTtft.js";
+export * from "../local-ttft/contract.js";

@@ -18,6 +18,7 @@ import {
   LexicalChatInput,
   type ChatComposerPasteEvent,
   type LexicalChatInputHandle,
+  type UserInputPresence,
 } from "@/LexicalChatInput.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import type { AppSlashCommand } from "@/slashCommandHelpers.js";
@@ -79,6 +80,9 @@ export function ChatPromptEditor({
   compactPlaceholder = false,
   layout = "stacked",
   onChange,
+  onUserInputClear,
+  onUserInputPresenceChange,
+  onUserInputStart,
   onSubmit,
   onModifiedSubmit,
   onImmediateSubmit,
@@ -146,6 +150,9 @@ export function ChatPromptEditor({
    */
   layout?: "stacked" | "inline";
   onChange?: (value: string) => void;
+  onUserInputClear?: () => void;
+  onUserInputPresenceChange?: (presence: UserInputPresence) => void;
+  onUserInputStart?: () => void;
   // 适配：返回 false 表示业务层拒绝/延迟本次提交，Lexical 不自行 reset（草稿保留）。
   onSubmit: (value: string) => boolean | void;
   onModifiedSubmit?: (value: string) => boolean | void;
@@ -366,6 +373,9 @@ export function ChatPromptEditor({
         onModifiedSubmit={onModifiedSubmit}
         onImmediateSubmit={onImmediateSubmit ? handleImmediateEditorSubmit : undefined}
         onChange={handleTextChange}
+        onUserInputClear={onUserInputClear}
+        onUserInputPresenceChange={onUserInputPresenceChange}
+        onUserInputStart={onUserInputStart}
         onFocus={onFocus}
         triggerPanelContainer={resolvedTriggerPanelContainer}
         workspacePath={workspacePath}
@@ -417,7 +427,7 @@ export function ChatPromptEditor({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         className={cn(
-          "relative flex flex-col gap-3 overflow-hidden rounded-2xl border border-input-border bg-input p-3 transition-colors hover:border-input-border-hover focus-within:!border-input-border-focused focus-within:bg-input-focused",
+          "relative flex flex-col gap-3 overflow-hidden rounded-2xl border-[0.5px] border-input-border bg-input p-3 shadow-(--shadow-composer-soft) transition-colors hover:border-input-border-hover focus-within:!border-input-border-focused focus-within:bg-input-focused",
           isInline && "flex-row flex-wrap items-end gap-2 p-2",
           (isWorkspaceFileDropActive || isExternalFileDropActive) &&
             "border-brand bg-input-focused ring-1 ring-brand/30",
@@ -490,7 +500,7 @@ export function ChatPromptEditor({
                   disabled={submitDisabled}
                   data-testid={submitTestId ?? TID_CHAT_SEND_BUTTON}
                   aria-label={submitLabel}
-                  className="gap-1 rounded-lg bg-brand text-ui-base text-foreground-inverse hover:bg-brand/80"
+                  className="gap-1 rounded-full bg-brand text-ui-base text-foreground-inverse hover:bg-brand/80"
                 >
                   {submitting ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" />}
                   <span className="sr-only">{submitLabel}</span>

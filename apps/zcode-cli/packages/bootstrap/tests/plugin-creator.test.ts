@@ -25,7 +25,7 @@ describe("bundled Plugin Creator", () => {
     for (const path of definition?.requiredSeedPaths ?? []) await access(join(root, path));
     const skill = await readFile(join(root, "skills/plugin-creator/SKILL.md"), "utf8");
     expect(skill).toContain("name: plugin-creator");
-    expect(skill).toContain("zcode plugins validate");
+    expect(skill).toContain("chengcode plugins validate");
   });
   it("provides Chinese descriptions for all bundled entries", () => {
     for (const definition of OFFICIAL_PLUGIN_DEFINITIONS) {

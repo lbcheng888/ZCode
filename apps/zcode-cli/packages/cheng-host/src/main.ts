@@ -1,7 +1,8 @@
 import { randomBytes, createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, connect } from "node:net";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { HostError, toHostError } from "./errors.js";
 import { JobEngine } from "./job-engine.js";
@@ -360,7 +361,15 @@ function socketIsAlive(path: string): Promise<boolean> {
 
 const isMain = (): boolean => {
   const entry = process.argv[1];
-  return entry !== undefined && /(^|\/)main\.(js|ts)$/.test(entry);
+  if (entry === undefined) return false;
+  // 修复：CLI 开发入口同样以 main.ts 结尾——按文件名匹配会让 cheng-host 在宿主
+  // 进程 import 本包时误执行二进制路径（把宿主 argv 当 host 参数拒绝）。改为与本
+  // 模块自身路径精确比对（两侧都 realpath，覆盖经符号链接调用与 pnpm workspace 链）。
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
 };
 
 if (isMain()) {

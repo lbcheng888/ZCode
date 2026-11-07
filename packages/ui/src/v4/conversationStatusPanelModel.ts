@@ -126,6 +126,8 @@ export interface ConversationStatusPanelModel {
   runningBashWorks: BackgroundWorkSummary[];
   runningSubagentWorks: ConversationStatusPanelRunningSubagent[];
   runningWorkflowRuns: ConversationStatusPanelWorkflowRun[];
+  /** 会话累计 output tokens；GoalCard 用相邻采样的差值算实时 decode 吞吐。 */
+  liveOutputTokens?: number;
 }
 
 export interface BuildConversationStatusPanelModelInput {
@@ -140,6 +142,7 @@ export interface BuildConversationStatusPanelModelInput {
   backgroundWorks?: readonly BackgroundWorkSummary[];
   runningSubagents?: readonly RunningSubagentSummary[];
   workflowRuns?: readonly WorkflowRunState[];
+  liveOutputTokens?: number;
 }
 
 function buildGitModel({
@@ -415,6 +418,9 @@ export function buildConversationStatusPanelModel(
     runningBashWorks,
     runningSubagentWorks,
     runningWorkflowRuns,
+    ...(input.liveOutputTokens !== undefined
+      ? { liveOutputTokens: input.liveOutputTokens }
+      : {}),
     hasContent: Boolean(
       git ||
       goal ||

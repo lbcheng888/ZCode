@@ -139,6 +139,10 @@ class ConfigStore {
       if (config.features.specEgressFence !== undefined)
         this.set(ConfigKey.FeatureSpecEgressFence, config.features.specEgressFence, scope);
     }
+    if (config.specEgress) {
+      if (config.specEgress.allowHosts !== undefined)
+        this.set(ConfigKey.SpecEgressAllowHosts, config.specEgress.allowHosts, scope);
+    }
     if (config.memory) {
       if (config.memory.use !== undefined) this.set(ConfigKey.MemoryUse, config.memory.use, scope);
     }
@@ -310,6 +314,11 @@ export class ConfigPortImpl implements ConfigPort {
           this.store.get(ConfigKey.FeatureSpecEgressFence) ??
           DefaultConfig.features.specEgressFence,
       },
+      specEgress: {
+        allowHosts:
+          this.store.get(ConfigKey.SpecEgressAllowHosts) ??
+          DefaultConfig.specEgress.allowHosts,
+      },
       memory: {
         use: this.store.get(ConfigKey.MemoryUse) ?? DefaultConfig.memory.use,
       },
@@ -439,6 +448,8 @@ function getDefaultValue(key: ConfigKey): unknown {
       return defaults.features.durableSchedulerDispatch;
     case ConfigKey.FeatureSpecEgressFence:
       return defaults.features.specEgressFence;
+    case ConfigKey.SpecEgressAllowHosts:
+      return defaults.specEgress.allowHosts;
     case ConfigKey.MemoryUse:
       return defaults.memory.use;
     case ConfigKey.McpServers:

@@ -1,3 +1,4 @@
+import { backgroundBatchTelemetryAttributes } from "./input-intent-persistence.js";
 import { traceContextToLogContext } from "../deps.js";
 import { refreshOffPeakWork } from "../off-peak/runtime.js";
 import type { RuntimeCommand, TaskNotificationRuntimeCommand } from "../command-queue.js";
@@ -226,7 +227,13 @@ async function runRuntimeCommand(
         }
         command.resolve(result);
       } catch (error) {
-        if (command.options.idleDriver) {
+        // send-now/queued-now 抢占会取消正在进行的 goal 续跑；这不是“驱动器预约未兑现”。
+        // 若在这里落 standing-down，用户回合结束后的空闲沿只会清标志而不预约，目标保持
+        // active 却永久停摆。preserve 标记来自取消首因，只有真正的失败/Stop 才站到一边。
+        if (
+          command.options.idleDriver &&
+          foregroundExecution.preserveQueueAutoDrainOnCancel !== true
+        ) {
           this.goalRoundDriverStandingDown = true;
         }
         command.reject(error);
@@ -307,6 +314,13 @@ async function runTaskNotificationBatch(
   const firstCommand = eligibleCommands[0];
   if (!firstCommand) return;
 
+  // 合批轮和 goal 自动续跑属于同一因果链，不能在续跑时回退到首条通知的来源。
+  const batchTraceContext = {
+    ...firstCommand.traceContext,
+    attributes: backgroundBatchTelemetryAttributes(
+      eligibleCommands.map((command) => command.traceContext),
+    ),
+  };
   const foregroundExecution = beginForegroundExecution.call(this, firstCommand);
   const commandIds = eligibleCommands.map((command) => command.id);
   try {
@@ -344,7 +358,7 @@ async function runTaskNotificationBatch(
       recordedInputMessageId: persisted.messageId,
       skipInputRecord: true,
       skipUserPromptSubmitHooks: true,
-      traceContext: firstCommand.traceContext,
+      traceContext: batchTraceContext,
     });
     this.logger?.info?.("Background task notification batch completed", {
       ...traceContextToLogContext(firstCommand.traceContext),

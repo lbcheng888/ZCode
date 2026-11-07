@@ -4,11 +4,16 @@
 
 import {
   CoreErrorType,
+  GOAL_CHENG_BIND_TOOL_NAME,
   GOAL_TOOL_COMPLETION_EVIDENCE_NOTE,
   GoalBlockInputJsonSchema,
   GoalBlockInputSchema,
   GoalBlockOutputJsonSchema,
   GoalBlockOutputSchema,
+  GoalChengBindInputJsonSchema,
+  GoalChengBindInputSchema,
+  GoalChengBindOutputJsonSchema,
+  GoalChengBindOutputSchema,
   GoalCreateInputJsonSchema,
   GoalCreateInputSchema,
   GoalCreateOutputJsonSchema,
@@ -24,6 +29,8 @@ import {
   SessionEventType,
   createCoreError,
   createSessionEvent,
+  makeGoalChengRef,
+  type GoalChengRef,
   type SessionGoal,
   type TargetChangedPayload,
 } from "@zcode/contracts";
@@ -90,11 +97,12 @@ export const targetReadToolEntry: ToolEntry = {
 };
 
 export const goalCreateHandler: ToolHandler = async (input, context) => {
-  const { objective } = GoalCreateInputSchema.parse(input);
+  const { objective, acceptanceLevel } = GoalCreateInputSchema.parse(input);
   assertTargetStore(context, "GoalCreate");
 
   const goal = await context.sessionStore.createTarget({
     objective,
+    ...(acceptanceLevel === undefined ? {} : { acceptanceLevel }),
     sessionID: context.sessionId,
   });
   if (!goal) {
@@ -116,7 +124,15 @@ export const goalCreateHandler: ToolHandler = async (input, context) => {
 };
 
 export const goalUpdateHandler: ToolHandler = async (input, context) => {
-  const { objective, revision, targetID } = GoalUpdateInputSchema.parse(input);
+  const { acceptanceLevel, objective, revision, targetID } = GoalUpdateInputSchema.parse(input);
+  if (objective === undefined && acceptanceLevel === undefined) {
+    return {
+      result: false,
+      errorCode: 400,
+      message:
+        "GoalUpdate wrote nothing: supply objective and/or acceptanceLevel; an empty edit is rejected.",
+    };
+  }
   assertTargetStore(context, "GoalUpdate");
   if (!context.sessionStore.updateTargetObjective) {
     throw createCoreError(
@@ -131,7 +147,8 @@ export const goalUpdateHandler: ToolHandler = async (input, context) => {
     return goalStaleFailure("GoalUpdate", current, { revision, targetID });
   }
   const updated = await context.sessionStore.updateTargetObjective({
-    objective,
+    ...(acceptanceLevel === undefined ? {} : { acceptanceLevel }),
+    ...(objective === undefined ? {} : { objective }),
     revision,
     sessionID: context.sessionId,
     targetID,
@@ -142,7 +159,7 @@ export const goalUpdateHandler: ToolHandler = async (input, context) => {
   }
 
   await emitTargetChanged(context, {
-    action: "objective_edited",
+    action: objective === undefined ? "acceptance_level_edited" : "objective_edited",
     previousTarget: current,
     source: "tool",
     target: updated,
@@ -188,6 +205,67 @@ export const goalBlockHandler: ToolHandler = async (input, context) => {
   return { blockerCode, goal: blocked };
 };
 
+export const goalChengBindHandler: ToolHandler = async (input, context) => {
+  const { chengRef, revision, targetID } = GoalChengBindInputSchema.parse(input);
+  assertTargetStore(context, GOAL_CHENG_BIND_TOOL_NAME);
+  if (!context.sessionStore.updateTargetChengRef) {
+    throw createCoreError(
+      CoreErrorType.ConfigurationError,
+      "SessionStorePort.updateTargetChengRef is not configured for GoalChengBind",
+      {
+        context: { toolCallId: context.toolCallId, toolName: GOAL_CHENG_BIND_TOOL_NAME },
+        recoverable: false,
+      },
+    );
+  }
+
+  const current = await context.sessionStore.readTarget({ sessionID: context.sessionId });
+  if (!current || current.status === "complete") {
+    return goalStaleFailure(GOAL_CHENG_BIND_TOOL_NAME, current, { revision, targetID });
+  }
+
+  let resolved: GoalChengRef | null = null;
+  if (chengRef !== null) {
+    if (context.chengReadPort === undefined) {
+      throw createCoreError(
+        CoreErrorType.ConfigurationError,
+        "ChengReadPort is not configured for GoalChengBind",
+        {
+          context: { toolCallId: context.toolCallId, toolName: GOAL_CHENG_BIND_TOOL_NAME },
+          recoverable: false,
+        },
+      );
+    }
+    // 绑定必须经真实 host inspect：job 存在才写入，runId 取回执而非模型自由文本。
+    const snapshot = await context.chengReadPort.inspect(chengRef.jobId);
+    resolved = makeGoalChengRef({
+      jobId: chengRef.jobId,
+      task: chengRef.task,
+      ...(snapshot.runId === null ? {} : { runId: snapshot.runId }),
+    });
+  }
+
+  const updated = await context.sessionStore.updateTargetChengRef({
+    chengRef: resolved,
+    revision,
+    sessionID: context.sessionId,
+    targetID,
+  });
+  if (!updated) {
+    const latest = await context.sessionStore.readTarget({ sessionID: context.sessionId });
+    return goalStaleFailure(GOAL_CHENG_BIND_TOOL_NAME, latest, { revision, targetID });
+  }
+
+  await emitTargetChanged(context, {
+    action: "cheng_ref_edited",
+    previousTarget: current,
+    reason: resolved === null ? "cleared" : "bound",
+    source: "tool",
+    target: updated,
+  });
+  return { goal: updated, previousChengRef: current.chengRef ?? null };
+};
+
 async function emitTargetChanged(
   context: ToolExecutionContext,
   payload: TargetChangedPayload,
@@ -205,7 +283,7 @@ async function emitTargetChanged(
  * 消息必须带当前 targetID+revision,模型才能当场改正而不必猜。
  */
 function goalStaleFailure(
-  toolName: "GoalUpdate" | "GoalBlock",
+  toolName: "GoalUpdate" | "GoalBlock" | typeof GOAL_CHENG_BIND_TOOL_NAME,
   current: SessionGoal | null,
   requested: { revision: number; targetID: string },
 ): ToolHandlerFailure {
@@ -279,11 +357,11 @@ export const goalCreateToolEntry: ToolEntry = {
 
 export const goalUpdateToolEntry: ToolEntry = {
   capability:
-    "Replace the objective of the session's current goal under an optimistic revision guard",
+    "Edit the objective and/or ChengGate acceptance level of the session's current goal under an optimistic revision guard",
   metadata: {
     name: "GoalUpdate",
     description: [
-      "Replace the objective of the current session goal. Pass the targetID and revision from the goal state in this session; a stale pair is rejected and nothing is written. The whole objective is replaced, never merged. Does not change status or budgets and cannot mark the goal complete. Never rewrite the objective to shrink scope or make the completion check easier.",
+      "Edit the current session goal. Supply objective and/or acceptanceLevel; an empty edit is rejected. Pass the targetID and revision from the goal state; a stale pair is rejected and nothing is written. A supplied objective is replaced whole, never merged; omitting it keeps the current objective. acceptanceLevel sets the ChengGate completion requirement (production or diagnostic); omitting it keeps the current level. Both fields commit in one revision-guarded write. Does not change status or budgets and cannot mark the goal complete. Never rewrite the objective to shrink scope or make the completion check easier.",
       GOAL_TOOL_COMPLETION_EVIDENCE_NOTE,
     ].join("\n\n"),
     readOnly: false,
@@ -363,9 +441,52 @@ export const goalBlockToolEntry: ToolEntry = {
   trace: targetTracePolicy(),
 };
 
+export const goalChengBindToolEntry: ToolEntry = {
+  capability:
+    "Bind or clear the explicit Cheng plan/run reference that the goal's route card and completion gate use",
+  metadata: {
+    name: GOAL_CHENG_BIND_TOOL_NAME,
+    description: [
+      "Bind an existing Cheng job as this goal's explicit plan/run reference, or clear it with chengRef: null. Pass the targetID and revision from the goal state; a stale pair is rejected and nothing is written. Binding inspects the job through the read-only Cheng host and records its authoritative run id; it never starts, retries, or cancels a job. The bound reference is the only Cheng evidence used by this goal's route card and completion gate; unrelated jobs are ignored.",
+      GOAL_TOOL_COMPLETION_EVIDENCE_NOTE,
+    ].join("\n\n"),
+    readOnly: false,
+    destructive: false,
+    concurrentSafe: false,
+    timeoutMs: 30000,
+    maxOutputBytes: MAX_GOAL_MODEL_BYTES,
+    sideEffectScope: "session",
+    riskLevel: "low",
+    needsApproval: false,
+  },
+  handler: goalChengBindHandler,
+  inputSchema: GoalChengBindInputJsonSchema,
+  outputSchema: GoalChengBindOutputJsonSchema,
+  runtimeInputSchema: GoalChengBindInputSchema,
+  runtimeOutputSchema: GoalChengBindOutputSchema,
+  permission: {
+    permission: "target.update",
+    reason: "GoalChengBind only binds a session-local goal reference to an existing Cheng job",
+    riskLevel: "low",
+    sideEffectScope: "session",
+    needsApproval: false,
+    patternSources: ["toolName"],
+    alwaysAllowPatternSources: ["toolName"],
+    denyPriority: "beforeAsk",
+  },
+  resultBudget: targetResultBudget(),
+  timeout: targetTimeout(),
+  cancellation: {
+    supported: true,
+    cleanup: "none",
+    userVisibleMessage: "GoalChengBind was cancelled before the goal reference was written",
+  },
+  trace: targetTracePolicy(),
+};
+
 function assertTargetStore(
   context: ToolExecutionContext,
-  toolName: "GoalRead" | "GoalCreate" | "GoalUpdate" | "GoalBlock",
+  toolName: "GoalRead" | "GoalCreate" | "GoalUpdate" | "GoalBlock" | typeof GOAL_CHENG_BIND_TOOL_NAME,
 ): asserts context is ToolExecutionContext & { sessionStore: NonNullable<ToolExecutionContext["sessionStore"]> } {
   if (context.sessionStore) return;
 

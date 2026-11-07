@@ -15,12 +15,14 @@ export interface TriggerEventRow {
   taint: boolean;
   fastPath: string | null;
   adjudicationStatus: string | null;
+  /** verdict 引用的 ChengPlan 稳定 id；未引用/旧行为 null。 */
+  chengPlanId: string | null;
   finalDisposition: string | null;
 }
 
 const SELECT_COLUMNS = `
   id, workspace_identity, source, thread_key, payload, taint, fast_path,
-  adjudication_status, final_disposition
+  adjudication_status, cheng_plan_id, final_disposition
 `;
 
 function toRow(row: Record<string, unknown>): TriggerEventRow {
@@ -36,6 +38,10 @@ function toRow(row: Record<string, unknown>): TriggerEventRow {
       row.adjudication_status === null || row.adjudication_status === undefined
         ? null
         : String(row.adjudication_status),
+    chengPlanId:
+      row.cheng_plan_id === null || row.cheng_plan_id === undefined
+        ? null
+        : String(row.cheng_plan_id),
     finalDisposition:
       row.final_disposition === null || row.final_disposition === undefined
         ? null
@@ -65,17 +71,29 @@ export function setTriggerEventFinalDisposition(
   return Number(result.changes) > 0;
 }
 
-/** 裁决收敛状态列（§1.2 adjudication_status：pending/accepted/rejected/record_only）。 */
+/**
+ * 裁决收敛状态列（§1.2 adjudication_status：pending/accepted/rejected/record_only）。
+ * `chengPlanId` 在场时同一 UPDATE 写引用列；缺席保留既有值。
+ */
 export function setTriggerEventAdjudicationStatus(
   db: DatabaseSync,
   triggerId: string,
   status: "pending" | "accepted" | "rejected" | "record_only",
   now?: number,
+  chengPlanId?: string,
 ): boolean {
-  const result = db
-    .prepare(
-      "update trigger_events set adjudication_status = ?, updated_at = ? where id = ?",
-    )
-    .run(status, now ?? Date.now(), triggerId);
+  const at = now ?? Date.now();
+  const result =
+    chengPlanId === undefined
+      ? db
+          .prepare(
+            "update trigger_events set adjudication_status = ?, updated_at = ? where id = ?",
+          )
+          .run(status, at, triggerId)
+      : db
+          .prepare(
+            "update trigger_events set adjudication_status = ?, cheng_plan_id = ?, updated_at = ? where id = ?",
+          )
+          .run(status, chengPlanId, at, triggerId);
   return Number(result.changes) > 0;
 }

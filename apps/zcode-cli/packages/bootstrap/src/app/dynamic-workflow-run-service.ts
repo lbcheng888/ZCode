@@ -39,6 +39,7 @@
 //      接线错误，不该让 contracts 的拒绝枚举为它变宽（同不变式 1 的论证）。
 
 import type { DwfRunSessionListItem } from "@zcode/adapters/storage";
+import type { ChengHostPort } from "./workflow-cheng-world-read.js";
 import type {
   CollaborationMode,
   TraceContext,
@@ -225,6 +226,12 @@ export interface DynamicWorkflowRunServiceDeps {
   /** git.* world-read 落到的子进程执行端口（cwd = run 的工作区）。 */
   executionPort: ExecutionPort;
   /**
+   * Cheng 数据面端口，原样转交 driver。**可选**：缺席时 cheng.* 以命名的
+   * `ChengHostUnavailable` 拒绝该节点（脚本可 catch、节点 failed 落 journal），
+   * 不是静默跳过。生产接线由 create-app 建端口；测试可直接注入 stub/真端口。
+   */
+  chengHostPort?: ChengHostPort;
+  /**
    * 用户面产物（`artifact.file` / `artifact.markdown`）的字节落点，原样转交 driver。⚠ 这里的 artifact 指**交付给用户看的
    * 产出**，不是引擎内部那个顶层返回值。
    *
@@ -384,6 +391,7 @@ export function createDynamicWorkflowRunService(
     trackSettlement,
     close,
     assertOpen,
+    trackOperation,
     noteForeignTerminalRow,
   } = createRunServiceLifecycle({
     journal: deps.journal,
@@ -402,6 +410,7 @@ export function createDynamicWorkflowRunService(
     runs,
     escalations,
     caps,
+    assertOpen,
     trackSettlement,
   };
 
@@ -416,12 +425,12 @@ export function createDynamicWorkflowRunService(
       request: DynamicWorkflowRunSubmitRequest,
     ): Promise<DynamicWorkflowRunSubmitResult> {
       assertOpen();
-      return submitDynamicWorkflowRun(entryContext, request);
+      return trackOperation(() => submitDynamicWorkflowRun(entryContext, request));
     },
 
     async amend(request: DynamicWorkflowRunAmendRequest): Promise<DynamicWorkflowRunAmendResult> {
       assertOpen();
-      return amendDynamicWorkflowRun(entryContext, request);
+      return trackOperation(() => amendDynamicWorkflowRun(entryContext, request));
     },
 
     /**
@@ -446,7 +455,7 @@ export function createDynamicWorkflowRunService(
 
     async resume(runId: string): Promise<DynamicWorkflowRunResumeResult> {
       assertOpen();
-      return resumeDynamicWorkflowRun(entryContext, runId);
+      return trackOperation(() => resumeDynamicWorkflowRun(entryContext, runId));
     },
 
     async listRunsForSession(limit?: number): Promise<DynamicWorkflowRunSessionSummary[]> {

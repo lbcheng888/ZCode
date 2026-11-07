@@ -44,10 +44,7 @@ import {
   type FakeProviderServer,
   type FaultProgram,
 } from "../helpers/fake-provider-server.js";
-import {
-  createFaultModelFactory,
-  FAULT_MODEL_SELECTION,
-} from "../helpers/fault-provider-model.js";
+import { createFaultModelFactory, FAULT_MODEL_SELECTION } from "../helpers/fault-provider-model.js";
 
 const WS = "ws-1";
 const CANDIDATE_1 = "cand-1";
@@ -133,7 +130,8 @@ async function createHarness(options: {
   }
   const decisionLog = createDecisionLog(database);
   const delivery: AdjudicationDeliveryPort = {
-    applyVerdicts: (batchId, decisions) => applyVerdicts({ db: database, decisionLog }, batchId, decisions),
+    applyVerdicts: (batchId, decisions) =>
+      applyVerdicts({ db: database, decisionLog }, batchId, decisions),
   };
   const errors: Array<{ error: unknown; context: string }> = [];
   const driver = createAdjudicationDriver({
@@ -280,7 +278,11 @@ async function writeProductionProviderConfigs(input: {
   defaultModelSelection: boolean;
 }): Promise<void> {
   await writeFile(input.builtinPath, JSON.stringify(builtinRelease(input.baseURL)), "utf8");
-  await writeFile(input.personalPath, JSON.stringify(personalRelease(input.defaultModelSelection)), "utf8");
+  await writeFile(
+    input.personalPath,
+    JSON.stringify(personalRelease(input.defaultModelSelection)),
+    "utf8",
+  );
 }
 
 function acceptScheme(triggerId: string, index: number) {
@@ -320,7 +322,10 @@ describe("headless adjudication model session", () => {
         { triggerId: CANDIDATE_2, disposition: "record-only", reason: "noise" },
       ],
     });
-    const server = await startFakeProviderServer({ program: SERVE, canned: { textReply: verdict } });
+    const server = await startFakeProviderServer({
+      program: SERVE,
+      canned: { textReply: verdict },
+    });
     servers.push(server);
     const harness = await createHarness({
       server,
@@ -426,7 +431,10 @@ describe("headless adjudication model session", () => {
         { triggerId: CANDIDATE_2, disposition: "record-only", reason: "noise" },
       ],
     });
-    const server = await startFakeProviderServer({ program: SERVE, canned: { textReply: verdict } });
+    const server = await startFakeProviderServer({
+      program: SERVE,
+      canned: { textReply: verdict },
+    });
     servers.push(server);
     await writeProductionProviderConfigs({
       builtinPath,
@@ -651,10 +659,10 @@ describe("headless adjudication model session", () => {
     const dataBaseDir = "/data/base";
     const derived = resolveHeadlessProviderRuntimeEnv({}, dataBaseDir);
     expect(derived[ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV]).toBe(
-      join(dataBaseDir, ".zcode/v2/runtime/provider/bundled/zcode-builtin.json"),
+      join(dataBaseDir, ".chengcode/v2/runtime/provider/bundled/zcode-builtin.json"),
     );
     expect(derived[ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV]).toBe(
-      join(dataBaseDir, ".zcode/v2/provider_config.json"),
+      join(dataBaseDir, ".chengcode/v2/provider_config.json"),
     );
     expect(derived.ZCODE_DATA_BASE_DIR).toBe(dataBaseDir);
 

@@ -58,6 +58,22 @@ export interface AdjudicationVerdictDecision {
   evidence?: readonly string[];
   /** M6 方案卡（accept 必需；出口门校验缺字段不外发）。 */
   scheme?: AdjudicationSchemeCard;
+  /**
+   * 可选 ChengPlan 稳定引用（S2）：裁决引用只读 ChengPlan 工具产出的 plan id。
+   * 非空字符串才合法；且必须命中本批工具回执（见 {@link AdjudicationChengPlanReceipt}），
+   * 否则整批降级 record-only。
+   */
+  chengPlanId?: string;
+}
+
+/**
+ * 本批真实 ChengPlan 工具回执的稳定摘要。planId 从工具入参 jobId 派生
+ * （`cheng-plan://<jobId>`），不读模型自由文本；驱动器只用它交叉校验 verdict 引用。
+ */
+export interface AdjudicationChengPlanReceipt {
+  planId: string;
+  jobId: string;
+  task: string;
 }
 
 /** mandate 档位（结构 = super-agent-mandate 的 MandateVerdict 子集，不 import 兄弟模块）。 */
@@ -86,6 +102,8 @@ export interface AdjudicationStats {
   batchesRun: number;
   /** verdict 解析/校验失败整批降级次数（T2 计数器）。 */
   schemaFailures: number;
+  /** chengPlanId 未命中本批真实 ChengPlan 工具回执的降级次数。 */
+  planReferenceFailures: number;
   /** 微预算耗尽跳过批次数。 */
   budgetTrips: number;
   /** model-only 会话故障次数（留 pending 重试）。 */
@@ -108,7 +126,7 @@ export interface BatchOutcome {
   modelCalled: boolean;
   status: "applied" | "empty" | "budget_exhausted" | "session_error";
   /** status=applied 且 verdict 校验失败 → 整批 record-only 降级（fail-closed，T2）。 */
-  verdictDegraded?: "json" | "schema" | "coverage";
+  verdictDegraded?: "json" | "schema" | "coverage" | "cheng_plan";
   decisions: readonly AdjudicationVerdictDecision[];
   /** 本批 mandate 裁定（spec §1.4「被分派器调用」锚点；P2 恒 implicit record_only，M4）。 */
   mandateTier?: AdjudicationMandateTier;
@@ -166,6 +184,11 @@ export interface AdjudicationModelSessionResult {
   outputText: string;
   /** 会话回合 usage（可选）：在场时驱动器自动计量入微预算；宿主勿对同一 usage 重复 recordUsage。 */
   usage?: { inputTokens: number; outputTokens: number };
+  /**
+   * 本批实际执行的 ChengPlan 只读工具回执。verdict 里的 chengPlanId 必须命中这里；
+   * 缺席 = 本会话未执行任何 ChengPlan（或 model-only 会话没有工具面）。
+   */
+  chengPlanReceipts?: readonly AdjudicationChengPlanReceipt[];
 }
 
 /**
@@ -178,7 +201,7 @@ export interface AdjudicationModelSessionResult {
  * 签名与 trigger.SuperAgentTriggerContract.applyVerdicts 结构一致，组合根直接接线。
  */
 export interface AdjudicationDeliveryPort {
-  applyVerdicts(batchId: string, decisions: readonly AdjudicationVerdictDecision[]): void;
+  applyVerdicts(batchId: string, decisions: readonly AdjudicationVerdictDecision[]): Promise<void>;
 }
 
 /** mandate 查询端口（结构 = super-agent-mandate.resolveFor；P2 恒隐式 record_only）。 */

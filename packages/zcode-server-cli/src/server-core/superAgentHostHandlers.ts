@@ -22,11 +22,13 @@
  * 同一幂等键）投递；child 侧投递失败会原样上抛，事件保持未决，不会产生「成功回执但
  * 无投递」的伪接线。
  */
+import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { IBotsService, IZCodeAgentService, type ServiceDescriptor } from "@zcode/services";
 import { parseRemoteWorkspaceIdentity, type BotContextState } from "@zcode/shared";
 import {
   commandAckSchema,
+  commandEnvelopeSchema,
   commandPayloadSchemas,
   type CommandAck,
   type CommandEnvelope,
@@ -38,6 +40,8 @@ import {
   hostAutoReplyGuardParamsSchema,
   hostAutoReplyGuardResultSchema,
   hostCommandParamsSchema,
+  hostWatchdogCommandParamsSchema,
+  hostWatchdogCommandResultSchema,
   hostWorkerCreateTaskParamsSchema,
   hostWorkerCreateTaskResultSchema,
   hostWorkerFindParamsSchema,
@@ -95,7 +99,9 @@ function stripThreadKeyWorkspacePrefix(threadKey: string): string {
   const separator = threadKey.lastIndexOf("|");
   if (separator <= 0) return threadKey;
   const suffix = threadKey.slice(separator + 1);
-  return suffix.startsWith("bot:") || suffix.startsWith("schedule:") || suffix.startsWith("webhook:")
+  return suffix.startsWith("bot:") ||
+    suffix.startsWith("schedule:") ||
+    suffix.startsWith("webhook:")
     ? suffix
     : threadKey;
 }
@@ -241,6 +247,95 @@ async function handleHostCommand(
   // 下一次 ACK 幂等重结算），不把「回执成功但台账丢失」伪装成已交付。
   await settlement?.settle(params.commandId, ack, sessionId);
   return ack;
+}
+
+/**
+ * daemon watchdog 窄命令面：cancel-workflow 走既有 V4 `cancelBackgroundWork`
+ * （workId=runId，发往 owner session），pause-automation 走 agent 的 automationService.pause，
+ * notify-user 走 V4 `notifyUser`（CLI 直驱 owner session runtime 的 task-notification 队列）。
+ * 三者都只转发到既有命令/服务；status/reason 原样映射为可读失败，不伪造成功。
+ */
+async function handleHostWatchdogCommand(
+  services: SuperAgentHostServiceAccess,
+  rawParams: unknown,
+): Promise<{ ok: boolean; error?: string }> {
+  const params = parseOrThrow(hostWatchdogCommandParamsSchema, rawParams, "host.watchdogCommand");
+  const agent = services.getOptional(IZCodeAgentService);
+  if (!agent) {
+    throw new ControlPlaneRpcError(
+      CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+      "host.watchdogCommand: IZCodeAgentService unavailable in Core",
+      true,
+    );
+  }
+  const workspacePath = await resolveWorkspacePath(services, params.workspaceIdentity);
+
+  if (params.action === "cancel-workflow") {
+    const envelope = commandEnvelopeSchema.parse({
+      commandId: `watchdog-cancel-workflow:${randomUUID()}`,
+      clientId: "super-agent-watchdog",
+      sessionId: params.sessionId,
+      type: "cancelBackgroundWork",
+      payload: { workId: params.runId },
+      issuedAt: Date.now(),
+    });
+    const ack = commandAckSchema.parse(
+      await agent.sendConversationCommandV4({
+        workspacePath,
+        workspaceIdentity: params.workspaceIdentity,
+        envelope,
+      }),
+    );
+    if (ack.status === "accepted" || ack.status === "duplicate") {
+      return hostWatchdogCommandResultSchema.parse({ ok: true });
+    }
+    return hostWatchdogCommandResultSchema.parse({
+      ok: false,
+      error: (ack.message ?? ack.reasonCode ?? `cancelBackgroundWork ${ack.status}`).slice(0, 500),
+    });
+  }
+
+  if (params.action === "notify-user") {
+    const envelope = commandEnvelopeSchema.parse({
+      commandId: params.commandId,
+      clientId: "super-agent-watchdog",
+      sessionId: params.sessionId,
+      type: "notifyUser",
+      payload: { text: params.message },
+      issuedAt: Date.now(),
+    });
+    const ack = commandAckSchema.parse(
+      await agent.sendConversationCommandV4({
+        workspacePath,
+        workspaceIdentity: params.workspaceIdentity,
+        envelope,
+      }),
+    );
+    if (ack.status === "accepted" || ack.status === "duplicate") {
+      return hostWatchdogCommandResultSchema.parse({ ok: true });
+    }
+    return hostWatchdogCommandResultSchema.parse({
+      ok: false,
+      error: (ack.message ?? ack.reasonCode ?? `notifyUser ${ack.status}`).slice(0, 500),
+    });
+  }
+
+  const paused = await agent.pauseAutomation({
+    automationId: params.automationId,
+    workspacePath,
+    workspaceIdentity: params.workspaceIdentity,
+  });
+  return hostWatchdogCommandResultSchema.parse(
+    paused
+      ? { ok: true }
+      : {
+          ok: false,
+          error: `automation pause 未生效（非 active/不存在）：${params.automationId}`.slice(
+            0,
+            500,
+          ),
+        },
+  );
 }
 
 /**
@@ -425,9 +520,7 @@ async function handleAutoReplyGuard(
       ...(params.chatType !== undefined ? { chatType: params.chatType } : {}),
       ...(params.senderType !== undefined ? { senderType: params.senderType } : {}),
       ...(params.mentionedBot !== undefined ? { mentionedBot: params.mentionedBot } : {}),
-      ...(params.groupCardAction !== undefined
-        ? { groupCardAction: params.groupCardAction }
-        : {}),
+      ...(params.groupCardAction !== undefined ? { groupCardAction: params.groupCardAction } : {}),
       ...(params.elicitation !== undefined ? { elicitation: params.elicitation } : {}),
       ...(params.providerMessageId !== undefined
         ? { providerMessageId: params.providerMessageId }
@@ -460,11 +553,18 @@ export function createSuperAgentControlPlaneInboundHandler(
             true,
           );
         }
-        return await handleHostCommand(
-          services,
-          params,
-          options.getDispatchSettlement?.(),
-        );
+        return await handleHostCommand(services, params, options.getDispatchSettlement?.());
+      }
+      case "host.watchdogCommand": {
+        const services = options.getServices();
+        if (!services) {
+          throw new ControlPlaneRpcError(
+            CONTROL_PLANE_RPC_ERROR_CODES.workspaceFailed,
+            "host.watchdogCommand: Core services not initialized",
+            true,
+          );
+        }
+        return await handleHostWatchdogCommand(services, params);
       }
       case "host.worker.find": {
         const services = options.getServices();

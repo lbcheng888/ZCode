@@ -1,10 +1,17 @@
 import type {
+  BackgroundRunKind,
   BackgroundRunRow,
   GoalStateSource,
   SuperAgentWatchdogConfig,
   TriggerBacklogSource,
   WatchdogProbeResult,
 } from "./contract.js";
+
+/** 具备独立 stall 钟的 kind：workflow run 与 cheng-host job。 */
+const STALL_CANDIDATE_KINDS: ReadonlySet<BackgroundRunKind> = new Set([
+  "workflow",
+  "cheng-job",
+]);
 
 /** 探针读依赖（spec §2）。registry 恒在；goal / trigger 端口缺席 ⇒ 对应探针显式 skipped。 */
 export interface ProbeReadContext {
@@ -45,7 +52,9 @@ function probeRegistryStall(ctx: ProbeReadContext): WatchdogProbeResult {
   // （core background-tasks.ts 周期 touch，周期严格 < stalenessCapMs）；workflow 行**禁止**
   // 声明心跳——它的 updatedAt 同时是 isWorkflowStallCandidate 的 20min cancel-stalled
   // 独立时钟，心跳刷新会把 liveness 双计成 progress，stalledSince 接缝落地前永久失效。
-  const judged = running.filter((row) => row.heartbeat === true);
+  // cheng-job 有独立的 run-stalled 探针 + cancel-stalled repair；同一行不再由 registry-stall
+  // 重复判 notify-user，避免一个 stall 生成两个 repair（notify 面已接，但同行走 cancel）。
+  const judged = running.filter((row) => row.heartbeat === true && row.kind !== "cheng-job");
   if (judged.length === 0) {
     return running.length > 0
       ? skippedProbe("registry-stall", "running 行均未声明 owner 心跳（数据源缺席）")
@@ -65,8 +74,9 @@ function probeRegistryStall(ctx: ProbeReadContext): WatchdogProbeResult {
 }
 
 /**
- * workflow stall 资格（spec §2）：探针命中与 LLM 裁决的 cancel-stalled 目标复核共用
- * 同一判据——所有 workflow 行都带 stallClockRef，仅凭它不足以区分健康行与 stall 行。
+ * stall 资格（spec §2）：探针命中与 LLM 裁决的 cancel-stalled 目标复核共用同一判据。
+ * `workflow` 与 `cheng-job` 都带独立 `stallClockRef`；仅凭它不足以区分健康行与 stall 行，
+ * 还要求 running +（引擎 run-stalled / cheng host stall 投影在场，或独立钟按进度指针命中）。
  */
 export function isWorkflowStallCandidate(
   row: BackgroundRunRow,
@@ -74,10 +84,10 @@ export function isWorkflowStallCandidate(
   config: SuperAgentWatchdogConfig,
 ): boolean {
   return (
-    row.kind === "workflow" &&
+    STALL_CANDIDATE_KINDS.has(row.kind) &&
     row.state === "running" &&
     row.stallClockRef !== undefined &&
-    // 引擎 run-stalled 投影在场，或 20min 钟按 registry 进度指针独立命中（spec §2）。
+    // 独立钟按 registry 进度指针命中（spec §2）。
     (row.stalledSince !== undefined || now - row.updatedAt >= config.workflowStallMs)
   );
 }

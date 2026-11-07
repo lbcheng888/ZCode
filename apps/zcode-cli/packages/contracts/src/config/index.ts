@@ -43,6 +43,9 @@ export const ConfigKey = {
   FeatureDurableSchedulerDispatch: "features.durableSchedulerDispatch",
   FeatureSpecEgressFence: "features.specEgressFence",
 
+  // Spec lane egress（per-repo 依赖镜像白名单；空 = 零 egress）
+  SpecEgressAllowHosts: "specEgress.allowHosts",
+
   // Memory
   MemoryUse: "memory.use",
 
@@ -99,21 +102,23 @@ export type ConfigValue<K extends ConfigKey> = K extends "modelStream.idleTimeou
       ? string[]
       : K extends "permission.autoApproveHighRisk" | "permission.allowMediumRiskInAuto"
         ? boolean
-        : K extends
-              | "storage.dir"
-              | "storage.sessionDbPath"
-              | "network.httpProxy"
-              | "network.noProxy"
-              | "network.caCertFile"
-          ? string | undefined
-          : K extends "network.timeout"
-            ? number
-            : K extends
-                  | "features.eventRouter"
-                  | "features.mandateGate"
-                  | "features.specWriteLease"
-                  | "features.durableSchedulerDispatch"
-                  | "features.specEgressFence"
+        : K extends "specEgress.allowHosts"
+          ? string[]
+          : K extends
+                | "storage.dir"
+                | "storage.sessionDbPath"
+                | "network.httpProxy"
+                | "network.noProxy"
+                | "network.caCertFile"
+            ? string | undefined
+            : K extends "network.timeout"
+              ? number
+              : K extends
+                    | "features.eventRouter"
+                    | "features.mandateGate"
+                    | "features.specWriteLease"
+                    | "features.durableSchedulerDispatch"
+                    | "features.specEgressFence"
                 ? boolean | undefined
                 : K extends
                       | "features.compact"
@@ -130,39 +135,39 @@ export type ConfigValue<K extends ConfigKey> = K extends "modelStream.idleTimeou
                     ? boolean
                     : K extends "skills.metadataBudget"
                       ? number
-                  : K extends "skills.roots"
-                    ? string[]
-                    : K extends "skill" | "command"
-                      ? Record<string, SkillCommandOverride>
-                      : K extends "mcp.servers"
-                        ? Record<string, McpServerConfig>
-                        : K extends "plugins.enabled"
-                          ? boolean
-                          : K extends "plugins.dirs"
-                            ? string[]
-                            : K extends "plugins.enabledPlugins"
-                              ? Record<string, boolean>
-                              : K extends "plugins.extraKnownMarketplaces"
-                                ? PluginConfig["extraKnownMarketplaces"]
-                                : K extends "plugins.options"
-                                  ? Record<string, PluginOptionValues>
-                                  : K extends "plugins.suppressedBuiltins"
-                                    ? string[]
-                                    : K extends "logging.level"
-                                      ? "debug" | "info" | "warn" | "error"
-                                      : K extends "logging.format"
-                                        ? "text" | "json"
-                                        : K extends "toolConcurrency.maxConcurrency"
-                                          ? number
-                                          : K extends "modelAnomalyGuard"
-                                            ? ModelAnomalyGuardConfig
-                                            : K extends "hooks"
-                                              ? HooksRuntimeConfig
-                                              : K extends "ui.locale"
-                                                ? UiLocale
-                                                : K extends "ui.theme"
-                                                  ? UiThemePreference
-                                                  : unknown;
+                      : K extends "skills.roots"
+                        ? string[]
+                        : K extends "skill" | "command"
+                          ? Record<string, SkillCommandOverride>
+                          : K extends "mcp.servers"
+                            ? Record<string, McpServerConfig>
+                            : K extends "plugins.enabled"
+                              ? boolean
+                              : K extends "plugins.dirs"
+                                ? string[]
+                                : K extends "plugins.enabledPlugins"
+                                  ? Record<string, boolean>
+                                  : K extends "plugins.extraKnownMarketplaces"
+                                    ? PluginConfig["extraKnownMarketplaces"]
+                                    : K extends "plugins.options"
+                                      ? Record<string, PluginOptionValues>
+                                      : K extends "plugins.suppressedBuiltins"
+                                        ? string[]
+                                        : K extends "logging.level"
+                                          ? "debug" | "info" | "warn" | "error"
+                                          : K extends "logging.format"
+                                            ? "text" | "json"
+                                            : K extends "toolConcurrency.maxConcurrency"
+                                              ? number
+                                              : K extends "modelAnomalyGuard"
+                                                ? ModelAnomalyGuardConfig
+                                                : K extends "hooks"
+                                                  ? HooksRuntimeConfig
+                                                  : K extends "ui.locale"
+                                                    ? UiLocale
+                                                    : K extends "ui.theme"
+                                                      ? UiThemePreference
+                                                      : unknown;
 
 // ============================================================
 // Config Scope
@@ -251,6 +256,10 @@ export interface RuntimeConfig {
     // true = spec run 必须建立硬围栏，不可用即拒绝启动（绝不回退协作式代理）。
     specEgressFence?: boolean;
   };
+  specEgress: {
+    /** per-repo 依赖镜像白名单；空数组 = 零 egress（spec lane §4.3）。 */
+    allowHosts: string[];
+  };
   memory: {
     use: boolean;
   };
@@ -288,6 +297,7 @@ export interface RuntimeConfigPatch {
   storage?: Partial<RuntimeConfig["storage"]>;
   network?: Partial<RuntimeConfig["network"]>;
   features?: Partial<RuntimeConfig["features"]>;
+  specEgress?: Partial<RuntimeConfig["specEgress"]>;
   memory?: Partial<RuntimeConfig["memory"]>;
   mcp?: Partial<RuntimeConfig["mcp"]>;
   plugins?: Partial<RuntimeConfig["plugins"]>;
@@ -324,8 +334,10 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     allowMediumRiskInAuto: false,
   },
   storage: {
-    dir: "~/.zcode",
-    sessionDbPath: "~/.zcode/cli/db/db.sqlite",
+    // 30d725bc 数据根迁移补全：缺省与迁移后的全局数据根同源（旧值 ~/.zcode 会让
+    // 无用户配置的安装继续把会话库落到已废弃的旧根）。
+    dir: "~/.chengcode",
+    sessionDbPath: "~/.chengcode/cli/db/db.sqlite",
   },
   network: {
     timeout: 180000,
@@ -348,6 +360,10 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     durableSchedulerDispatch: false,
     // P6 围栏缺省关：保持协作式 env 代理的现有字节行为；开启后建立失败即拒绝启动。
     specEgressFence: false,
+  },
+  specEgress: {
+    // 缺省零 egress；repo 显式配置依赖镜像 host 后才放行（spec-lane §4.3）。
+    allowHosts: [],
   },
   memory: {
     use: true,

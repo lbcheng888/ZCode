@@ -47,9 +47,15 @@ export async function executeRepair(
       if (!workspaceKey) {
         return { ok: false, error: `pause-automation 拒绝：目标缺 workspaceKey ${target.id}` };
       }
-      return surface.pauseWorkspaceAutomation(workspaceKey);
+      return surface.pauseWorkspaceAutomation(workspaceKey, target.id);
     }
     case "notify-user":
-      return surface.notifyUser(target.message ?? `watchdog repair：${target.id}`);
+      return surface.notifyUser(
+        target.message ?? `watchdog repair：${target.id}`,
+        {
+          ownerSession: target.row?.ownerSession,
+          workspaceKey: target.workspaceKey,
+        },
+      );
   }
 }

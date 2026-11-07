@@ -26,7 +26,13 @@ import type {
   ModelToolSideEffectScope,
 } from "../model/index.js";
 import type { TodoItem } from "../tools/todo.js";
-import type { SessionGoal, GoalStatus, SessionTargetEvent } from "../tools/target.js";
+import type {
+  SessionGoal,
+  GoalAcceptanceLevel,
+  GoalChengRef,
+  GoalStatus,
+  SessionTargetEvent,
+} from "../tools/target.js";
 import type { PermissionRuleset } from "./permission.port.js";
 import type { CollaborationMode } from "./session.port.js";
 import type { EnvInfo } from "./context-source.port.js";
@@ -247,6 +253,15 @@ export interface ForkCommitBundle {
     };
     metadata: Record<string, unknown>;
   };
+}
+
+/**
+ * 同一 session 的多条消息及其 part 按顺序写入，全有或全无。
+ * 用于 compaction 的请求前公告、summary 与附件，以及空闲整批通知（一条消息多个文本 part）。
+ */
+export interface MessageCommitBundle {
+  sessionID: SessionId;
+  messages: MessageWithParts[];
 }
 
 export interface UpdateSessionInput {
@@ -554,6 +569,13 @@ export interface CompactionPart {
     start?: number;
     end?: number;
   };
+  /** 不进入 strict 的 compactBoundary 与 App 协议；旧版本按 JSON 读取时忽略。 */
+  metadata?: CompactionPartMetadata;
+}
+
+export interface CompactionPartMetadata {
+  /** summary 之前的请求前公告；冷恢复放回 summary 之前，切片之后的保留段时跳过。 */
+  compactLeadingMessageIds?: MessageId[];
 }
 
 export type TimelinePartDisplay = "separator" | "worklog";
@@ -823,6 +845,8 @@ export const SESSION_ENTRY_DYNAMIC_WORKFLOW_ACTIVATION =
  * 当作权威清空（尤其 fork/edit-retry 子会话与崩溃窗口）。值仍以 todo 表为权威。
  */
 export const SESSION_ENTRY_TODO_STATE = "runtime/todo_state" as const;
+/** 本会话用过的能力标签（docs/design/v2/model/session-features-header.md）。 */
+export const SESSION_ENTRY_SESSION_FEATURES = "runtime/session_features" as const;
 
 export const SESSION_ENTRY_TYPES = [
   SESSION_ENTRY_TARGET_COMPLETION_VERIFICATION,
@@ -834,6 +858,7 @@ export const SESSION_ENTRY_TYPES = [
   SESSION_ENTRY_WORKSPACE_FILE_REWIND,
   SESSION_ENTRY_DYNAMIC_WORKFLOW_ACTIVATION,
   SESSION_ENTRY_TODO_STATE,
+  SESSION_ENTRY_SESSION_FEATURES,
 ] as const;
 
 export type SessionEntryType = (typeof SESSION_ENTRY_TYPES)[number];
@@ -1113,10 +1138,18 @@ export interface SessionStorePort {
   /** V4 stable/compact-edit fork 的唯一事务入口。legacy workspace fork 不调用。 */
   commitForkBundle?(bundle: ForkCommitBundle): Promise<SessionInfo>;
   commitSharedContextImportBundle?(bundle: SharedContextImportCommitBundle): Promise<SessionInfo>;
+  /** 一组消息的唯一事务入口；未实现时调用方逐条写入。 */
+  commitMessageBundle?(bundle: MessageCommitBundle): Promise<void>;
   transitionSharedContextImport?(input: SharedContextImportTransition): Promise<boolean>;
   updateSession(input: UpdateSessionInput): Promise<SessionInfo>;
   /** 只写一次删除时间；正文保留，普通列表永不返回软删除行。 */
   softDeleteSession?(sessionID: SessionId, timeDeleted?: number): Promise<void>;
+  /** 每个根会话 → 根自身与附属后代（subagent / workflow / 侧边问答，不含 fork）；根不存在为空数组。 */
+  listOwnedSessionTrees?(sessionIDs: SessionId[]): Promise<Map<SessionId, SessionId[]>>;
+  /** 每个目标会话 → part 中仍引用其附件（`zcode-artifact://<目标>/…`）的其他未删除会话；无引用的目标不出现。 */
+  listArtifactReferrers?(sessionIDs: SessionId[]): Promise<Map<SessionId, SessionId[]>>;
+  /** 彻底删除会话及附属后代的全部行；只用于用户确认的「删除数据」，已不存在的会话是空操作。 */
+  purgeSessions?(sessionIDs: SessionId[]): Promise<void>;
   getSession(sessionID: SessionId): Promise<SessionInfo | null>;
   listSessions(input?: ListSessionsInput): Promise<SessionInfo[]>;
   /**
@@ -1217,6 +1250,7 @@ export interface SessionStorePort {
     objective: string;
     sessionID: SessionId;
     status?: GoalStatus;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
     wallClockBudgetSeconds?: number | null;
@@ -1229,6 +1263,7 @@ export interface SessionStorePort {
   createTarget(input: {
     objective: string;
     sessionID: SessionId;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
   }): Promise<SessionGoal | null>;
@@ -1237,17 +1272,37 @@ export interface SessionStorePort {
     status: GoalStatus;
     /** 状态机事件缘由(session-start-disarm / budget-exhausted 等)。 */
     reason?: string;
+    /**
+     * 可选 CAS：只在当前行 target_id（以及与 `expectedRevision` 同时给出时的
+     * revision）都命中时才写入状态；目标被替换/并发改写时返回 null，调用方不得把
+     * 旧验证结论写成新目标的状态。
+     */
+    expectedTargetID?: string;
+    expectedRevision?: number;
+    /** 可选 CAS：只在当前状态命中时才迁移（完成写入要求 active）。 */
+    expectedStatus?: GoalStatus;
   }): Promise<SessionGoal | null>;
   /**
-   * 乐观并发的 objective 改写:会话状态里不存在第二份 revision,只有 target_id + revision
-   * 都命中当前行才写入;目标被替换或已被别的调用改过时返回 null(调用方负责提示重读)。
-   * 只改 objective/revision/time_updated,不碰 status、预算或用量。
+   * 乐观并发的 goal 字段改写:只有 target_id + revision 都命中当前行才写入;目标被替换或
+   * 已被别的调用改过时返回 null(调用方负责提示重读)。objective/acceptanceLevel 各自可选,
+   * 缺席即保留;两者都改时同一条 UPDATE 原子提交。不碰 status、预算或用量。
    */
   updateTargetObjective?(input: {
     sessionID: SessionId;
     targetID: string;
     revision: number;
-    objective: string;
+    objective?: string;
+    acceptanceLevel?: GoalAcceptanceLevel;
+  }): Promise<SessionGoal | null>;
+  /**
+   * 显式 Cheng plan/run 绑定的 CAS 写:只有 target_id + revision 都命中当前行才写入;
+   * null 清除绑定。绑定/清除都递增 revision,并追加 edited 事件(reason 区分 bind/clear)。
+   */
+  updateTargetChengRef?(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    chengRef: GoalChengRef | null;
   }): Promise<SessionGoal | null>;
   /**
    * 模型显式阻塞:持久状态写 paused(续跑闸门只认 active,用户可 /goal resume),

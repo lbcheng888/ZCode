@@ -99,3 +99,22 @@ The dag3 fixture is the K=1 ledger from the three-layer/five-module DAG gate
 
 The optional integration test reads the original volumes when
 `CHENG_REAL_RUN_ROOT` points at the `cheng-lang` checkout.
+
+## p06_fib (diagnostic red)
+
+Source: diagnostic run `m5-20261106T142447Z-88420` (budget 30000). The run fails
+at step `[5/9]` (M5 search exhausted), so the volume has no `run.env`/trace;
+these files are the structured receipts used by the ChengGate/planner tests to
+classify `rc=31`.
+
+| Fixture | SHA-256 |
+|---|---|
+| `run-p06/report.txt` | `deb10ed77105e5123fef65d87329573a1400fd8879562e3b6cce6313c93eb6ec` |
+| `run-p06/summary.tsv` | `5c3f4e876918c4c8a848e0b0ace303b6e7031b7b5e1c0abe74044233ccd2fd23` |
+| `run-p06/FAILED` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+
+`report.txt` carries `verdict=FAIL metric=gap` and the M5
+`status=exhausted(budget) expansions=11044292` receipt; `summary.tsv` is the
+machine-readable task row. Gate/planner never parse free text for verdicts:
+the test builds `ChengError` via `classifyRunnerExit(31, evidence)` and only
+consumes typed fields.

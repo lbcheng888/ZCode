@@ -120,5 +120,5 @@ export { WouldAcceptInbox } from "./would-accept/WouldAcceptInbox.js";
 export { useWouldAcceptPromote } from "./would-accept/useWouldAcceptPromote.js";
 export type { IWouldAcceptPromoteService } from "./would-accept/useWouldAcceptPromote.js";
 
-export { LocalTtftObserver, setLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
+export { LocalTtftObserver, setLocalTtftObserver } from "@/v4/telemetry/local-ttft/contract.js";
 export { ensurePendingTaskDraft } from "@/v4/composer/composerDraftStore.js";

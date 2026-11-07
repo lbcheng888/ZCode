@@ -124,6 +124,8 @@ describe("compact recovery pointer contract", () => {
     fileMap: ["apps/zcode-cli/packages/core/src/tool/handlers/recall.ts"],
     openQuestions: ["trigger port seam"],
     recallSeedIds: ["target:target_17lz0p0_0f9a", "zcode-artifact://sess_a/art_1"],
+    chengRunId: "m5-20261107T000000Z-12345",
+    chengPlanId: `cheng-plan://${"a".repeat(64)}`,
   };
 
   it("accepts a full pointer and rejects invented seed ids", () => {
@@ -164,6 +166,8 @@ describe("compact recovery pointer contract", () => {
       recoveryPointer: pointer,
     });
     expect(withPointer.recoveryPointer?.objective).toBe("Ship the recall tool");
+    expect(withPointer.recoveryPointer?.chengRunId).toBe(pointer.chengRunId);
+    expect(withPointer.recoveryPointer?.chengPlanId).toBe(pointer.chengPlanId);
     expect(
       compactBoundaryPayloadSchema.safeParse({
         ...base,

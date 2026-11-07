@@ -13,6 +13,8 @@ export * from "./cheng-spec-ref.js";
 export * from "./decision-frame.js";
 export * from "./derivation-graph.js";
 export * from "./cheng-plan.js";
+export * from "./cheng-gate.js";
+export * from "./cheng-planner.js";
 export * from "./adapters/tsv.js";
 export * from "./adapters/run-volume.js";
 export * from "./adapters/trace.js";

@@ -47,7 +47,9 @@ export const CONTROL_PLANE_RPC_TIMEOUTS_MS = {
   "wouldAccept.list": 5_000,
   "wouldAccept.promote": 10_000,
   "control.status": 5_000,
+  "runs.list": 5_000,
   "host.command": 30_000,
+  "host.watchdogCommand": 30_000,
   "host.worker.find": 10_000,
   "host.worker.resume": 60_000,
   "host.worker.createTask": 60_000,
@@ -66,7 +68,9 @@ export const CONTROL_PLANE_RPC_METHODS = [
   "wouldAccept.list",
   "wouldAccept.promote",
   "control.status",
+  "runs.list",
   "host.command",
+  "host.watchdogCommand",
   "host.worker.find",
   "host.worker.resume",
   "host.worker.createTask",
@@ -75,6 +79,41 @@ export const CONTROL_PLANE_RPC_METHODS = [
 ] as const;
 
 export type ControlPlaneRpcMethod = (typeof CONTROL_PLANE_RPC_METHODS)[number];
+
+/**
+ * `runs.list`：background_run_registry 的只读投影（S0 可见性出口）。
+ * 过滤键都是开集字符串：新增 subsystem 不改协议；limit 由调用方显式给出，服务端仍封顶。
+ */
+export const runsListParamsSchema = z
+  .object({
+    kind: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    state: z.string().min(1).optional(),
+    workspaceKey: z.string().min(1).optional(),
+    limit: z.number().int().positive().max(500).optional(),
+  })
+  .strict();
+
+export const backgroundRunRowSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.string().min(1),
+    owner: z.string().min(1),
+    ownerSession: z.string().min(1).optional(),
+    workspaceKey: z.string().min(1).optional(),
+    state: z.string().min(1),
+    narrowResultRef: z.string().min(1).optional(),
+    stallClockRef: z.string().min(1).optional(),
+    stalledSince: z.number().int().nonnegative().optional(),
+    heartbeat: z.boolean().optional(),
+    registeredAt: z.number().int().nonnegative(),
+    updatedAt: z.number().int().nonnegative(),
+    terminalAt: z.number().int().nonnegative().optional(),
+    terminalReason: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const runsListResultSchema = z.object({ runs: z.array(backgroundRunRowSchema) }).strict();
 
 /**
  * 错误码闭集。`retriable` 由调用方随 code 一并判断：EOF/超时/child 不可达是可重试
@@ -134,7 +173,10 @@ export const controlPlaneHealthFieldsSchema = z
     /** 只在「曾 ready 后降级」出现（§2.4）。 */
     degraded: controlPlaneDegradedSchema.optional(),
     /** 最近 per-plane 错误摘要（按 workspace 去重，最多 N 条）。 */
-    workspaceErrors: z.array(controlPlaneWorkspaceErrorSchema).max(CONTROL_PLANE_MAX_WORKSPACE_ERRORS).optional(),
+    workspaceErrors: z
+      .array(controlPlaneWorkspaceErrorSchema)
+      .max(CONTROL_PLANE_MAX_WORKSPACE_ERRORS)
+      .optional(),
     /** §3.8 peer 认证失败计数（凭据不匹配/无法取得身份）。 */
     rejectedPeerCount: z.number().int().nonnegative().optional(),
     /** §3.1 帧解析/超大帧等协议错误计数。 */
@@ -462,6 +504,51 @@ export type HostCommandParams = z.infer<typeof hostCommandParamsSchema>;
 
 export const hostCommandResultSchema = commandAckSchema;
 
+/**
+ * daemon watchdog 的窄命令面（S3）：child 只请求宿主既有 owner 命令，
+ * 不在 child 复制 workflow/automation 状态机。
+ * - cancel-workflow → Core 向 owner session 投 V4 `cancelBackgroundWork`（workId=runId）；
+ * - pause-automation → Core 调 automationService.pause（automationId 已由 child 从 runId 解析）；
+ * - notify-user → Core 向 owner session 投 V4 `notifyUser`，CLI 直驱 runtime
+ *   task-notification 队列（真实用户通知，不是 daemon onError）。
+ */
+export const hostWatchdogCommandParamsSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("cancel-workflow"),
+      workspaceIdentity: z.string().trim().min(1),
+      runId: z.string().min(1),
+      sessionId: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("pause-automation"),
+      workspaceIdentity: z.string().trim().min(1),
+      automationId: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("notify-user"),
+      workspaceIdentity: z.string().trim().min(1),
+      sessionId: z.string().min(1),
+      message: z.string().min(1).max(2000),
+      /** 稳定通知幂等键：daemon 重试/Core 转发重试用同一 commandId。 */
+      commandId: z.string().min(1).max(200),
+    })
+    .strict(),
+]);
+export type HostWatchdogCommandParams = z.infer<typeof hostWatchdogCommandParamsSchema>;
+
+export const hostWatchdogCommandResultSchema = z
+  .object({
+    ok: z.boolean(),
+    error: z.string().min(1).max(500).optional(),
+  })
+  .strict();
+export type HostWatchdogCommandResult = z.infer<typeof hostWatchdogCommandResultSchema>;
+
 export const hostWorkerFindParamsSchema = z
   .object({
     workspaceIdentity: z.string().trim().min(1),
@@ -505,9 +592,7 @@ export const hostWorkerCreateTaskParamsSchema = z
     context: hostWorkerContextSchema.optional(),
   })
   .strict();
-export const hostWorkerCreateTaskResultSchema = z
-  .object({ sessionId: z.string().min(1) })
-  .strict();
+export const hostWorkerCreateTaskResultSchema = z.object({ sessionId: z.string().min(1) }).strict();
 
 /**
  * `host.autoReplyGuard` params。除定位事实外，additive-optional 携带出口已规范化的
@@ -547,7 +632,9 @@ export type SubscriptionBackfillSeedWire = z.infer<typeof subscriptionBackfillSe
 export const backfillSeedsParamsSchema = z
   .object({ workspaceIdentity: z.string().trim().min(1) })
   .strict();
-export const backfillSeedsResultSchema = z.object({ seeds: z.array(subscriptionBackfillSeedSchema) });
+export const backfillSeedsResultSchema = z.object({
+  seeds: z.array(subscriptionBackfillSeedSchema),
+});
 
 // ── 端点解析与 id 铸造 ─────────────────────────────────────────────────────
 
@@ -586,7 +673,10 @@ export function resolveControlPlaneSocketPath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (platform === "win32") {
-    return resolveControlPlaneEndpoint(serverRoot, { platform, stablePathId: stablePathId(serverRoot) });
+    return resolveControlPlaneEndpoint(serverRoot, {
+      platform,
+      stablePathId: stablePathId(serverRoot),
+    });
   }
   return join(serverRoot, CONTROL_PLANE_SOCKET_DIRNAME, CONTROL_PLANE_SOCKET_FILENAME);
 }

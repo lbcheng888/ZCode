@@ -6,6 +6,8 @@ import {
   traceContextToLogContext,
   type CollaborationMode,
   type ExecutionPort,
+  makeGoalChengRef,
+  type GoalChengRef,
   type GoalStatus,
   type LocalSettingStorePort,
   type Logger,
@@ -27,6 +29,7 @@ import {
   createMcpToolEntry,
   toMcpToolName,
   type AgentRuntime,
+  type ChengReadPort,
 } from "@zcode/core";
 import { resolveLocale } from "@zcode/i18n";
 import { normalizeModelSelection, type ModelSelection } from "@zcode/provider";
@@ -99,12 +102,13 @@ type SessionFacade = Pick<
   | "setLocale"
   | "setTarget"
   | "updateTargetStatus"
+  | "updateGoalAcceptance"
+  | "bindGoalChengRef"
 >;
 
 const DEFAULT_SESSION_RESOURCE_CLOSE_TIMEOUT_MS = 6_000;
 const SESSION_CLOSE_TURN_DRAIN_INTERVAL_MS = 50;
 const SESSION_CLOSE_TURN_DRAIN_TIMEOUT_MS = 2_000;
-
 interface SessionResourceCloseInput {
   beginShutdown: () => void;
   closeBrowserSession: () => Promise<void>;
@@ -113,16 +117,17 @@ interface SessionResourceCloseInput {
   closeNodeReplBrowserBroker?: () => Promise<void> | void;
   closeSessionStore?: () => void;
   logger: Logger;
-  timeoutMs?: number;
 }
 
 interface CreateSessionFacadeDeps {
+  chengReadPort?: ChengReadPort;
   cliDefaultSelection?: CliDefaultSelection;
   /**
    * 停下本会话拥有的 dwf run：
    * run service 的 `close()`。缺席即本装配没有 dwf 端口（journal 窄化失败、测试装配）。
    */
   closeDynamicWorkflowRuns?: () => Promise<void>;
+  closeScriptWorkflowRuns?: () => Promise<void>;
   closeNodeReplBrowserBroker?: () => Promise<void> | undefined;
   configResult: ConfigResult;
   configuredMcpServers: Record<string, McpServerConfig>;
@@ -284,8 +289,11 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
 
   return {
     close: async () => {
-      closePromise ??= (async () => {
+      // close 的结果必须代表真实完成；调用方等待超时不能让生命周期永久误判 faulted。
+      // 先登记 Promise 再执行 shutdown 回调，保证同步重入也只关闭一次。
+      closePromise ??= Promise.resolve().then(async () => {
         // 关闭入口先阻止新调度并取消在飞 Memory Extraction，再等待取消链路收口。
+        const errors: unknown[] = [];
         deps.runtime.beginShutdown();
         // 缺陷根因（关停竞态）：SIGINT 的关停链（closeSessionStore → db.close）与被取消
         // 回合的记账链（finishTargetTurnAccounting → finishTargetRun 还要写 paused|turn-cancelled
@@ -298,44 +306,42 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
         // 因此谓词为假时记账的 SQLite 写必然已全部先于 db.close()。
         await drainActiveTurnWorkBeforeStoreClose(deps.runtime, deps.logger);
         await deps.runtime.drainMemoryExtractions(60_000);
-        // 引擎归本 App 所有，所以关闭要主动停下它。
-        // 位置是两个约束夹出来的：在 beginShutdown **之后**，结算带出的终态通知才会被丢掉
-        // （background-notifications.ts 在 shuttingDown 时不入队），不会把正在关闭的会话的模型
-        // 叫醒；在 closeSessionResources **之前**，子代理还有 execution / MCP / session store
-        // 可以干净地中止，引擎也还有 journal 可以写自己那一笔 stopped(interrupted)。
-        if (deps.closeDynamicWorkflowRuns !== undefined) {
-          try {
-            await deps.closeDynamicWorkflowRuns();
-          } catch (error: unknown) {
-            // 卡住或抛错的 dwf 关闭绝不能吃掉资源关闭（同下面并行关闭那条注释的论证）：
-            // 记一条 warn 继续走，最坏情况是那个 run 留成孤儿行，下一次构造时被收敛。
-            deps.logger.warn?.(
-              "Closing dynamic workflow runs failed; continuing to close resources",
-              {
-                errorMessage: error instanceof Error ? error.message : String(error),
-                event: "dynamic_workflow.service.close_failed",
-                module: "bootstrap.app",
-              },
-            );
-          }
-        }
+        const owners: Array<[string, (() => Promise<void>) | undefined]> = [
+          ["runtime_work", () => deps.runtime.closeOwnedWork()],
+          ["dynamic_workflow", deps.closeDynamicWorkflowRuns],
+          ["script_workflow", deps.closeScriptWorkflowRuns],
+        ];
+        // 所属工作实际收口后才释放依赖资源；进程退出预算由外层进程 owner 负责。
+        const closed = await closeNamedResources(owners, deps.logger);
+        for (const result of closed) if (result.status === "rejected") errors.push(result.reason);
         const closableSessionStore =
           deps.ownsSessionStore && isClosableSessionStore(deps.sessionStore)
             ? deps.sessionStore
             : undefined;
-        await closeSessionResources({
-          beginShutdown: () => deps.runtime.beginShutdown(),
-          closeBrowserSession: () => deps.runtime.closeBrowserSession(),
-          closeExecution:
-            deps.ownsExecutionPort && deps.executionPort.close
-              ? () => deps.executionPort.close?.()
+        try {
+          await closeSessionResources({
+            beginShutdown: () => deps.runtime.beginShutdown(),
+            closeBrowserSession: () => deps.runtime.closeBrowserSession(),
+            closeExecution:
+              deps.ownsExecutionPort && deps.executionPort.close
+                ? () => deps.executionPort.close?.()
+                : undefined,
+            closeMcp: deps.ownsMcpPort && deps.mcpPort ? () => deps.mcpPort?.close() : undefined,
+            closeNodeReplBrowserBroker: deps.closeNodeReplBrowserBroker,
+            closeSessionStore: closableSessionStore
+              ? () => closableSessionStore.close()
               : undefined,
-          closeMcp: deps.ownsMcpPort && deps.mcpPort ? () => deps.mcpPort?.close() : undefined,
-          closeNodeReplBrowserBroker: deps.closeNodeReplBrowserBroker,
-          closeSessionStore: closableSessionStore ? () => closableSessionStore.close() : undefined,
-          logger: deps.logger,
-        });
-      })();
+            logger: deps.logger,
+          });
+        } catch (error) {
+          errors.push(error);
+        }
+        if (errors.length)
+          throw new AggregateError(
+            errors,
+            `Session shutdown failed: ${errors.map((error) => (error instanceof Error ? error.message : String(error))).join("; ")}`,
+          );
+      });
       return await closePromise;
     },
     getMode: () => deps.runtime.getMode(),
@@ -370,6 +376,77 @@ export function createSessionFacade(deps: CreateSessionFacadeDeps): SessionFacad
         ReturnType<ZCodeApp["updateTargetStatus"]>
       >,
     clearTarget: async () => (await setTargetStatus("cleared", {})) as boolean,
+    // S4 用户直改（v4 updateGoalAcceptance）：与 GoalUpdate 工具同一 store 写路径；
+    // 过期/无目标/已 complete 返回 null（调用方按 stale 拒绝），成功才广播事件。
+    updateGoalAcceptance: async (input) => {
+      if (!deps.sessionStore.updateTargetObjective) {
+        throw new Error(
+          "SessionStorePort.updateTargetObjective is not configured for updateGoalAcceptance",
+        );
+      }
+      const previousTarget = await deps.sessionStore.readTarget({
+        sessionID: deps.sessionId,
+      });
+      if (!previousTarget || previousTarget.status === "complete") return null;
+      const updated = await deps.sessionStore.updateTargetObjective({
+        acceptanceLevel: input.acceptanceLevel,
+        revision: input.revision,
+        sessionID: deps.sessionId,
+        targetID: input.targetID,
+      });
+      if (!updated) return null;
+      await deps.runtime.recordTargetChanged({
+        action: "acceptance_level_edited",
+        previousTarget,
+        source: "command",
+        target: updated,
+        traceContext: deps.traceContext,
+      });
+      return updated;
+    },
+    // S4 用户直改（v4 bindGoalChengRef）：绑定经真实 host inspect 复核，runId 取回执
+    // 而非 UI 自由文本；chengRef=null 清除。cheng 端口缺席响亮抛错，不伪绑定。
+    bindGoalChengRef: async (input) => {
+      if (!deps.sessionStore.updateTargetChengRef) {
+        throw new Error(
+          "SessionStorePort.updateTargetChengRef is not configured for bindGoalChengRef",
+        );
+      }
+      const previousTarget = await deps.sessionStore.readTarget({
+        sessionID: deps.sessionId,
+      });
+      if (!previousTarget || previousTarget.status === "complete") return null;
+      let resolved: GoalChengRef | null = null;
+      if (input.chengRef !== null) {
+        if (deps.chengReadPort === undefined) {
+          throw new Error(
+            "Cheng host 未接线（ZCODE_CHENG_ROOT + cheng host entry）：无法绑定 Cheng 引用",
+          );
+        }
+        const snapshot = await deps.chengReadPort.inspect(input.chengRef.jobId);
+        resolved = makeGoalChengRef({
+          jobId: input.chengRef.jobId,
+          task: input.chengRef.task,
+          ...(snapshot.runId === null ? {} : { runId: snapshot.runId }),
+        });
+      }
+      const updated = await deps.sessionStore.updateTargetChengRef({
+        chengRef: resolved,
+        revision: input.revision,
+        sessionID: deps.sessionId,
+        targetID: input.targetID,
+      });
+      if (!updated) return null;
+      await deps.runtime.recordTargetChanged({
+        action: "cheng_ref_edited",
+        previousTarget,
+        reason: resolved === null ? "cleared" : "bound",
+        source: "command",
+        target: updated,
+        traceContext: deps.traceContext,
+      });
+      return updated;
+    },
     listModels: () => {
       return listRegistryBackedModels(deps.providerRegistry);
     },
@@ -818,21 +895,61 @@ function sleepWithUnrefTimer(ms: number): Promise<void> {
   });
 }
 
+/** 慢关闭只提供诊断；不能用超时结果替代资源的真实完成。 */
+async function closeNamedResources(
+  resources: Array<[string, (() => Promise<void> | void) | undefined]>,
+  logger: Logger,
+): Promise<PromiseSettledResult<void>[]> {
+  const pending = new Set(resources.filter(([, close]) => close).map(([name]) => name));
+  const slow = setTimeout(() => {
+    if (pending.size)
+      logger.warn("Session resources are still closing", {
+        event: "session.resource_close.slow",
+        pendingResources: [...pending],
+        elapsedMs: 30_000,
+      });
+  }, 30_000);
+  slow.unref();
+  try {
+    return await Promise.allSettled(
+      resources.flatMap(([name, close]) =>
+        close
+          ? [
+              Promise.resolve()
+                .then(close)
+                .catch((cause: unknown) => {
+                  logger.warn("Session resource close failed", {
+                    event: "session.resource_close.failed",
+                    resource: name,
+                    error: cause instanceof Error ? cause.message : String(cause),
+                  });
+                  throw new Error(
+                    `${name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+                    { cause },
+                  );
+                })
+                .finally(() => pending.delete(name)),
+            ]
+          : [],
+      ),
+    );
+  } finally {
+    clearTimeout(slow);
+  }
+}
 export async function closeSessionResources(input: SessionResourceCloseInput): Promise<void> {
+  const errors: unknown[] = [];
   try {
     // 第一拍先关闭 runtime admission；后续 execution cancel 只能收口状态，不能再唤醒模型。
     input.beginShutdown();
   } catch (error) {
+    errors.push(error);
     input.logger.warn("Failed to begin runtime shutdown", {
       error: error instanceof Error ? error.message : String(error),
       event: "session.shutdown_admission.failed",
     });
   }
 
-  const timeoutMs = Math.max(
-    1,
-    Math.trunc(input.timeoutMs ?? DEFAULT_SESSION_RESOURCE_CLOSE_TIMEOUT_MS),
-  );
   const resources: Array<[name: string, close: (() => Promise<void> | void) | undefined]> = [
     ["browser_session", input.closeBrowserSession],
     ["execution", input.closeExecution],
@@ -840,58 +957,22 @@ export async function closeSessionResources(input: SessionResourceCloseInput): P
     ["node_repl_browser_broker", input.closeNodeReplBrowserBroker],
   ];
 
-  // 旧关闭链串行 await；Browser close 永不 settle 时，Execution/MCP 永远不会执行。
-  // 各 owner 并行、独立带 deadline，任何一个失败都不能跳过其它资源。
-  await Promise.all(
-    resources.flatMap(([name, close]) =>
-      close ? [closeSessionResourceWithinDeadline(name, close, timeoutMs, input.logger)] : [],
-    ),
-  );
-
-  try {
-    input.closeSessionStore?.();
-  } catch (error) {
-    input.logger.warn("Failed to close session store", {
-      error: error instanceof Error ? error.message : String(error),
-      event: "session.resource_close.failed",
-      resource: "session_store",
-    });
-  }
-}
-
-async function closeSessionResourceWithinDeadline(
-  name: string,
-  close: () => Promise<void> | void,
-  timeoutMs: number,
-  logger: Logger,
-): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  const closePromise = Promise.resolve().then(close);
-  const outcome = await Promise.race([
-    closePromise.then(
-      () => ({ type: "completed" as const }),
-      (error: unknown) => ({ type: "failed" as const, error }),
-    ),
-    new Promise<{ type: "timed_out" }>((resolve) => {
-      timer = setTimeout(() => resolve({ type: "timed_out" }), timeoutMs);
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-
-  if (outcome.type === "completed") return;
-  if (outcome.type === "timed_out") {
-    logger.warn("Session resource close timed out", {
-      event: "session.resource_close.timed_out",
-      resource: name,
-      timeoutMs,
-    });
-    return;
-  }
-  logger.warn("Session resource close failed", {
-    error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
-    event: "session.resource_close.failed",
-    resource: name,
-  });
+  // 独立资源并行释放；外部超时不能让仍在收尾的借用者碰到已关闭的 store。
+  const completion = (async () => {
+    const results = await closeNamedResources(resources, input.logger);
+    for (const result of results) if (result.status === "rejected") errors.push(result.reason);
+    try {
+      input.closeSessionStore?.();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length)
+      throw new AggregateError(
+        errors,
+        `Session resources could not be safely released: ${errors.map((error) => (error instanceof Error ? error.message : String(error))).join("; ")}`,
+      );
+  })();
+  return completion;
 }
 
 async function persistSessionModelSelection(deps: CreateSessionFacadeDeps): Promise<void> {
@@ -916,16 +997,32 @@ async function persistSessionModelSelection(deps: CreateSessionFacadeDeps): Prom
       },
     });
   } catch (error) {
-    // 选型已经在当前 runtime 生效；持久化失败不能反向伪装成切换失败，但必须留生产日志。
-    deps.logger.warn("Session model selection persistence failed", {
+    const logContext = {
       ...traceContextToLogContext(deps.traceContext),
       error: error instanceof Error ? error.message : String(error),
-      event: "session.model_selection.persist_failed",
       modelId: selection.modelId,
       module: "bootstrap",
       providerId: selection.providerId,
-      status: "failed",
       thoughtLevel: selection.options?.reasoningLevel,
+    };
+    // Bug 原因（ZCT-2109847556412547072）：App 在 deferred 会话首条消息前设置选型/档位时，
+    // session 行尚未创建，entry 写入必然报 FOREIGN KEY，却以 warn 进入生产日志，误导排查。
+    // 首次持久化（ensureSessionPersisted）会以当时的 Session Selection 补写同一 entry，
+    // 所以仅在会话仍未持久化时降为 debug。仍先尝试写入而不是预先跳过：若首次持久化正在进行，
+    // 预判跳过会漏写比其读取更晚的选择。
+    if (!deps.runtime.isSessionPersisted()) {
+      deps.logger.debug("Session model selection persistence deferred until session is persisted", {
+        ...logContext,
+        event: "session.model_selection.persist_deferred",
+        status: "waiting",
+      });
+      return;
+    }
+    // 选型已经在当前 runtime 生效；持久化失败不能反向伪装成切换失败，但必须留生产日志。
+    deps.logger.warn("Session model selection persistence failed", {
+      ...logContext,
+      event: "session.model_selection.persist_failed",
+      status: "failed",
     });
   }
 }

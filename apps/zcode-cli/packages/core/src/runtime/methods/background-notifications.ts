@@ -10,6 +10,7 @@ import { runtimeInputMetadata } from "../../agent/runtime-input-presentation.js"
 import type { AgentRuntimeInternal } from "../internal.js";
 import type { SealBackgroundTaskNotificationsInput } from "../types.js";
 import { shouldSuppressSealedSubagentBashNotification } from "../../runtime-task/notification-policy.js";
+import { joinTaskNotificationBatch } from "../../runtime-task/notification.js";
 
 /**
  * claim 键行落库（at-most-once 的认领凭证）。成功返回 true；账本缺席或写失败返回 false
@@ -90,7 +91,7 @@ export function enqueueBackgroundTaskNotification(
     toolName?: string;
     traceContext: TraceContext;
   },
-): void {
+): boolean {
   if (this.shuttingDown) {
     // 防御直接调用路径：session teardown 期间只允许任务状态收口，不能再启动模型轮次。
     this.logger?.info?.("Dropped background task notification during runtime shutdown", {
@@ -100,7 +101,7 @@ export function enqueueBackgroundTaskNotification(
       taskId: notification.taskId,
       toolName: notification.toolName,
     });
-    return;
+    return false;
   }
   const task = notification.taskId ? this.runtimeTaskRegistry.get(notification.taskId) : undefined;
   const branchGeneration = task?.branchGeneration ?? this.branchGeneration;
@@ -113,7 +114,7 @@ export function enqueueBackgroundTaskNotification(
       module: "core.runtime",
       taskId: notification.taskId,
     });
-    return;
+    return false;
   }
   const commandId = notification.commandId
     ? (notification.commandId as RuntimeCommandId)
@@ -131,7 +132,7 @@ export function enqueueBackgroundTaskNotification(
     toolName: notification.toolName,
     traceContext: notification.traceContext,
   });
-  if (notification.claimPersisted) return;
+  if (notification.claimPersisted) return true;
   // wake 入账本（admitted）。runtime 命令队列是纯内存的，账本是唯一 durable 痕迹——
   // 崩溃重启后 resume 把残留 admitted 收口为 discarded(session_resumed)（留痕不静默）；
   // 其中主体仍存活的终态 workflow 窄结果由 wake re-feed（background-wake-refeed.ts）
@@ -158,6 +159,7 @@ export function enqueueBackgroundTaskNotification(
       });
     });
   }
+  return true;
 }
 
 export function sealBackgroundTaskNotifications(
@@ -249,11 +251,20 @@ export async function persistBackgroundTaskNotificationBatch(
   const firstCommand = commands[0];
   const backgroundSource = resolveBackgroundTaskNotificationSource(commands);
   const originMeta = resolveBackgroundTaskNotificationOriginMeta(commands);
-  const text = commands.map((command) => command.text).join("\n\n");
+  const texts = commands.map((command) => command.text);
+  // 这一轮的输入文本仍以 "\n\n" 相连，App 据此逐条解析任务卡片。
+  const text = joinTaskNotificationBatch(texts);
+  // 修复原因：整批原来存成一个连接字符串，投影时再按 <task-notification> 开头猜每条的边界；
+  // workflow 运行中通知不以它开头，会被并进前一条通知的包装。空闲整批的每条通知改为同一条消息的
+  // 一个文本块，模型看到的和冷恢复读回的都按块包装，边界不靠猜。轮中通知每条单独入队，不成批。
+  const blocks = !midTurn && texts.length > 1 ? texts : undefined;
   await this.ensureContextInitialized(firstCommand.traceContext);
   const messageID = createMessageId();
   const inputPresentation = midTurn ? "task_notification_steer" : "task_notification";
-  this.messageHistory.addUser(text, runtimeInputMetadata(inputPresentation));
+  this.messageHistory.addUser(
+    blocks ? blocks.map((block) => ({ type: "text" as const, text: block })) : text,
+    runtimeInputMetadata(inputPresentation),
+  );
   await this.persistSyntheticUserNoticeForSession({
     messageID,
     metadata: {
@@ -263,7 +274,7 @@ export async function persistBackgroundTaskNotificationBatch(
     },
     sessionId: this.sessionId,
     source: "background_task",
-    text,
+    text: blocks ?? text,
     traceContext: firstCommand.traceContext,
     visibility: "model-only",
   });

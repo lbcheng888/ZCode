@@ -53,6 +53,7 @@ import {
   type SuperAgentControlPlane,
 } from "../../app/super-agent-control-plane.js";
 import { getSuperAgentDatabasePath } from "../../app/paths.js";
+import { runsList } from "../runs-list.js";
 import type { AdjudicationModelSessionPort } from "../adjudication/index.js";
 import type { AutoReplyGuardPort, SubscriptionBackfillSeed, TriggerEnvelope } from "../intake/index.js";
 import { triggerDeliveryCommandId, type TriggerWorkerPort } from "../trigger/index.js";
@@ -278,6 +279,31 @@ export class DaemonPlaneManager {
     );
   }
 
+  /**
+   * child 后台任务（watchdog）向 Core 发起窄请求。没有父请求栈，因此必须显式传
+   * 目标 workspace 与超时；通道优先该 plane 最近连接，退回任一活跃 Core 连接。
+   */
+  public requestHost(
+    workspaceIdentity: string,
+    method: ControlPlaneRpcMethod,
+    params: unknown,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    const planeChannel = this.planes.get(workspaceIdentity)?.coreChannel;
+    const channel =
+      planeChannel !== undefined && !planeChannel.closed
+        ? planeChannel
+        : this.options.activeHostChannel?.();
+    if (!channel || channel.closed) {
+      throw new RpcError(
+        CONTROL_PLANE_RPC_ERROR_CODES.hostUnreachable,
+        `Core host channel closed（workspace=${workspaceIdentity}）`,
+        true,
+      );
+    }
+    return channel.request(method, params, timeoutMs);
+  }
+
   private async dispatchRequest(
     method: string,
     rawParams: unknown,
@@ -308,6 +334,8 @@ export class DaemonPlaneManager {
         return await this.wouldAcceptPromote(rawParams);
       case "control.status":
         return { planes: this.planeStatus() };
+      case "runs.list":
+        return runsList(this.options.database, rawParams);
       default:
         // host.* / backfill.seeds 是 child→Core 方向；Core 反向调用属于方向错误，
         // 返回 typed 错误，不静默实现第二份语义（§3.3）。
@@ -402,6 +430,7 @@ export class DaemonPlaneManager {
       adjudicationSession: this.options.adjudicationSession,
       now: this.now,
       mandateGate: this.options.mandateGate,
+      reconcileChengJobsOnStartup: true,
       ...(this.options.dispatchIntervalMs !== undefined
         ? { dispatchIntervalMs: this.options.dispatchIntervalMs }
         : {}),

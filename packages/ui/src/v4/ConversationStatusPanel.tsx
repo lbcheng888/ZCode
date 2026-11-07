@@ -20,11 +20,13 @@ import {
   EllipsisIcon,
   FileDiffIcon,
   GoalIcon,
+  LinkIcon,
   ListChecksIcon,
   Maximize2Icon,
   Minimize2Icon,
   PauseIcon,
   PlayIcon,
+  SettingsIcon,
   SquareIcon,
   SquareTerminalIcon,
   Trash2Icon,
@@ -66,10 +68,20 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.js";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog.js";
+import { Input } from "@/components/ui/input.js";
 import { ControlHintTooltip } from "@/ControlHintTooltip.js";
 import { formatBackgroundTaskElapsedLabel } from "@/BackgroundTaskElapsedLabel.js";
 import { GitActionMenu } from "@/GitActionMenu.js";
@@ -151,6 +163,10 @@ export interface ConversationStatusPanelProps {
   onResumeGoal?: () => void;
   /** 取消目标（破坏性）：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
   onClearGoal?: () => void;
+  /** S4：直改验收等级（v4 updateGoalAcceptance，快照 revision CAS）。 */
+  onUpdateGoalAcceptance?: (level: "production" | "diagnostic") => void;
+  /** S4：绑定/清除显式 Cheng 引用（v4 bindGoalChengRef；null=清除）。 */
+  onBindGoalChengRef?: (chengRef: { jobId: string; task: string } | null) => void;
   onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
   onOpenBackgroundBash?: (work: BackgroundWorkSummary) => void;
   onCancelBackgroundWork?: (workId: string) => void;
@@ -468,17 +484,143 @@ function GitStatusSection({
   );
 }
 
+/**
+ * S4 goal 用户直改入口（等级 + Cheng 绑定）。等级用 radio 即时生效；绑定走弹窗
+ * （jobId/task 由用户输入，CLI 侧经真实 host inspect 复核后落库）；已有绑定时可清除。
+ * 导出供机器用例直渲染；只在快照带 goal.revision（可 CAS）时由父级挂出。
+ */
+export function GoalEditSettingsMenu({
+  goal,
+  onUpdateAcceptance,
+  onBindChengRef,
+}: {
+  goal: GoalState;
+  onUpdateAcceptance: (level: "production" | "diagnostic") => void;
+  onBindChengRef: (chengRef: { jobId: string; task: string } | null) => void;
+}) {
+  const { intl } = useZCodeIntl();
+  const [bindOpen, setBindOpen] = useState(false);
+  const [jobId, setJobId] = useState("");
+  const [task, setTask] = useState("");
+  const currentLevel = goal.acceptanceLevel ?? "production";
+  return (
+    <>
+      <ControlHintTooltip
+        title={intl.formatMessage({ id: "chat.target.editSettings" })}
+        side="left"
+      >
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-6 shrink-0"
+              data-goal-action="settings"
+              aria-label={intl.formatMessage({ id: "chat.target.editSettings" })}
+            >
+              <SettingsIcon className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" data-goal-settings-menu>
+            <DropdownMenuRadioGroup
+              value={currentLevel}
+              onValueChange={(value) => {
+                if (value === "production" || value === "diagnostic") {
+                  onUpdateAcceptance(value);
+                }
+              }}
+            >
+              <DropdownMenuRadioItem value="production" data-goal-acceptance-option="production">
+                {intl.formatMessage({ id: "chat.target.acceptance.production" })}
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="diagnostic" data-goal-acceptance-option="diagnostic">
+                {intl.formatMessage({ id: "chat.target.acceptance.diagnostic" })}
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+            <DropdownMenuItem
+              data-goal-action="bind-cheng"
+              onSelect={() => {
+                setJobId(goal.chengRef?.jobId ?? "");
+                setTask(goal.chengRef?.task ?? "");
+                setBindOpen(true);
+              }}
+            >
+              <LinkIcon className="size-3.5" />
+              {intl.formatMessage({ id: "chat.target.chengBind.open" })}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </ControlHintTooltip>
+      <Dialog open={bindOpen} onOpenChange={setBindOpen}>
+        <DialogContent data-goal-cheng-bind-dialog>
+          <DialogHeader>
+            <DialogTitle>{intl.formatMessage({ id: "chat.target.chengBind.title" })}</DialogTitle>
+            <DialogDescription>
+              {intl.formatMessage({ id: "chat.target.chengBind.description" })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Input
+              data-goal-cheng-bind-job-id
+              placeholder={intl.formatMessage({ id: "chat.target.chengBind.jobId" })}
+              value={jobId}
+              onChange={(event) => setJobId(event.target.value)}
+            />
+            <Input
+              data-goal-cheng-bind-task
+              placeholder={intl.formatMessage({ id: "chat.target.chengBind.task" })}
+              value={task}
+              onChange={(event) => setTask(event.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            {goal.chengRef ? (
+              <Button
+                type="button"
+                variant="ghost"
+                data-goal-cheng-bind-clear
+                onClick={() => {
+                  setBindOpen(false);
+                  onBindChengRef(null);
+                }}
+              >
+                {intl.formatMessage({ id: "chat.target.chengBind.clear" })}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              data-goal-cheng-bind-submit
+              disabled={jobId.trim().length === 0 || task.trim().length === 0}
+              onClick={() => {
+                setBindOpen(false);
+                onBindChengRef({ jobId: jobId.trim(), task: task.trim() });
+              }}
+            >
+              {intl.formatMessage({ id: "chat.target.chengBind.submit" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function GoalStatusSection({
   model,
   onPauseGoal,
   onResumeGoal,
   onClearGoal,
+  onUpdateGoalAcceptance,
+  onBindGoalChengRef,
   separated,
 }: {
   model: ConversationStatusPanelModel;
   onPauseGoal?: () => void;
   onResumeGoal?: () => void;
   onClearGoal?: () => void;
+  onUpdateGoalAcceptance?: (level: "production" | "diagnostic") => void;
+  onBindGoalChengRef?: (chengRef: { jobId: string; task: string } | null) => void;
   separated: boolean;
 }) {
   const { intl } = useZCodeIntl();
@@ -554,6 +696,18 @@ function GoalStatusSection({
       </Button>
     </ControlHintTooltip>
   ) : null;
+  // S4 用户直改入口：等级 radio + Cheng 绑定/清除。旧 CLI 快照不带 goal.revision 时
+  // 没有 CAS 键，入口隐藏（不可伪 CAS）；回调缺席（只读面）同样隐藏。
+  const settingsMenu =
+    goal.revision !== undefined &&
+    onUpdateGoalAcceptance !== undefined &&
+    onBindGoalChengRef !== undefined ? (
+      <GoalEditSettingsMenu
+        goal={goal}
+        onUpdateAcceptance={onUpdateGoalAcceptance}
+        onBindChengRef={onBindGoalChengRef}
+      />
+    ) : null;
 
   return (
     <StatusSection
@@ -568,9 +722,11 @@ function GoalStatusSection({
           >
             {elapsed}
           </span>
-          {control || clearAction ? <span className="shrink-0">·</span> : null}
+          {control || settingsMenu || clearAction ? <span className="shrink-0">·</span> : null}
           {control}
-          {control && clearAction ? <span className="shrink-0">·</span> : null}
+          {control && (settingsMenu || clearAction) ? <span className="shrink-0">·</span> : null}
+          {settingsMenu}
+          {settingsMenu && clearAction ? <span className="shrink-0">·</span> : null}
           {clearAction}
         </>
       )}
@@ -1666,6 +1822,8 @@ function ConversationStatusPanelImpl({
   onRefreshGit,
   onOpenGitReview,
   onPauseGoal,
+  onUpdateGoalAcceptance,
+  onBindGoalChengRef,
   onResumeGoal,
   onClearGoal,
   onOpenPlanDetail,
@@ -1743,8 +1901,7 @@ function ConversationStatusPanelImpl({
   // 也要让面板外壳存在，否则唯一入口会被通用空态门吞掉。
   const canRenderWouldAccept = (wouldAcceptCards?.length ?? 0) > 0;
   const wouldAcceptPromote = useMemo(
-    () =>
-      onPromoteWouldAccept ? { promoteWouldAccept: onPromoteWouldAccept } : undefined,
+    () => (onPromoteWouldAccept ? { promoteWouldAccept: onPromoteWouldAccept } : undefined),
     [onPromoteWouldAccept],
   );
   const handlePanelModeChange = useCallback(
@@ -1908,6 +2065,8 @@ function ConversationStatusPanelImpl({
                 onPauseGoal={onPauseGoal}
                 onResumeGoal={onResumeGoal}
                 onClearGoal={onClearGoal}
+                onUpdateGoalAcceptance={onUpdateGoalAcceptance}
+                onBindGoalChengRef={onBindGoalChengRef}
               />
             ) : null}
             {canRenderSessionPlans ? (

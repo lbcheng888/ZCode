@@ -826,6 +826,24 @@ export function mergeColdConversationEvents(input: MergeInput): ColdEventMergeRe
           payload: { action: "set", source: "runtime", target: input.target },
         },
         ...transcriptEvents.slice(1),
+        // 持久层是 target 状态权威：上面的 set 只负责重置迭代/验证数组，后续
+        // transcript 里的 verification 仍会把状态推回 notSatisfied。末尾再发一次
+        // status_updated，确保冷恢复的 goal 状态等于 session_target（重启后 paused
+        // 必须显示暂停，而不是上一轮的未达成）。
+        {
+          id: "hydrate-goal-status" as SessionEvent["id"],
+          sessionId: input.sessionId as SessionEvent["sessionId"],
+          type: SessionEventType.TargetChanged,
+          timestamp: new Date(input.target.time.updated + 1),
+          traceId: "trace-hydration" as SessionEvent["traceId"],
+          sequenceNumber: 0,
+          payload: {
+            action: "status_updated",
+            source: "runtime",
+            target: input.target,
+            reason: "cold-hydrate-status",
+          },
+        },
       ]
     : transcriptEvents;
   const durableTurnIds = new Set(

@@ -350,6 +350,7 @@ async function renderStatusPanel(props: Record<string, unknown>) {
 }
 
 describe("ConversationStatusPanel", () => {
+
   it("goal 计时器只在活动态起一次：投影换一个等值的 goal 对象不重建 interval，暂停即拆掉", async () => {
     // 修订 2026-09-12：此前 effect 以整个 goal 对象为依赖，每个 goal 事件都同步 setNow 并重建
     // interval——落在投影帧的同步提交里，给 React 的嵌套更新计数记一笔（与工作流卡崩溃同形）。

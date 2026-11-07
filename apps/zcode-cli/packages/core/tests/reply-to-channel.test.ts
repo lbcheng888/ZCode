@@ -45,15 +45,16 @@ function fixture() {
     deliveryId: "delivery",
     providerMessageId: "om_sent",
   }));
+  const readTarget = vi.fn(async () => null);
   const abort = new AbortController();
   const context = {
     sessionId: "task",
     toolCallId: "call",
     abortSignal: abort.signal,
-    sessionStore: { messages: async () => messages },
+    sessionStore: { messages: async () => messages, readTarget },
     topicResourcePort: { reply },
   } as unknown as ToolExecutionContext;
-  return { context, reply, abort, user, assistant };
+  return { context, reply, readTarget, abort, user, assistant };
 }
 const input = {
   parts: [
@@ -128,5 +129,54 @@ describe("ReplyToChannel", () => {
     const f = fixture();
     f.reply.mockResolvedValue({ status: "unknown", deliveryId: "delivery", providerMessageId: "" });
     expect(await replyToChannelHandler(input, f.context)).toMatchObject({ status: "unknown" });
+  });
+  it("red bound ChengGate blocks the external channel with zero delivery", async () => {
+    const f = fixture();
+    f.readTarget.mockResolvedValue({ chengRef: { jobId: "job-red" } } as never);
+    f.context.chengReadPort = {
+      verify: vi.fn(async () => ({
+        gate: { ok: false, level: "BLOCKED", reasons: ["settle_not_solved"] },
+      })),
+    } as never;
+
+    await expect(replyToChannelHandler(input, f.context)).rejects.toThrow(
+      "cheng_gate_blocked:settle_not_solved",
+    );
+    expect(f.reply).not.toHaveBeenCalled();
+  });
+  it("green bound ChengGate allows the external channel", async () => {
+    const f = fixture();
+    const verify = vi.fn(async () => ({
+      gate: { ok: true, level: "PRODUCTION", reasons: [] },
+    }));
+    f.readTarget.mockResolvedValue({ chengRef: { jobId: "job-green" } } as never);
+    f.context.chengReadPort = { verify } as never;
+
+    await expect(replyToChannelHandler(input, f.context)).resolves.toMatchObject({
+      status: "sent",
+    });
+    expect(verify).toHaveBeenCalledWith("job-green");
+    expect(f.reply).toHaveBeenCalled();
+  });
+  it("fails closed when a bound Cheng job has no read port", async () => {
+    const f = fixture();
+    f.readTarget.mockResolvedValue({ chengRef: { jobId: "job-red" } } as never);
+
+    await expect(replyToChannelHandler(input, f.context)).rejects.toThrow(
+      /Cheng delivery gate unavailable/,
+    );
+    expect(f.reply).not.toHaveBeenCalled();
+  });
+  it("propagates gate resolver failure with zero delivery", async () => {
+    const f = fixture();
+    f.readTarget.mockResolvedValue({ chengRef: { jobId: "job-red" } } as never);
+    f.context.chengReadPort = {
+      verify: vi.fn(async () => {
+        throw new Error("cheng host unavailable");
+      }),
+    } as never;
+
+    await expect(replyToChannelHandler(input, f.context)).rejects.toThrow("cheng host unavailable");
+    expect(f.reply).not.toHaveBeenCalled();
   });
 });

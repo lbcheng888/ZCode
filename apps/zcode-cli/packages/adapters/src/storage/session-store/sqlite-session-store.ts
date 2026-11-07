@@ -13,8 +13,11 @@ import type {
   CreateSessionTaskLinkInput,
   CreateSessionInput,
   FileDiff,
+  MessageCommitBundle,
   ForkCommitBundle,
   ForkChildSessionMetadata,
+  GoalAcceptanceLevel,
+  GoalChengRef,
   GoalStatus,
   InputHistoryAttachment,
   InputHistoryEntry,
@@ -82,6 +85,7 @@ import {
   updateSessionTargetSummaryTitle,
   updateSessionTargetStatus,
 } from "../session-target.js";
+import { updateSessionTargetChengRef } from "../session-target-cheng-ref.js";
 import { SqliteSessionMigrationError } from "./errors.js";
 import {
   DEFAULT_SQLITE_STARTUP_LOCK_TIMEOUT_MS,
@@ -191,6 +195,12 @@ function assertForkBundleChildLocal(bundle: ForkCommitBundle): void {
         assertMessage(boundary?.preservedSegment?.headMessageId, "compact preserved head");
         assertMessage(boundary?.preservedSegment?.anchorMessageId, "compact preserved anchor");
         assertMessage(boundary?.preservedSegment?.tailMessageId, "compact preserved tail");
+        // metadata 是宽松字段，非数组时与读取方一样忽略。修复原因：字符串会被逐字符校验，
+        // 数字会抛 TypeError，fork 因一条读取方本来不用的数据失败。
+        const leadingIds = part.metadata?.compactLeadingMessageIds;
+        for (const id of Array.isArray(leadingIds) ? leadingIds : []) {
+          assertMessage(id, "compact leading announcement");
+        }
       }
       if (part.type === "tool" && part.state.status === "completed") {
         for (const attachment of part.state.attachments ?? []) {
@@ -225,7 +235,6 @@ function assertForkBundleChildLocal(bundle: ForkCommitBundle): void {
     }
   }
 }
-
 
 export class SqliteSessionStore
   implements
@@ -376,6 +385,8 @@ export class SqliteSessionStore
   }
 
   async commitForkBundle(bundle: ForkCommitBundle): Promise<SessionInfo> {
+    // DatabaseSync 事务属于整个连接：BEGIN 到提交/回滚之间不能 await，
+    // 否则其他会话的成功写入会被 fork 回滚误删，重启后无法再打开。
     this.throwBeforeWrite();
     const { child, commandFact, initialInput } = bundle;
     if (
@@ -410,14 +421,14 @@ export class SqliteSessionStore
       this.maybeThrowForkCommitFault("afterChild");
       for (const message of bundle.messages) {
         const messageSource = bundle.copySources?.messages[message.info.id];
-        await messageRepository.saveMessage(
+        messageRepository.saveMessage(
           this.db,
           message.info,
           messageSource ? { sessionID: child.parentID, id: messageSource } : undefined,
         );
         for (const part of message.parts) {
           const partSource = bundle.copySources?.parts[part.id];
-          await messageRepository.savePart(
+          messageRepository.savePart(
             this.db,
             part,
             partSource ? { sessionID: child.parentID, id: partSource } : undefined,
@@ -438,7 +449,7 @@ export class SqliteSessionStore
       }
       this.maybeThrowForkCommitFault("afterEntries");
       if (initialInput) {
-        await sessionInputRepository.saveSessionInput(this.db, initialInput);
+        sessionInputRepository.saveSessionInput(this.db, initialInput);
       }
       this.maybeThrowForkCommitFault("afterInput");
       const now = Date.now();
@@ -457,6 +468,36 @@ export class SqliteSessionStore
       this.maybeThrowForkCommitFault("beforeCommit");
       this.db.exec("commit");
       return persistedChild;
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+  }
+
+  async commitMessageBundle(bundle: MessageCommitBundle): Promise<void> {
+    this.throwBeforeWrite();
+    const sessionID = String(bundle.sessionID);
+    for (const message of bundle.messages) {
+      if (
+        String(message.info.sessionID) !== sessionID ||
+        message.parts.some(
+          (part) =>
+            String(part.sessionID) !== sessionID ||
+            String(part.messageID) !== String(message.info.id),
+        )
+      ) {
+        throw new Error("Message bundle record does not belong to the bundle session");
+      }
+    }
+    this.db.exec("begin immediate");
+    try {
+      for (const message of bundle.messages) {
+        messageRepository.saveMessage(this.db, message.info);
+        for (const part of message.parts) {
+          messageRepository.savePart(this.db, part);
+        }
+      }
+      this.db.exec("commit");
     } catch (error) {
       this.db.exec("rollback");
       throw error;
@@ -494,9 +535,9 @@ export class SqliteSessionStore
         return existing;
       }
       const persisted = sessionRepository.createSession(this.db, session);
-      await messageRepository.saveMessage(this.db, contextMessage.info);
+      messageRepository.saveMessage(this.db, contextMessage.info);
       for (const part of contextMessage.parts) {
-        await messageRepository.savePart(this.db, part);
+        messageRepository.savePart(this.db, part);
       }
       sessionEntryRepository.saveSessionEntry(this.db, provenance);
       this.db.exec("commit");
@@ -543,18 +584,18 @@ export class SqliteSessionStore
           ...(input.sourceId ? { sourceId: input.sourceId } : {}),
         },
       });
-      const contextMessage = (
-        await messageRepository.messages(this.db, { sessionID: input.sessionID })
-      ).find((message) => {
-        const metadata = message.info.metadata;
-        return Boolean(
-          metadata &&
-          typeof metadata === "object" &&
-          (metadata as Record<string, unknown>).contextId === input.contextId,
-        );
-      });
+      const contextMessage = messageRepository
+        .messages(this.db, { sessionID: input.sessionID })
+        .find((message) => {
+          const metadata = message.info.metadata;
+          return Boolean(
+            metadata &&
+            typeof metadata === "object" &&
+            (metadata as Record<string, unknown>).contextId === input.contextId,
+          );
+        });
       if (contextMessage) {
-        await messageRepository.saveMessage(this.db, {
+        messageRepository.saveMessage(this.db, {
           ...contextMessage.info,
           metadata: {
             ...(contextMessage.info.metadata ?? {}),
@@ -578,6 +619,19 @@ export class SqliteSessionStore
   async softDeleteSession(sessionID: SessionId, timeDeleted = Date.now()): Promise<void> {
     this.throwBeforeWrite();
     sessionRepository.softDeleteSession(this.db, sessionID, timeDeleted);
+  }
+
+  async listOwnedSessionTrees(sessionIDs: SessionId[]): Promise<Map<SessionId, SessionId[]>> {
+    return sessionRepository.listOwnedSessionTrees(this.db, sessionIDs);
+  }
+
+  async listArtifactReferrers(sessionIDs: SessionId[]): Promise<Map<SessionId, SessionId[]>> {
+    return sessionRepository.listArtifactReferrers(this.db, sessionIDs);
+  }
+
+  async purgeSessions(sessionIDs: SessionId[]): Promise<void> {
+    this.throwBeforeWrite();
+    sessionRepository.purgeSessions(this.db, sessionIDs);
   }
 
   async getSession(sessionID: SessionId): Promise<SessionInfo | null> {
@@ -748,6 +802,7 @@ export class SqliteSessionStore
     objective: string;
     sessionID: SessionId;
     status?: GoalStatus;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
     wallClockBudgetSeconds?: number | null;
@@ -756,6 +811,9 @@ export class SqliteSessionStore
       objective: input.objective,
       sessionID: input.sessionID,
       status: input.status ?? "active",
+      ...(input.acceptanceLevel === undefined
+        ? {}
+        : { acceptanceLevel: input.acceptanceLevel }),
       tokenBudget: input.tokenBudget,
       turnBudget: input.turnBudget,
       wallClockBudgetSeconds: input.wallClockBudgetSeconds,
@@ -778,6 +836,7 @@ export class SqliteSessionStore
   async createTarget(input: {
     objective: string;
     sessionID: SessionId;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
   }): Promise<SessionGoal | null> {
@@ -788,6 +847,9 @@ export class SqliteSessionStore
     sessionID: SessionId;
     status: GoalStatus;
     reason?: string;
+    expectedTargetID?: string;
+    expectedRevision?: number;
+    expectedStatus?: GoalStatus;
   }): Promise<SessionGoal | null> {
     return updateSessionTargetStatus(this.db, input);
   }
@@ -796,9 +858,19 @@ export class SqliteSessionStore
     sessionID: SessionId;
     targetID: string;
     revision: number;
-    objective: string;
+    objective?: string;
+    acceptanceLevel?: GoalAcceptanceLevel;
   }): Promise<SessionGoal | null> {
     return updateSessionTargetObjective(this.db, input);
+  }
+
+  async updateTargetChengRef(input: {
+    sessionID: SessionId;
+    targetID: string;
+    revision: number;
+    chengRef: GoalChengRef | null;
+  }): Promise<SessionGoal | null> {
+    return updateSessionTargetChengRef(this.db, input);
   }
 
   async blockTarget(input: {

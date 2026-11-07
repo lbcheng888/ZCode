@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "@zcode/adapters": "workspace:*",
+    "@zcode/cheng-host": "workspace:*",
     "@zcode/contracts": "workspace:*",
     "@zcode/core": "workspace:*",
     "@zcode/dynamic-workflow": "workspace:*",

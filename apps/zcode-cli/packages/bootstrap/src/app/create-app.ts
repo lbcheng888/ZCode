@@ -1,3 +1,4 @@
+import { createWorkspaceMcpTrust } from "../workspace-mcp-trust/index.js";
 import { subagentProfilesFromSnapshot } from "../runtime-subagents/index.js";
 import { CliDefaultSelection } from "./cli-default-selection.js";
 import { isAbsolute, join, resolve } from "node:path";
@@ -26,19 +27,26 @@ import {
   normalizeAgentProfiles,
   PermissionService,
   buildPluginReferenceCatalog,
+  setBackgroundRunProjection,
   writeWorkflowDraft,
   type AmendWorkflowRunSettingsInput,
   type ResumeSessionResult,
+  type WorkspaceWriteLeaseAdmissionPort,
 } from "@zcode/core";
 import { createModelTelemetry } from "@zcode/telemetry";
 import {
   createRootTraceContext,
+  ModelRequestSessionFeature,
+  modelMessageContentToText,
   traceContextToLogContext,
   type TraceContext,
   createSessionId,
   createSessionEvent,
+  SessionEventType,
   type ExecutionShellSelection,
   type MessageId,
+  type SessionGoal,
+  type GoalContinuationChengPlanCard,
 } from "@zcode/contracts";
 import { isRemoteWorkspaceIdentity, resolveZCodeRuntimeEnv } from "@zcode/shared";
 import {
@@ -63,7 +71,22 @@ import {
   resolveEffectiveLocale,
   resolveEffectiveConfigResult,
 } from "./app-config-options.js";
-import { getCliStorageRoot, getModelIoDir, projectIdFromDirectory } from "./paths.js";
+import { getCliStorageRoot, getModelIoDir, projectIdFromDirectory, resolveDataBaseDir, getSuperAgentDatabasePath } from "./paths.js";
+import { createChengJobNotificationLedger } from "../super-agent/cheng-job-ledger.js";
+import { createChengJobObserver, type ChengJobObserver, type LiveChengJobObserver } from "../super-agent/cheng-job-observer.js";
+import { createGoalChengRefResolvers } from "./goal-cheng-ref.js";
+import { createWatchdogGoalControl } from "./watchdog-goal-control.js";
+import { type ChengGateVerdict } from "./workflow-cheng-world-read.js";
+import { SqliteBackgroundRunStore } from "../super-agent/storage/background-run-store.js";
+import { openSuperAgentDatabase } from "../super-agent/storage/database.js";
+import { BackgroundRunRegistry } from "../super-agent/watchdog/registry.js";
+import {
+  createStallRepairCommands,
+  createSuperAgentWatchdog,
+  createWorkflowOnlyBackgroundRunProjection,
+  type BackgroundRunRow,
+  type SuperAgentWatchdogContract,
+} from "../super-agent/watchdog/index.js";
 import {
   asInputHistoryStore,
   asLocalSettingStore,
@@ -72,13 +95,15 @@ import {
   readSessionModelSelection,
 } from "./session-store.js";
 import { createWorkflowFacade } from "./workflow-facade.js";
+import { resolveChengHostPortForApp } from "./cheng-host-config.js";
+import { createChengReadPort } from "./workflow-cheng-read-port.js";
 import { createInputFacade } from "./input-facade.js";
 import { createPluginFacadeForApp } from "./plugin-facade.js";
 import { resolvePluginRuntimeFeatures } from "./plugin-runtime-features.js";
 import { createSessionFacade } from "./session-facade.js";
 import {
-  createRuntimeAdjudicationSession,
   createSuperAgentControlPlane,
+  createToolAdjudicationSession,
   type SuperAgentControlPlane,
 } from "./super-agent-control-plane.js";
 import {
@@ -86,9 +111,12 @@ import {
   createSpecRunDispatcher,
   createSpecRunSubagentLaunchPort,
   createSuperAgentSpecLane,
+  resolveSpecEgressAllowHosts,
 } from "../super-agent/spec-lane/index.js";
+import type { SuperAgentWriteLeasesContract } from "../super-agent/write-leases/index.js";
 import { resolveAppRuntimeConfig, runtimeConfigLogContext } from "./runtime-config.js";
 import { resolveBundledSkillRoots } from "./bundled-skills.js";
+import { resolveMcpNodeFallbackProvider } from "./mcp-node-fallback.js";
 import { collectDynamicWorkflowDisabledSkillPaths } from "./dynamic-workflow-gate.js";
 import { createWorkspaceHookRuntimeSecurity } from "./workspace-hook-trust.js";
 import { createScriptWorkflowBridge } from "./script-workflow-methods.js";
@@ -107,6 +135,7 @@ import {
   workflowActorInteractionDescription,
   workflowActorPermissionPolicy,
 } from "./workflow-actor-permission.js";
+import { startWorkflowQuotaAutoResume } from "./dynamic-workflow-quota-resume.js";
 import { workflowActorToolPolicy } from "./workflow-actor-tools.js";
 import {
   createNodeReplBrowserBroker,
@@ -124,6 +153,7 @@ import {
   loadZCodeAgentProfiles,
 } from "../subagents.js";
 import { createRuntimeAiSdkModelExecutionConfig } from "../model-config.js";
+import { withOfficialCommandEnv } from "../official-command-endpoint/index.js";
 import { ApiProviderModelRuntime } from "./provider-registry-model-runtime.js";
 import {
   completeAppStartup,
@@ -174,6 +204,94 @@ function decodePromptAttachmentDataUrl(
   return { bytes, mediaType };
 }
 
+export class WorkspaceWriteLeaseRejectedError extends Error {
+  readonly code = "workspace_write_lease_conflict";
+  constructor(
+    readonly toolName: string,
+    readonly activeOwnerRunId: string,
+  ) {
+    super(
+      `workspace write rejected: active spec-lane write lease owned by ${activeOwnerRunId} (tool=${toolName})`,
+    );
+    this.name = "WorkspaceWriteLeaseRejectedError";
+  }
+}
+
+/**
+ * spec lane 写租约的前置 admission：active lease 存在时，只有 ownerRunId 精确匹配的
+ * spec child 可写；手动 session/subagent/workflow 不携带 owner，一律响亮拒绝。
+ * getLeases 为 late-bound：控制面在 runtime 之后构造，createApp 返回前完成绑定。
+ */
+export function createWorkspaceWriteLeaseAdmission(options: {
+  getLeases: () => SuperAgentWriteLeasesContract | undefined;
+  getWorkspaceIdentity: () => string | undefined;
+}): WorkspaceWriteLeaseAdmissionPort {
+  return {
+    assertWriteAllowed(input) {
+      const leases = options.getLeases();
+      if (!leases) {
+        throw new Error("workspace write lease admission is not initialized");
+      }
+      const workspace = options.getWorkspaceIdentity() ?? input.workspaceIdentity ?? input.workspaceRoot;
+      if (!workspace.trim()) {
+        throw new Error("workspace write lease admission: workspace identity is empty");
+      }
+      const active = leases.getActive(workspace);
+      if (active.length === 0) return;
+      if (
+        input.ownerRunId !== undefined &&
+        active.some((lease) => lease.ownerRunId === input.ownerRunId)
+      ) {
+        return;
+      }
+      throw new WorkspaceWriteLeaseRejectedError(input.toolName, active[0]!.ownerRunId);
+    },
+  };
+}
+
+/**
+ * cheng-job 行 hydrate 选择：共享 super-agent 库里可能有别的 session/进程写的 cheng 行，
+ * 但 cheng cancel 命令面只对拥有该 job 的会话 app 有效；别 session 的行捞进本进程只会
+ * 变成永远失败的 repair。automation/workflow 行语义不变（各自由现有命令面/跨进程投影）。
+ */
+export function isChengRowOwnedBySession(
+  row: Pick<BackgroundRunRow, "kind" | "ownerSession">,
+  sessionId: string,
+): boolean {
+  return row.kind === "cheng-job" && row.ownerSession === sessionId;
+}
+
+/** workflow 行同理：本进程只有自己 run service 里的 run 才能 cancel。 */
+export function isWorkflowRowOwnedBySession(
+  row: Pick<BackgroundRunRow, "kind" | "ownerSession">,
+  sessionId: string,
+): boolean {
+  return row.kind === "workflow" && row.ownerSession === sessionId;
+}
+
+/**
+ * S4 目标完成门的 Cheng 事实解析：
+ * - 目标没有 chengRef = 没有 Cheng 证据，返回 undefined 交给 LLM verifier；
+ * - 目标有 chengRef 但本进程没有 cheng host 解析器 = 无法验证的 Cheng 事实，fail-closed
+ *   返回 BLOCKED，不能把「本进程解析器缺席」伪装成「没有 gate」让 verifier fail-open。
+ */
+export function resolveTargetCompletionChengGate(
+  target: SessionGoal,
+  resolveGoalChengGate:
+    | ((target: SessionGoal) => Promise<ChengGateVerdict | undefined>)
+    | undefined,
+): Promise<ChengGateVerdict | undefined> {
+  if (target.chengRef === undefined) return Promise.resolve(undefined);
+  if (resolveGoalChengGate === undefined) {
+    return Promise.resolve({
+      ok: false,
+      level: "BLOCKED",
+      reasons: ["cheng_host_unavailable"],
+    });
+  }
+  return resolveGoalChengGate(target);
+}
+
 export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp> {
   if (!options?.providerRegistry) {
     throw new Error("createZCodeApp requires a Provider Registry");
@@ -215,6 +333,20 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       "features.specEgressFence=true 依赖 features.eventRouter=true（围栏只在 spec run 内生效，P6 §3.6）",
     );
   }
+  // S1 写租约同样只挂在 spec run dispatcher 上；单独开启不生效，启动期拒绝。
+  if (
+    configResult.config.features.specWriteLease === true &&
+    configResult.config.features.eventRouter !== true
+  ) {
+    throw new Error(
+      "features.specWriteLease=true 依赖 features.eventRouter=true（租约只在 spec run 内生效，S1）",
+    );
+  }
+  // S1 egress 白名单：repo 配置在启动期完成形状校验（与 eventRouter 是否开启无关），
+  // 损坏即拒绝启动；运行期 dispatcher 拿到的是同一份已校验字面量。
+  const specEgressAllowHosts = resolveSpecEgressAllowHosts(
+    configResult.config.specEgress.allowHosts,
+  );
   const loggerFactory = options.loggerFactory ?? createNodeLoggerFactory({ env: options.env });
   const logger = loggerFactory.createLogger("zcode").child({
     ...traceContextToLogContext(traceContext),
@@ -252,6 +384,8 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   // super-agent 控制面（Phase 2 里程碑 A）：只在 features.eventRouter=true 时构造；
   // 声明提到 try 前，启动中途失败时外层 catch 能对称 stop 关库不泄漏。
   let superAgentControlPlane: SuperAgentControlPlane | undefined;
+  let backgroundRunDb: Awaited<ReturnType<typeof openSuperAgentDatabase>> | undefined;
+  let chengWatchdog: SuperAgentWatchdogContract | undefined;
   let superAgentAbort: AbortController | undefined;
   // M4：事件回合 mandate 结论的 admission 交接面（按 wire commandId 登记/取出）。
   // 必须是进程级共享表：leader app 登记、目标 session app 的 input-facade 读取（协议
@@ -454,7 +588,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       startupTimer,
       storageRoot,
     });
-    const mcpPort =
+    const rawMcpPort =
       options.mcpPort ??
       (runtimeConfig.mcp?.enabled === false
         ? undefined
@@ -468,10 +602,33 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
               noProxy: configResult.config.network.noProxy,
               caCertFile: configResult.config.network.caCertFile,
             },
+            nodeFallback: resolveMcpNodeFallbackProvider({ cliStorageRoot, logger }),
             workingDirectory,
           })));
+    const mcpPort = rawMcpPort
+      ? createWorkspaceMcpTrust({
+          workingDirectory,
+          workspaceIdentity: options.runtimeConfig?.memory?.workspaceIdentity,
+          userConfigPath: options.userConfigPath,
+          projectConfigPath: options.projectConfigPath,
+          skipUserConfig: options.skipUserConfig,
+          env: options.env,
+          onAdmissionChanged: async (payload) => {
+            if (!runtime) return;
+            await runtime.appendEvent(
+              createSessionEvent(
+                SessionEventType.WorkspaceMcpAdmissionUpdated,
+                sessionId,
+                payload,
+                { traceId: traceContext.traceId },
+              ),
+              traceContext,
+            );
+          },
+        }).guard(rawMcpPort)
+      : undefined;
     const ownsMcpPort = options.mcpPort === undefined && mcpPort !== undefined;
-    const executionPort =
+    const baseExecutionPort =
       options.executionPort ??
       createNodeExecutionAdapter({
         onToolExecResource: options.onToolExecResource,
@@ -484,6 +641,20 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         bashOutputTempDir: tmpdir(),
         processEnv: options.env ?? process.env,
       });
+    // 本 app 只服务一个 session：它的子进程统一带上这个 session 的官方命令端点 env。
+    const officialCommandEnv = options.officialCommandEnv;
+    const officialCommandIdentity = options.runtimeConfig?.memory?.workspaceIdentity;
+    const officialCommandWorkspace = {
+      workspacePath: workingDirectory,
+      ...(officialCommandIdentity ? { workspaceIdentity: officialCommandIdentity } : {}),
+    };
+    const executionPort = officialCommandEnv
+      ? withOfficialCommandEnv(
+          baseExecutionPort,
+          () => officialCommandEnv(sessionId, officialCommandWorkspace),
+          logger,
+        )
+      : baseExecutionPort;
     const ownsExecutionPort = options.executionPort === undefined;
     const pdfDocumentPort =
       options.pdfDocumentPort ?? createPopplerPdfDocumentAdapter({ executionPort });
@@ -589,6 +760,16 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           traceContext: resumeTraceContext,
         });
         await runtime.activatePausedTargetAfterResume(resumeTraceContext);
+        // SessionResumed 已清理旧投影；即使声明未变也要重新发布当前准入。
+        try {
+          await mcpPort?.refreshWorkspaceTrustAdmission?.(true);
+        } catch (error) {
+          logger.warn("MCP trust admission publication failed after resume", {
+            event: "mcp.trust.admission.failed",
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         resumePrepared = true;
         return { ...result, modelSelection };
       } finally {
@@ -652,6 +833,23 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     // runtime 与 expert workflow facade 都**共享**父会话这一份 factory——Registry 视图更新后
     // 新建的 Model 才看得到，child 不各自冻结一份。
     const modelFactory = providerModelRuntime.modelFactory;
+    // S1 写租约：runtime 与三条 workflow child 装配线都先于此；租约仓储在控制面构造后
+    // late-bound 绑定，createApp 返回前完成。
+    const specWriteLeaseEnabled = configResult.config.features.specWriteLease === true;
+    let specWriteLeases: SuperAgentWriteLeasesContract | undefined;
+    let workspaceWriteLeaseKey: string | undefined;
+    let resolveGoalChengGate:
+      | ((target: SessionGoal) => Promise<ChengGateVerdict | undefined>)
+      | undefined;
+    let resolveGoalChengPlan:
+      | ((target: SessionGoal) => Promise<GoalContinuationChengPlanCard | undefined>)
+      | undefined;
+    const workspaceWriteLeaseAdmission = specWriteLeaseEnabled
+      ? createWorkspaceWriteLeaseAdmission({
+          getLeases: () => specWriteLeases,
+          getWorkspaceIdentity: () => workspaceWriteLeaseKey,
+        })
+      : undefined;
     const scriptWorkflowFacade = createScriptWorkflowBridge({
       agentTelemetry: modelTelemetry.agentExecution,
       appOptions: options,
@@ -668,6 +866,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       permissionService,
       pluginSkillRoots: pluginOutcome.skillRoots,
       prepareUserExecutionBoundary,
+      workspaceWriteLeaseAdmission,
       getRuntime,
       runtimeConfig,
       sessionId,
@@ -677,11 +876,126 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       workingDirectory,
     });
 
+    // Cheng 数据面：`ZCODE_CHENG_ROOT` + host entry 同时在场才接线。任一条缺失即不构造端口，
+    // `cheng.*` 节点以 ChengHostUnavailable 大声失败，而不是静默跳过。host 入口优先取宿主
+    // 显式配置，其次 `ZCODE_CHENG_HOST_ENTRY`；数据根与 super-agent 库同源。
+    // S0 观察者先以代理注入端口：registry/DB 只在 assembly 确认 wired 后构造，避免未接线也开库。
+    let liveChengObserver: LiveChengJobObserver | undefined;
+    const chengJobObserver: ChengJobObserver = {
+      started: (input) => {
+        if (liveChengObserver === undefined) {
+          throw new Error("Cheng S0 observer is not initialized");
+        }
+        liveChengObserver.started(input);
+      },
+      progress: (input) => liveChengObserver?.progress(input),
+      terminal: async (input) => {
+        if (liveChengObserver === undefined) {
+          throw new Error("Cheng S0 observer is not initialized");
+        }
+        await liveChengObserver.terminal(input);
+      },
+    };
+    const chengHostAssembly = resolveChengHostPortForApp({
+      dataBaseDir: resolveDataBaseDir(options.env),
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.chengHostEntry === undefined ? {} : { hostEntry: options.chengHostEntry }),
+      observer: chengJobObserver,
+    });
+    if (chengHostAssembly.kind === "skipped") {
+      logger.debug("Cheng host port not wired", {
+        reason: chengHostAssembly.reason,
+        event: "cheng_host.port.skipped",
+      });
+    }
+    // S0/S3 live：super-agent 持久 registry 承载 cheng-job 与 workflow 行。
+    // - cheng host wired 时构造，供 S0 observer 写 job 行；
+    // - eventRouter 开启时也构造，供 core 的 background-run projection 登记 workflow 行。
+    // 两个条件都不成立 = 无 registry/watchdog（不伪造空投影）。
+    const eventRouterEnabled = configResult.config.features.eventRouter === true;
+    // 必须在 hydrate/workflow watchdog 装配前确定 journal 是否可用：没有 run service
+    // 的 cancel 命令面时，不能把 workflow 行捞进本进程再反复 repair 失败。
+    const dynamicWorkflowJournal = resolveDynamicWorkflowJournalStore(sessionStore, logger);
+    const workflowRepairAvailable = eventRouterEnabled && dynamicWorkflowJournal !== undefined;
+    let backgroundRunRegistry: BackgroundRunRegistry | undefined;
+    if (chengHostAssembly.kind === "wired" || eventRouterEnabled) {
+      backgroundRunDb = await openSuperAgentDatabase({
+        databasePath: getSuperAgentDatabasePath(resolveDataBaseDir(options.env)),
+      });
+      const backgroundRunStore = new SqliteBackgroundRunStore(backgroundRunDb);
+      backgroundRunRegistry = new BackgroundRunRegistry(500, backgroundRunStore);
+      // 只恢复本 app 真正有命令面的 kind：无 cheng host 不捞旧 cheng 行；eventRouter
+      // 未开不捞 workflow 行，避免用别的进程的行触发本进程 repair。cheng 行还要求
+      // ownerSession 与本会话一致：共享库跨进程可见，别 session 的 job 本进程无法 cancel。
+      const hydratedRows = backgroundRunStore.loadAll().filter(
+        (row) =>
+          (chengHostAssembly.kind === "wired" && isChengRowOwnedBySession(row, sessionId)) ||
+          (workflowRepairAvailable && isWorkflowRowOwnedBySession(row, sessionId)) ||
+          // automation 行由宿主 automation run projection 写入共享库（跨进程）；本进程
+          // 只在有 automation 命令面时恢复，避免无暂停能力的行触发 repair。
+          (options.automationPort !== undefined && row.kind === "automation"),
+      );
+      backgroundRunRegistry.hydrate(hydratedRows);
+      if (eventRouterEnabled) {
+        // 本切片只扩 workflow 行；background_task 仍走既有 runtime 面，不在此投影。
+        // ownerSession/workspaceKey 供 daemon 经 Core 投 cancelBackgroundWork 定位。
+        setBackgroundRunProjection(
+          createWorkflowOnlyBackgroundRunProjection(backgroundRunRegistry, undefined, {
+            ownerSession: sessionId,
+            workspaceKey:
+              options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory,
+          }),
+        );
+      }
+    }
+    if (chengHostAssembly.kind === "wired") {
+      const chengRegistry = backgroundRunRegistry;
+      if (chengRegistry === undefined) {
+        throw new Error("Cheng host wired but super-agent registry was not constructed");
+      }
+      const chengLedger = createChengJobNotificationLedger({
+        sessionStore,
+        sessionID: sessionId,
+        enqueue: async (notification) => {
+          getRuntime().enqueueBackgroundTaskNotification({
+            commandId: notification.commandId,
+            claimPersisted: true,
+            originMeta: notification.originMeta,
+            taskId: notification.taskId,
+            text: notification.text,
+            traceContext,
+          });
+        },
+      });
+      liveChengObserver = createChengJobObserver({
+        registry: chengRegistry,
+        ledger: chengLedger,
+        ownerSession: sessionId,
+        workspaceKey: workingDirectory,
+        // 产出后 delivery gate：同一 host 的最新 verify 结果；红 gate 通知在此静默丢弃。
+        resolveGate: async ({ jobId }) => (await chengHostAssembly.port.verify(jobId)).gate,
+      });
+      // S4：完成门/路线卡只读目标行上的显式 Cheng 引用（GoalChengBind 经 host inspect 写入）。
+      // 没有引用 = 没有 Cheng 证据；不再按“目标创建后最近 completed job”做时间推断。
+      const goalChengResolvers = createGoalChengRefResolvers({
+        ownerSession: sessionId,
+        registry: chengRegistry,
+        verify: async (jobId) => await chengHostAssembly.port.verify(jobId),
+        plan: async (jobId, task) => await chengHostAssembly.port.plan(jobId, task),
+      });
+      resolveGoalChengGate = (target) => goalChengResolvers.gate(target);
+      resolveGoalChengPlan = (target) => goalChengResolvers.planCard(target);
+    }
+    // 模型只读工具端口：同一 host，但只暴露 inspect/verify/graph（不转发 generate）。
+    const chengReadPort =
+      chengHostAssembly.kind === "wired"
+        ? createChengReadPort(chengHostAssembly.port)
+        : undefined;
+
     // workflow run service：CreateWorkflow 的确认窗 Allow 之后真启动引擎的那一侧。
-    // journal 窄化失败（store 不带 dwf_* 表）时**不构造**服务——端口保持 undefined，
+    // journal 已在 hydrate 前解析；窄化失败（store 不带 dwf_* 表）时不构造服务，
     // CreateWorkflow 因此回到占位诊断路径。这是一个记了日志的可见降级，而不是一条
     // 会静默丢掉持久化的运行路径（详见 dynamic-workflow-run-service.ts 的文件头）。
-    const dynamicWorkflowJournal = resolveDynamicWorkflowJournalStore(sessionStore, logger);
     const dynamicWorkflowRunPort =
       dynamicWorkflowJournal === undefined
         ? undefined
@@ -738,6 +1052,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
                   artifactStore,
                   configResult,
                   fileSystemPort,
+                  workspaceWriteLeaseAdmission,
                   httpClientPort,
                   imageProcessorPort,
                   logger,
@@ -788,6 +1103,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             artifactStore,
             executionPort,
             fileSystemPort,
+            ...(chengHostAssembly.kind === "wired"
+              ? { chengHostPort: chengHostAssembly.port }
+              : {}),
             journal: dynamicWorkflowJournal,
             logger,
             // 进度投影的接缝：一条引擎事件 → 一条父会话的会话事件 → v4 的 workflowRuns 状态键。
@@ -832,6 +1150,68 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
               : {}),
           });
     // dwf snippet service：EvalWorkflowSnippet 的执行面。刻意**不**依赖 dwf journal——
+    // S3：生产 watchdog 与 registry 同源。workflow 行经 core projection 登记后，探针命中
+    // 只调用 run service 的 abort 端口；终态仍由 owner 写回，命令面不改 registry 状态。
+    if (backgroundRunRegistry !== undefined) {
+      // 升级信道：goalState readAsync 从 sessionStore 实时读目标；pause-goal 走
+      // updateTargetStatus 暂停当前 target，并中止在途前台执行（终态由 target 状态机）。
+      const goalControl = createWatchdogGoalControl({
+        readTarget: () => sessionStore.readTarget({ sessionID: sessionId }),
+        pauseTarget: ({ status, reason }) =>
+          sessionStore.updateTargetStatus({ reason, sessionID: sessionId, status }),
+        stopActiveForegroundExecution: () =>
+          getRuntime().stopActiveForegroundExecution({
+            reason: "watchdog-escalation",
+          }),
+        recordTargetChanged: async ({ previousTarget, target }) => {
+          await getRuntime().recordTargetChanged({
+            action: "status_updated",
+            previousTarget,
+            reason: "watchdog-escalation",
+            source: "runtime",
+            target,
+            traceContext,
+          });
+        },
+      });
+      chengWatchdog = createSuperAgentWatchdog({
+        registry: backgroundRunRegistry,
+        goalState: goalControl.goalState,
+        ...(options.automationPort === undefined
+          ? {}
+          : {
+              refreshRuns: () =>
+                backgroundRunRegistry.refreshFromPersistence(
+                  (row) => row.kind === "automation",
+                ),
+            }),
+        commands: createStallRepairCommands({
+          registry: backgroundRunRegistry,
+          ...(options.automationPort === undefined
+            ? {}
+            : { automation: options.automationPort }),
+          ...(chengHostAssembly.kind === "wired"
+            ? { chengHost: chengHostAssembly.port }
+            : {}),
+          ...(eventRouterEnabled && dynamicWorkflowRunPort !== undefined
+            ? {
+                workflowRun: {
+                  cancel: (runId: string) => dynamicWorkflowRunPort.cancel(runId),
+                },
+              }
+            : {}),
+          // notify-user：走 runtime 唯一 task-notification 队列；返回值确认是否真正入队。
+          notify: (message: string) =>
+            getRuntime().enqueueBackgroundTaskNotification({
+              text: message,
+              toolName: "SuperAgentWatchdog",
+              traceContext,
+            }),
+          pauseGoal: (goalId) => goalControl.pauseGoal(goalId),
+        }),
+      });
+      chengWatchdog.start();
+    }
     // snippet 完全瞬态（内存 journal），不该被 run service 的 durability 前提连坐；
     // 所以即使 run 端口因 journal 缺席而不构造，实验通道仍然可用。
     const dynamicWorkflowSnippetPort = createDynamicWorkflowSnippetService({
@@ -844,6 +1224,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       registry: options.providerRegistry,
       currentSelection: () => getRuntime().getSessionModelSelection(),
     });
+    // S1 写租约：runtime 先于控制面构造，两个值在 createApp 返回前完成绑定。
     runtime = new AgentRuntime(sessionId, runtimeConfig, {
       ...(options.readSubagentRuntimeConfig
         ? {
@@ -883,6 +1264,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       agentTelemetry: modelTelemetry.agentExecution,
       // 主代理的模型请求过治理器的 observer：立即放行，但让治理器看见它的 429 / 成功。
       modelRequestAdmission: workflowConcurrencyGovernor.observer(),
+      // 主代理的 subagent 不是 observer：和 workflow run 一样排队、看冷却，同一父会话共用一条队列。
+      subagentModelRequestAdmission: (parentSessionId) =>
+        workflowConcurrencyGovernor.sessionSubagents(parentSessionId),
       eventStore: options.eventStore ?? createInMemorySessionEventStore(),
       sessionStore,
       sessionMailboxPort,
@@ -890,6 +1274,14 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       executionPort,
       workspaceHookAdmission: workspaceHookRuntimeSecurity?.admission,
       workspaceHookSnapshot: workspaceHookRuntimeSecurity?.snapshot,
+      ...(workspaceWriteLeaseAdmission === undefined ? {} : { workspaceWriteLeaseAdmission }),
+      // S4 完成门：目标生命周期内最近一个 completed cheng-job 的真实 gate；无 chengRef
+      // = undefined（无 Cheng 事实）；有 chengRef 但本进程无 host 解析器 = BLOCKED。
+      targetCompletionChengGate: async (target) =>
+        resolveTargetCompletionChengGate(target, resolveGoalChengGate),
+      // S4 路线卡：同一目标生命周期内最近 completed job 的 compact ChengPlan；无 job/task = undefined。
+      goalContinuationChengPlan: async (target) =>
+        resolveGoalChengPlan === undefined ? undefined : await resolveGoalChengPlan(target),
       browserControlPort,
       fileSystemPort,
       httpClientPort,
@@ -931,6 +1323,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       workflowPort: scriptWorkflowFacade.workflowPort,
       dynamicWorkflowRunPort,
       dynamicWorkflowSnippetPort,
+      ...(chengReadPort === undefined ? {} : { chengReadPort }),
       modelCatalogPort,
       automationPort: options.automationPort,
       offPeakPort: options.offPeakPort,
@@ -969,19 +1362,21 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
               source: "command",
               traceContext: resolverOptions?.traceContext ?? traceContext,
             });
+            // 同一展开点打会话能力标签（docs/design/v2/model/session-features-header.md）；
+            // 灰度关闭时命令不展开、不进入本分支，所以不打。
+            runtime?.recordSessionFeature({
+              feature: ModelRequestSessionFeature.WorkflowCmd,
+              traceContext: resolverOptions?.traceContext ?? traceContext,
+            });
           }
           return builtin.prompt;
         }
         return await resolveZCodeCustomCommandPrompt(text, {
           additionalDirectories: options.additionalDirectories,
           env: options.env,
-          executionPort,
           logger,
           projectConfigPath: options.projectConfigPath,
-          sessionId,
-          signal: resolverOptions?.abortSignal,
           skipUserConfig: options.skipUserConfig,
-          traceContext: resolverOptions?.traceContext ?? traceContext,
           userConfigPath: options.userConfigPath,
           workingDirectory,
         });
@@ -1031,15 +1426,58 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       sessionStore,
       storageRoot,
       traceContext,
+      workspaceWriteLeaseAdmission,
       workingDirectory,
     });
+    // 额度停止的 run 到点自动续跑（dynamic-workflow-quota-resume.ts）。续跑与 UI 的「恢复」同一条路
+    // （port.resume → 重臂追踪：终态通知、后台任务条目、常驻护栏），外加统一执行边界：冷启动补做时
+    // 会话可能还没从存储恢复。
+    const quotaAutoResume =
+      dynamicWorkflowRunPort === undefined ||
+      dynamicWorkflowJournal === undefined ||
+      typeof dynamicWorkflowRunPort.resume !== "function"
+        ? undefined
+        : startWorkflowQuotaAutoResume({
+            journal: dynamicWorkflowJournal,
+            logger,
+            parentSessionId: sessionId,
+            resume: async (runId) => {
+              await prepareUserExecutionBoundary({ traceContext });
+              const result = await dynamicWorkflowRunPort.resume!(runId);
+              if (result.ok) {
+                await getRuntime().trackResumedDynamicWorkflowRun({
+                  runId: result.runId,
+                  ...(result.toolCallId === undefined ? {} : { toolCallId: result.toolCallId }),
+                  traceContext,
+                });
+              }
+              return result;
+            },
+            subscribeRunSettled: (listener) => dynamicWorkflowRunPort.subscribeRunSettled(listener),
+          });
     const sessionFacade = createSessionFacade({
+      closeScriptWorkflowRuns: () => scriptWorkflowFacade.closeScriptWorkflowRuns(),
       cliDefaultSelection,
+      // S4 用户直改：bindGoalChengRef 的真实 host inspect 复核端口（与模型只读工具同一端口）。
+      ...(chengReadPort === undefined ? {} : { chengReadPort }),
       // App 关闭时停下本会话拥有的 dwf run：
       // 引擎活在本 App 的闭包里，关掉 App 而不停它，journal 行会停在 running 等下一次孤儿收敛。
       ...(dynamicWorkflowRunPort === undefined
         ? {}
-        : { closeDynamicWorkflowRuns: () => dynamicWorkflowRunPort.close() }),
+        : {
+            closeDynamicWorkflowRuns: async () => {
+              // 先停自动续跑：关闭中的 service 拒绝 resume，到点的定时器不该再去撞它。
+              quotaAutoResume?.dispose();
+              await dynamicWorkflowRunPort.close();
+              await chengWatchdog?.stop();
+              setBackgroundRunProjection(undefined);
+              if (chengHostAssembly.kind === "wired") {
+                await chengHostAssembly.port.close?.();
+              }
+              backgroundRunDb?.close();
+              backgroundRunDb = undefined;
+            },
+          }),
       configResult,
       configuredMcpServers,
       ...(options.configuredDefaultModelSelection
@@ -1113,12 +1551,17 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       // leader 租约/回填/续期作用域：与协议 workspace 身份键同源（trim 缺省回退工作目录）。
       const superAgentWorkspaceIdentity =
         options.runtimeConfig?.memory?.workspaceIdentity?.trim() || workingDirectory;
+      // 写租约键与控制面 workspace 身份同源；手动 session/subagent 的 tool context 即使
+      // 没有 workspaceIdentity，也落到同一 lease 行。
+      workspaceWriteLeaseKey = superAgentWorkspaceIdentity;
       // M5 spec run 生产装配（spec-lane §6-1 / §6-3）：egress 代理 → buildSpecRunEnv →
-      // restricted profile → 既有 subagent 端口。resolveAllowHosts 未接：repo config
-      // schema（specEgress.allowHosts）归 config lane，当前缺省 = 零 egress。
+      // restricted profile → 既有 subagent 端口。egress 白名单来自 repo config
+      // `specEgress.allowHosts`（启动期已校验），缺省 [] = 零 egress。
       // P6（§3.6）：features.specEgressFence=true 时注入硬围栏；探测/建立失败由
       // fence.prepare 抛 typed FenceStartupError，spec run 拒绝启动（不回退 env 代理）。
       const specEgressFence = configResult.config.features.specEgressFence === true;
+      // S1 写租约：控制面在后面才构造，用 late-bound 端口把同一仓储给 dispatcher；
+      // createApp 返回前完成绑定，spec run 不可能在此之前启动。
       const specRunDispatcher = createSpecRunDispatcher({
         egress: createSuperAgentSpecLane(),
         buildProcessEnv: (plan) =>
@@ -1126,6 +1569,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             proxyUrl: plan.proxyUrl,
             sourceEnv: options.env ?? process.env,
           }),
+        resolveAllowHosts: () => specEgressAllowHosts,
         resolveWorkspaceRoot: (input) => {
           // 组合根只承载本 workspace：身份不一致的事件不得在本目录静默执行。
           if (input.workspaceIdentity !== superAgentWorkspaceIdentity) {
@@ -1150,10 +1594,40 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           signal: superAgentAbort.signal,
         }),
         ...(specEgressFence ? { fence: (options.specFenceFactory ?? createSpecFence)() } : {}),
+        ...(specWriteLeaseEnabled
+          ? {
+              writeLease: {
+                acquire: (input: {
+                  workspaceIdentity: string;
+                  ownerRunId: string;
+                  scope: string;
+                  leaseExpiresAt: number;
+                  now: number;
+                }) => {
+                  if (!specWriteLeases) {
+                    throw new Error("spec write lease repository is not initialized");
+                  }
+                  return specWriteLeases.acquire(input);
+                },
+                release: (id: string, now?: number) => {
+                  if (!specWriteLeases) {
+                    throw new Error("spec write lease repository is not initialized");
+                  }
+                  return specWriteLeases.release(id, now);
+                },
+              },
+            }
+          : {}),
       });
       superAgentControlPlane = await createSuperAgentControlPlane({
         workspaceIdentity: superAgentWorkspaceIdentity,
         specRun: specRunDispatcher,
+        ...(chengHostAssembly.kind === "wired"
+          ? {
+              resolveSpecRunGate: async (jobId: string) =>
+                (await chengHostAssembly.port.verify(jobId)).gate,
+            }
+          : {}),
         onError: (error, context) => {
           logger.warn("super-agent control plane error", {
             error: error instanceof Error ? error : new Error(String(error)),
@@ -1170,15 +1644,75 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         // M4/M6：flag 关（缺省）保持 P2 字节兼容——mandate 恒隐式 record_only、
         // 方案门不启用；flag 开才接三档解析与五字段出口门。
         mandateGate,
-        adjudicationSession: createRuntimeAdjudicationSession({
-          generateWorkspaceText: (input, sessionOptions) =>
-            getRuntime().generateWorkspaceText(input, sessionOptions),
-          resolveSelection: () =>
-            getRuntime().getSessionModelSelection() ??
-            options.configuredDefaultModelSelection,
+        adjudicationSession: createToolAdjudicationSession({
+          createRuntime: (request) => {
+            const selection =
+              getRuntime().getSessionModelSelection() ?? options.configuredDefaultModelSelection;
+            if (!selection) {
+              throw new Error("裁决会话缺模型选择（会话 Selection 与默认 Selection 均未绑定）");
+            }
+            const runtime = new AgentRuntime(
+              createSessionId("super-agent-adjudication"),
+              {
+                workingDirectory,
+                modelSelection: selection,
+                toolAllowlist: request.toolAllowlist,
+                toolDisallowlist: request.toolDisallowlist,
+                maxTurns: 4,
+              },
+              {
+                eventStore: createInMemorySessionEventStore(),
+                modelFactory,
+                ...(chengReadPort === undefined ? {} : { chengReadPort }),
+              },
+            );
+            const toolContracts = runtime
+              .getToolRegistry()
+              .toContracts()
+              .filter(
+                (contract) =>
+                  request.toolAllowlist.includes(contract.name) &&
+                  !request.toolDisallowlist.includes(contract.name),
+              );
+            return {
+              toolContracts,
+              async generateText({ messages, tools, maxOutputTokens, abortSignal }) {
+                return await runtime.generateWorkspaceText(
+                  {
+                    selection,
+                    messages,
+                    tools: [...tools],
+                    querySource: "super_agent_adjudication",
+                    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+                  },
+                  { abortSignal },
+                );
+              },
+              async executeToolCall(call, abortSignal) {
+                const toolCall = { id: call.id, name: call.name, input: call.input };
+                const schedule = await runtime.scheduleTools([toolCall]);
+                const executed = await runtime.executeTools([toolCall], schedule, {
+                  signal: abortSignal,
+                });
+                const result = executed.results[0];
+                const content = result?.modelContent
+                  ? modelMessageContentToText(result.modelContent)
+                  : (result?.serialization?.content ?? JSON.stringify(result?.output ?? null));
+                return { content, isError: result?.success !== true };
+              },
+              async close() {
+                await runtime.close();
+              },
+            };
+          },
           abortSignal: superAgentAbort.signal,
         }),
       });
+      if (specWriteLeaseEnabled) {
+        // 同一仓储实例：控制面启动 sweep、spec run admission、workspace 写工具 admission
+        // 看到同一份 active 行。
+        specWriteLeases = superAgentControlPlane.contracts.writeLeases;
+      }
       await superAgentControlPlane.start();
     }
 
@@ -1297,6 +1831,8 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       // session 的 coordinator 并重发 admission 状态（详见 types.ts 注释）。
       reloadWorkspaceHookTrust: () =>
         workspaceHookRuntimeSecurity?.reloadTrust() ?? Promise.resolve(),
+      reloadWorkspaceMcpTrust: () =>
+        mcpPort?.refreshWorkspaceTrustAdmission?.() ?? Promise.resolve(),
       setModelIoFullRetentionEnabled: (enabled) =>
         modelAdapter.setModelIoFullRetentionEnabled(enabled),
       readToolResultArtifact: (uri) =>
@@ -1417,6 +1953,10 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           // 需驱动器暴露 drain（quiesce 后再关库），归 adjudication 模块批。
           superAgentAbort?.abort();
           superAgentControlPlane?.stop();
+          await chengWatchdog?.stop();
+          setBackgroundRunProjection(undefined);
+          backgroundRunDb?.close();
+          backgroundRunDb = undefined;
         } finally {
           try {
             await closeSession?.();
@@ -1424,7 +1964,15 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
             try {
               providerModelRuntime?.dispose();
             } finally {
-              await modelTelemetry.shutdown();
+              try {
+                await modelTelemetry.shutdown();
+              } catch (error) {
+                // 遥测失败不表示 session 仍占用运行资源，也不能覆盖真正的关闭错误。
+                logger.warn("Session telemetry shutdown failed", {
+                  event: "session.telemetry_shutdown.failed",
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
             }
           }
         }
@@ -1605,6 +2153,14 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       } catch {
         // 见上：原始 error 才是失败原因。
       }
+    }
+    try {
+      await chengWatchdog?.stop();
+      setBackgroundRunProjection(undefined);
+      backgroundRunDb?.close();
+      backgroundRunDb = undefined;
+    } catch {
+      // 启动失败收口：watchdog 停止失败不覆盖原始 error。
     }
     providerModelRuntime?.dispose();
     void modelTelemetry.shutdown().catch(() => undefined);

@@ -287,6 +287,7 @@ Framing：每行一个 JSON；单帧上限 256 KiB；超限断开并计错。RPC
 | 方法 | params | result | 超时 | 说明 |
 | --- | --- | --- | --- | --- |
 | `host.command` | `{ workspaceIdentity, commandId, triggerId?, taint?, lane: "guide"\|"followup", sessionId?, envelope }` | `CommandAck` | 30s | Core 经 agent v4 gateway `commands/query`（`handleCommand`）投递；admission 回执即 ACK。`lane=inject` 不在 wire 枚举内，收到即返回 typed error `proto.deliveryLaneUnsupported`（不投递、不改 queue、§3.4） |
+| `host.watchdogCommand` | `{ action:"cancel-workflow", workspaceIdentity, runId, sessionId }` \| `{ action:"pause-automation", workspaceIdentity, automationId }` \| `{ action:"notify-user", workspaceIdentity, sessionId, message, commandId }` | `{ ok:boolean, error?:string }` | 30s | daemon watchdog 的窄修复面：cancel-workflow 合成 V4 `cancelBackgroundWork{workId=runId}` 投 owner session；pause-automation 调 `automationService.pause`；notify-user 合成 V4 `notifyUser{text}`（`commandId` 为 daemon 侧幂等键，透传为 envelope commandId）投 owner session，CLI 直驱 runtime task-notification 队列，runtime 拒绝时 ACK 带 `fault.command.notificationRejected`。业务拒绝/未生效原样返回 `ok=false`，不伪造成功 |
 | `host.worker.find` | `{ workspaceIdentity, threadKey }` | `ResumableWorker \| null` | 10s | 订阅/worker 投影查询 |
 | `host.worker.resume` | `{ workspaceIdentity, sessionId, triggerId }` | `{ sessionId }` | 60s | 经 Core `resumeSession`/admission；幂等键 `triggerId` |
 | `host.worker.createTask` | `{ workspaceIdentity, threadKey, triggerId, payload, context? }` | `{ sessionId }` | 60s | 经 Core `createSession`/admission；同一 trigger 只建一次 |
@@ -628,7 +629,7 @@ B 期目标（待实现）：
 | 4 | 入站渡期双宿主 | Desktop 可能先持有 provider 锁；Core 的 receive 要等其释放 | 启动顺序 + flag-on bot 让位 + 锁兜底；过渡窗口状态可见 |
 | 5 | scheduler 所有权 | Main fork 与 daemon scheduler 重叠；per-workspace 租约门是过渡 | 部署级让位 + eager workspace ensure + 租约门；B3 原子切换 |
 | 6 | 审计写者 | 现有 scheduler 直接写 super-agent 库；B 后必须改 RPC | 已在 §4.4 规定；失败 release claim，不无审计直派 |
-| 7 | child 内裁决模型运行时装配 | child 不 import services；需要一个 model-only 生成面 | 复用 bootstrap 短命会话面（tools=[]）；具体构造入口在 headless entry 落地时定案 |
+| 7 | child 内裁决模型运行时装配 | child 不 import services；需要裁决生成面，并在 Cheng host 可用时让 plan 引用命中真实回执 | 复用 bootstrap 短命会话面；`ZCODE_CHENG_ROOT`/host entry 在场时接只读 Cheng host + tool-loop，缺席保持 `tools=[]` model-only（能力缺席，plan 引用 fail-closed） |
 | 8 | flag 来源与热切换 | 此前 Server CLI 不读 CLI RuntimeConfig，门禁与 `features.eventRouter` 可能漂移；同一 flag 被多个消费者各读一份 | 已收敛为 §2.3 单一投影源：`runServe` 启动期读一次 RuntimeConfig，按消费者投影给 launcher/Core/child；门禁开而 eventRouter 非 true 在 spawn 前拒绝；B 期只读、需重启 |
 | 9 | `tasks-index` 迁移证明 | 不能以「文件存在」推断迁移 | 桥构造前 `prepare` 检查表存在；失败响亮；沿用 trigger-subsystem-spec §8-16① |
 | 10 | P6 边界 | deviceScope 未实现；能力票据已由 P6 单独交付（B 不接入）；RPC 目前仅本机 | B 不实现 P6；未来远程复用 RPC 必须先加 capability ticket/吊销，禁止裸复用 |

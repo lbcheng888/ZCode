@@ -49,6 +49,11 @@ const cliWorkspaceBuilds = [
   { packageName: "@zcode/adapters", packageDir: "adapters" },
   { packageName: "@zcode/i18n", packageDir: "i18n" },
   { packageName: "@zcode/telemetry", packageDir: "telemetry" },
+  // bootstrap 静态依赖 cheng-host；cheng-host 的类型入口又依赖 cheng-contract。
+  // 两者 dist 均被 gitignore，默认 pnpm 路径必须显式按序构建，否则干净检出/改完
+  // cheng 源码后再打桌面包会静默内联旧 dist。
+  { packageName: "@zcode/cheng-contract", packageDir: "cheng-contract" },
+  { packageName: "@zcode/cheng-host", packageDir: "cheng-host" },
   { packageName: "@zcode/bootstrap", packageDir: "bootstrap" },
 ];
 // 官方插件 manifest 可以在 server.js 缺失时被 filesystem seed，直到 session
@@ -82,6 +87,8 @@ const requiredDevPluginRuntimeBuilds = [
     packageName: `@zcode/${name}-plugin`,
     artifactPath: `${name}-plugin/dist/server.mjs`,
   })),
+  // Sites 面板的 MCP server 由插件自己构建；不构建时面板入口可见但 MCP 启动失败。
+  { packageName: "@zcode/zcode-site-plugin", artifactPath: "zcode-site-plugin/dist/server.mjs" },
 ];
 const defaultBuildFilters = [
   ...cliWorkspaceBuilds.map(({ packageName }) => packageName),

@@ -24,6 +24,7 @@ export {
   type SessionConfigState,
   type SessionModelTransition,
 } from "./session-config.js";
+import { backgroundRunViewSchema } from "./background-run-view.js";
 import { pendingWouldAcceptCardSchema } from "./would-accept.js";
 export {
   pendingWouldAcceptCardSchema,
@@ -227,6 +228,8 @@ export const queueItemSchema = conversationInputIntentSchema.extend({
   dispatch: conversationInputDispatchSchema.extend({
     state: z.enum(["queued", "reserved", "promoting"]),
   }),
+  /** Host 准入注入的可信 automation 身份；只允许队列提升原样回放。 */
+  automationId: z.string().min(1).optional(),
   toolDisallowlist: z.array(z.string().min(1)).optional(),
 });
 export type QueueItem = z.infer<typeof queueItemSchema>;
@@ -437,6 +440,23 @@ export const goalIterationStateSchema = z.object({
 });
 export type GoalIterationState = z.infer<typeof goalIterationStateSchema>;
 
+/** 绿 ChengGate 的 compact 路线卡（UI 只读证据，不是可执行指令）。 */
+export const goalChengPlanCardSchema = z.object({
+  planId: z.string(),
+  runId: z.string().optional(),
+  frontier: z.object({
+    stage: z.string(),
+    target: z.string(),
+    evidence: z.array(z.string()),
+  }),
+  recommended: z.object({
+    action: z.string(),
+    target: z.string(),
+  }),
+  evidenceRefs: z.array(z.string()),
+});
+export type GoalChengPlanCard = z.infer<typeof goalChengPlanCardSchema>;
+
 export const goalStateSchema = z.object({
   // default 仅用于旧快照兼容；新投影始终携带当前 target 身份和计时事实。
   targetId: z.string().default(""),
@@ -466,6 +486,21 @@ export const goalStateSchema = z.object({
     }),
   ),
   iterations: z.array(goalIterationStateSchema).default([]),
+  // Additive-optional：旧快照/旧发送端不携带，UI 按“无卡”处理。
+  chengPlanCard: goalChengPlanCardSchema.optional(),
+  // S4 additive-optional：用户直改入口（updateGoalAcceptance/bindGoalChengRef）的
+  // CAS 键与当前事实。缺席 = 旧发送端，UI 隐藏设置入口（不可伪 CAS）。
+  revision: z.number().int().nonnegative().optional(),
+  acceptanceLevel: z.enum(["production", "diagnostic"]).optional(),
+  chengRef: z
+    .object({
+      jobId: z.string().min(1),
+      task: z.string().min(1),
+      runId: z.string().min(1).optional(),
+    })
+    .strict()
+    .nullable()
+    .optional(),
 });
 export type GoalState = z.infer<typeof goalStateSchema>;
 
@@ -494,6 +529,13 @@ export const workspaceHookAdmissionStateSchema = z.object({
   workspaceIdentity: z.string().optional(),
 });
 export type WorkspaceHookAdmissionSnapshotState = z.infer<typeof workspaceHookAdmissionStateSchema>;
+
+export const workspaceMcpAdmissionStateSchema = z.object({
+  pendingCount: z.number().int().nonnegative(),
+  bundleDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  workspaceIdentity: z.string().min(1).optional(),
+});
+export type WorkspaceMcpAdmissionSnapshotState = z.infer<typeof workspaceMcpAdmissionStateSchema>;
 
 // 冷历史可读不代表 runtime 已可执行；缺席兼容旧发送端。
 export const runtimeInitializationSchema = z.discriminatedUnion("status", [
@@ -553,8 +595,12 @@ export const conversationSnapshotSchema = z.object({
   // 语义同上——缺席=未知）。[] 形状来自 spec 记法，mandateState 形状未定先用 unknown
   // 占位；后续各期到货时按同一纪律原位升级形状，键名已在 git 冻结、不再重走评估。
   mandateState: z.unknown().optional(),
-  backgroundRuns: z.array(z.unknown()).optional(),
+  // 背景执行读面（S0）：与 pendingWouldAccept 同纪律——键缺席 = 旧发送端未投影
+  // （unknown≠0）；控制面在场才发布，显式 [] = 已发布且零行。
+  backgroundRuns: z.array(backgroundRunViewSchema).optional(),
   watchdogAlerts: z.array(z.unknown()).optional(),
+  // 旧发送端可缺席；null 或缺席均无 MCP 待审核提示。
+  workspaceMcpAdmission: workspaceMcpAdmissionStateSchema.nullable().optional(),
   // （2026-09-12）：原 additive 字段 pluginUiSurfaces 已删除，插件面板 widgetState 只留在
   // 宿主 renderer 内存。
   // B 区

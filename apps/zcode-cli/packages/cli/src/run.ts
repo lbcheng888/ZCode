@@ -26,6 +26,8 @@ import { runLoginCommand, runLogoutCommand } from "./login-command.js";
 import { CLI_COMMAND_NAME, CLI_PROCESS_NAME } from "./process-name.js";
 import { isPluginHostInvocation, runPluginHostCommand } from "./plugin-host-command.js";
 import { isDwfChildInvocation, runDwfChildCommand } from "./dwf-child-command.js";
+import { isChengHostInvocation, runChengHostCommand } from "./cheng-host-command.js";
+import { CHENG_HOST_VIA_CLI_ENV } from "@zcode/contracts";
 import { runPrompt } from "./prompt-command.js";
 import { runPluginsCommand, type PluginsCommandFlags } from "./plugins-command.js";
 import { runSkillsCommand } from "./skills-command.js";
@@ -353,6 +355,16 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
   if (isDwfChildInvocation(ctx.argv)) {
     return await runDwfChildCommand(ctx, ctx.argv.slice(1));
   }
+
+  // cheng-host 的打包入口：同样必须在 parseArgs 之前。安装产物里没有独立的 host 文件，
+  // 由本二进制自 re-exec 进入；stdio 协议帧直接走本进程 stdin/stdout。
+  if (isChengHostInvocation(ctx.argv)) {
+    return await runChengHostCommand(ctx, ctx.argv.slice(1));
+  }
+
+  // cheng-host 随 CLI bundle 发布：普通 CLI 启动即声明“可用自 re-exec 子命令”，于是安装后
+  // 无需手工配置 ZCODE_CHENG_HOST_ENTRY。显式 entry 仍然优先（见 cheng-host-config.ts）。
+  process.env[CHENG_HOST_VIA_CLI_ENV] ??= "1";
 
   if (ctx.argv[0] === "hooks") {
     return await runHooksCommand(ctx, deps, version);

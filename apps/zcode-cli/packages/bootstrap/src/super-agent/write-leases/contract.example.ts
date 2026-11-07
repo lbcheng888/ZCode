@@ -1,6 +1,7 @@
 /**
  * super-agent-write-leases 标准调用示例：spec-lane 静默 run 声明写范围时
- * acquire；worker 终态后 release；启动/定期 sweepExpired 回收过期租约（P2 仅仓储，不接检查点）。
+ * acquire；worker 终态后 release；启动/定期 sweepExpired 回收过期租约。
+ * 第二写者 acquire 会抛 WriteLeaseConflictError（S1 起）。
  */
 import type { SuperAgentWriteLeasesContract } from "./contract.js";
 

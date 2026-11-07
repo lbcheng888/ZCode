@@ -151,4 +151,90 @@ export const SUPER_AGENT_MIGRATIONS: readonly SqliteMigration[] = [
       if (!hasColumn) db.exec("alter table decision_log add column card_payload text;");
     },
   },
+  {
+    // S0：background_run_registry 的持久投影（spec §7-1）。纯增量表；registry 仍是唯一
+    // 写者，本表只落行快照供 daemon 重启 hydrate 与 runs.list 对账。kind/owner 是开放
+    // 字符串列（新增子系统不改 schema），行级所有权由 registry 代码复核。
+    appVersion: "0.17.2",
+    id: "0003_background_run_registry",
+    touchedTables: ["background_run_registry"],
+    sql: `
+      create table if not exists background_run_registry (
+        id text primary key,
+        kind text not null,
+        owner text not null,
+        owner_session text,
+        workspace_key text,
+        state text not null,
+        narrow_result_ref text,
+        stall_clock_ref text,
+        stalled_since integer,
+        heartbeat integer,
+        registered_at integer not null,
+        updated_at integer not null,
+        terminal_at integer,
+        terminal_reason text
+      );
+
+      create index if not exists background_run_registry_state_idx
+        on background_run_registry(state, kind);
+      create index if not exists background_run_registry_owner_idx
+        on background_run_registry(owner, state);
+    `,
+  },
+  {
+    // S1：write lease 第二写者硬拒绝（spec §6.4）。P2 只建表未启用，历史库可能没有
+    // active 行；若手工/测试留下多条，先保留每 workspace 最新一条、其余置 released，
+    // 再建 partial unique index。索引是跨进程竞态的最终裁决，仓储层仍先查后写给出 typed 冲突。
+    appVersion: "0.17.3",
+    id: "0004_write_lease_single_active",
+    touchedTables: ["write_leases"],
+    sql: `
+      update write_leases set status = 'released'
+      where status = 'active'
+        and exists (
+          select 1 from write_leases newer
+          where newer.workspace_identity = write_leases.workspace_identity
+            and newer.status = 'active'
+            and (
+              newer.created_at > write_leases.created_at
+              or (newer.created_at = write_leases.created_at and newer.id > write_leases.id)
+            )
+        );
+
+      create unique index if not exists write_leases_single_active_uidx
+        on write_leases(workspace_identity)
+        where status = 'active';
+    `,
+  },
+  {
+    // S2：verdict 可选的 ChengPlan 引用落 decision_log。additive 可空列；restore 会删账本
+    // 行但保留列，apply 先查 PRAGMA 再 ALTER，幂等可重跑（与 0002 同款回滚闭环）。
+    appVersion: "0.17.4",
+    id: "0005_decision_log_cheng_plan_id",
+    touchedTables: ["decision_log"],
+    sql: `alter table decision_log add column cheng_plan_id text;`,
+    apply: (db) => {
+      const hasColumn = db
+        .prepare("PRAGMA table_info(decision_log)")
+        .all()
+        .some((entry) => (entry as { name?: string }).name === "cheng_plan_id");
+      if (!hasColumn) db.exec("alter table decision_log add column cheng_plan_id text;");
+    },
+  },
+  {
+    // S2：裁决 verdict 的 ChengPlan 引用同时落 trigger_events，作为行级审计事实。
+    // additive 可空列；restore 删账本行但保留列时 apply 幂等重跑（同 0005）。
+    appVersion: "0.17.5",
+    id: "0006_trigger_events_cheng_plan_id",
+    touchedTables: ["trigger_events"],
+    sql: `alter table trigger_events add column cheng_plan_id text;`,
+    apply: (db) => {
+      const hasColumn = db
+        .prepare("PRAGMA table_info(trigger_events)")
+        .all()
+        .some((entry) => (entry as { name?: string }).name === "cheng_plan_id");
+      if (!hasColumn) db.exec("alter table trigger_events add column cheng_plan_id text;");
+    },
+  },
 ];

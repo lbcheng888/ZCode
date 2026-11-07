@@ -64,10 +64,13 @@ const turnStartedFactSchema = z
   .object({
     ...factBaseFields,
     kind: z.literal("turn.started"),
+    inputOrigin: z.enum(["desktop", "mobile"]).optional(),
+    modelName: z.string().optional(),
+    modelProvider: z.string().optional(),
     executionKind: z.enum(["agent", "controlOnly"]).optional(),
     inputSource: zcodeSyntheticUserMessageSourceSchema.optional(),
-    // `workflow`：dynamic-workflow run 的完成 / 提问通知唤起的独立轮。
-    backgroundSource: z.enum(["bash", "subagent", "workflow"]).optional(),
+    // `workflow`：dynamic-workflow run 的完成 / 提问通知唤起的独立轮；`cheng-job` 同理。
+    backgroundSource: z.enum(["bash", "subagent", "workflow", "cheng-job"]).optional(),
     automationId: z.string().min(1).optional(),
     offPeakTaskId: z.string().min(1).optional(),
     offPeakRunType: z.enum(["init", "resume"]).optional(),

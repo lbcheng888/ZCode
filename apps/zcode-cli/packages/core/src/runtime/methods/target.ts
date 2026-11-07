@@ -27,6 +27,10 @@ import { hasRunningBackgroundRuntimeTask } from "../../runtime-task/registry.js"
 import { wrapSystemReminderForSource } from "../../system-reminder/source.js";
 import { verifyActiveTargetCompletionForContinuation } from "./target-completion-verification.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
+import {
+  telemetryInputOrigin,
+  TELEMETRY_INPUT_ORIGIN_ATTRIBUTE,
+} from "./input-intent-persistence.js";
 import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
 
 export async function recordTargetChanged(
@@ -50,7 +54,18 @@ export async function continueActiveTargetIfIdle(
     idleDriver?: boolean;
   },
 ): Promise<TurnResult | null> {
-  const traceContext = options?.traceContext ?? this.rootTraceContext;
+  const originalTrace = options?.traceContext ?? this.rootTraceContext;
+  // upstream v3.17.2 的 continuation telemetry：来源沿整条自动续跑因果链传递。
+  const inputOrigin = telemetryInputOrigin(options?.intent, originalTrace.attributes);
+  const traceContext = inputOrigin
+    ? {
+        ...originalTrace,
+        attributes: {
+          ...originalTrace.attributes,
+          [TELEMETRY_INPUT_ORIGIN_ATTRIBUTE]: inputOrigin,
+        },
+      }
+    : originalTrace;
 
   return await enqueueCancellableRuntimeCommand<
     TurnResult | null,
@@ -309,6 +324,25 @@ export async function executeTargetContinuationCommand(
       });
     }
   }
+  // S4：goal continuation 的路线卡先于 prompt 组装现读；无 plan 事实不制造空卡。
+  // 卡片只是只读先验证据：host RPC 失败时告警并省略，绝不能阻断续跑回合。
+  let chengPlanCard: Awaited<
+    ReturnType<NonNullable<AgentRuntimeInternal["goalContinuationChengPlan"]>>
+  >;
+  if (this.goalContinuationChengPlan) {
+    try {
+      chengPlanCard = await this.goalContinuationChengPlan(continuationTarget);
+    } catch (error) {
+      this.logger?.warn("Failed to read ChengPlan route card for goal continuation", {
+        ...traceContextToLogContext(traceContext),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        event: "target.cheng_plan_card.failed",
+        module: "core.runtime",
+        status: "failed",
+        targetId: continuationTarget.targetID,
+      });
+    }
+  }
   const prompt = wrapSystemReminderForSource(
     "target_continuation",
     // workflow 委派指引与判定权阶梯(设计 §3.3)只在工具面在场时进入提示:
@@ -322,6 +356,7 @@ export async function executeTargetContinuationCommand(
           isGoalLayerEnabled(this.config) &&
           this.config.dynamicWorkflowEnabled !== false &&
           this.dynamicWorkflowToolsActivated,
+        ...(chengPlanCard === undefined ? {} : { chengPlanCard }),
       },
     ),
   );
@@ -657,6 +692,62 @@ export async function finishTargetTurnAccounting(
   }
 }
 
+/**
+ * 显式把 active 目标置 paused 并落 TargetChanged 事件（完成门不可继续类结论专用）。
+ * 与取消收口共用同一状态机路径，但 reason 由调用方给出，让 UI/恢复链路能区分
+ * 「gate 不可用」「gate 能力不足」与用户 Stop。
+ */
+export async function pauseActiveTargetWithReason(
+  this: AgentRuntimeInternal,
+  input: {
+    reason: string;
+    traceContext: TraceContext;
+    /** 结论所针对的目标身份；给出时暂停走 CAS，避免误暂停替换后的新目标。 */
+    expectedTargetID?: string;
+    expectedRevision?: number;
+  },
+): Promise<SessionGoal | null> {
+  if (!this.sessionStore) return null;
+
+  const target = await this.readSessionTargetForContext(input.traceContext);
+  if (!target || target.status !== "active") return null;
+
+  try {
+    const pausedTarget = await this.sessionStore.updateTargetStatus({
+      sessionID: this.sessionId,
+      status: "paused",
+      reason: input.reason,
+      ...(input.expectedTargetID === undefined
+        ? {}
+        : { expectedTargetID: input.expectedTargetID }),
+      ...(input.expectedRevision === undefined
+        ? {}
+        : { expectedRevision: input.expectedRevision }),
+    });
+    if (pausedTarget) {
+      await this.recordTargetChanged({
+        action: "status_updated",
+        previousTarget: target,
+        reason: input.reason,
+        source: "runtime",
+        target: pausedTarget,
+        traceContext: input.traceContext,
+      });
+    }
+    return pausedTarget;
+  } catch (error) {
+    throw createCoreError(
+      CoreErrorType.InvalidStateTransition,
+      `Failed to pause active goal (${input.reason})`,
+      {
+        cause: error instanceof Error ? error : new Error(String(error)),
+        context: { reason: input.reason, sessionId: this.sessionId, targetId: target.targetID },
+        recoverable: true,
+      },
+    );
+  }
+}
+
 export async function pauseActiveTargetForCancellation(
   this: AgentRuntimeInternal,
   traceContext: TraceContext,
@@ -700,7 +791,20 @@ export async function activatePausedTargetAfterResume(
   if (!this.sessionStore || this.getPlanEnabled()) return null;
   const target = await this.readSessionTargetForContext(traceContext);
   if (!target) return null;
-  if (target.status !== "active") return target;
+  if (target.status !== "active") {
+    // 冷恢复的 v4 投影由事件重建，可能停在上一次 verification 的 notSatisfied；
+    // 持久层已是 paused/complete 时也必须发布一次权威状态，否则重启后 UI 仍显示
+    // 「未达成」，既看不到 resume 入口，也把已暂停的目标误当成仍在进行。
+    await this.recordTargetChanged({
+      action: "status_updated",
+      previousTarget: target,
+      reason: "session-start-status-sync",
+      source: "runtime",
+      target,
+      traceContext,
+    });
+    return target;
+  }
   // session-start 边缘(冷启动 resume/fork 子会话恢复)强制 disarm(设计 §3.2):
   // active 一律转 paused,续跑需人显式 /goal resume。此前"两轮之间"残留的 active
   // 会在重启后被 idle 驱动器的空闲沿预约静默拉起续跑。进程内 armed 标志随重启

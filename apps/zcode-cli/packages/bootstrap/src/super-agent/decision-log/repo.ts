@@ -12,8 +12,8 @@ const RETENTION_MS = DECISION_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const INSERT_SQL = `
   insert into decision_log (
     id, workspace_identity, trigger_id, origin, disposition,
-    batch_id, model_tier, reason, evidence, card_payload, created_at
-  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    batch_id, model_tier, reason, evidence, card_payload, cheng_plan_id, created_at
+  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 /**
@@ -34,6 +34,7 @@ export function createDecisionLog(db: DatabaseSync): SuperAgentDecisionLogContra
         entry.reason ?? null,
         entry.evidence === undefined ? null : JSON.stringify(entry.evidence),
         entry.card === undefined ? null : JSON.stringify(entry.card),
+        entry.chengPlanId ?? null,
         entry.createdAt ?? Date.now(),
       );
     },

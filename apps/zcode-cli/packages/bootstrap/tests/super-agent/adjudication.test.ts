@@ -30,6 +30,7 @@ afterEach(() => {
 });
 
 const BASE = Date.UTC(2026, 10, 2, 12, 0, 0);
+const CHENG_JOB_ID = "a".repeat(64);
 
 interface SeedInput {
   id: string;
@@ -109,7 +110,13 @@ class FakeSession {
 }
 
 function verdictsJson(
-  decisions: Array<{ triggerId: string; disposition: string; reason?: string; evidence?: string[] }>,
+  decisions: Array<{
+    triggerId: string;
+    disposition: string;
+    reason?: string;
+    evidence?: string[];
+    chengPlanId?: string | number;
+  }>,
 ): string {
   return JSON.stringify({ decisions });
 }
@@ -412,6 +419,89 @@ describe("super-agent-adjudication 驱动器（M3 / spec §2.1）", () => {
       expect(readStatus(h.db, "s-shape")).toBe("record_only");
       expect(h.driver.stats().schemaFailures).toBe(1);
     });
+
+    it("可选 chengPlanId：命中真实 plan 回执后写 decision_log 与 trigger_events", async () => {
+      const planId = `cheng-plan://${CHENG_JOB_ID}`;
+      const h = await createHarness({
+        fallbackSession: {
+          outputText: verdictsJson([
+            {
+              triggerId: "p-1",
+              disposition: "record-only",
+              chengPlanId: planId,
+            },
+          ]),
+          chengPlanReceipts: [{ planId, jobId: CHENG_JOB_ID, task: "p02_min2" }],
+        },
+      });
+      seedCandidate(h.db, { id: "p-1" });
+      const outcome = await h.driver.runBatch("ws-a");
+      expect(outcome.status).toBe("applied");
+      expect(outcome.decisions[0]).toMatchObject({
+        triggerId: "p-1",
+        chengPlanId: planId,
+      });
+      const decisionRow = h.db
+        .prepare("select cheng_plan_id from decision_log where trigger_id = 'p-1'")
+        .get() as { cheng_plan_id: string | null };
+      expect(decisionRow.cheng_plan_id).toBe(planId);
+      expect(
+        h.db
+          .prepare("select adjudication_status, cheng_plan_id from trigger_events where id = 'p-1'")
+          .get(),
+      ).toEqual({ adjudication_status: "record_only", cheng_plan_id: planId });
+    });
+
+    it("chengPlanId 未命中真实 plan 回执 → 整批降级 record_only，且不写引用列", async () => {
+      const h = await createHarness({
+        fallbackSession: {
+          outputText: verdictsJson([
+            {
+              triggerId: "p-unverified",
+              disposition: "accept",
+              chengPlanId: "cheng-plan://hallucinated",
+            },
+          ]),
+        },
+      });
+      seedCandidate(h.db, { id: "p-unverified" });
+      const outcome = await h.driver.runBatch("ws-a");
+      expect(outcome.status).toBe("applied");
+      expect(outcome.verdictDegraded).toBe("cheng_plan");
+      expect(outcome.decisions).toEqual([
+        {
+          triggerId: "p-unverified",
+          disposition: "record-only",
+          reason: "cheng-plan-reference-unverified:cheng-plan://hallucinated",
+        },
+      ]);
+      expect(
+        h.db
+          .prepare(
+            "select adjudication_status, cheng_plan_id from trigger_events where id = 'p-unverified'",
+          )
+          .get(),
+      ).toEqual({ adjudication_status: "record_only", cheng_plan_id: null });
+      expect(h.driver.stats().planReferenceFailures).toBe(1);
+      expect(h.driver.stats().schemaFailures).toBe(0);
+    });
+
+    it("chengPlanId 非字符串/空串 → 整批 schema 降级 record-only", async () => {
+      for (const bad of [123, ""]) {
+        const h = await createHarness({
+          fallbackSession: {
+            outputText: verdictsJson([
+              { triggerId: "p-bad", disposition: "reject", chengPlanId: bad },
+            ]),
+          },
+        });
+        seedCandidate(h.db, { id: "p-bad" });
+        const outcome = await h.driver.runBatch("ws-a");
+        expect(outcome.verdictDegraded).toBe("schema");
+        expect(readStatus(h.db, "p-bad")).toBe("record_only");
+        expect(h.driver.stats().schemaFailures).toBe(1);
+      }
+    });
   });
 
   describe("A3：与 goal 存在性完全解耦", () => {
@@ -522,7 +612,12 @@ describe("super-agent-adjudication 驱动器（M3 / spec §2.1）", () => {
       expect(h.session.calls).toHaveLength(1);
       const request = h.session.calls[0]!;
       // 会话级 fail-closed 主闸：白名单只有 M3 钦定只读面。
-      expect(request.toolAllowlist).toEqual(["Recall", "GoalRead"]);
+      expect(request.toolAllowlist).toEqual([
+        "Recall",
+        "GoalRead",
+        "ChengInspect",
+        "ChengPlan",
+      ]);
       // turn 级纵深：全部已知执行/副作用工具在黑名单。
       for (const tool of [
         "Bash",
@@ -539,6 +634,12 @@ describe("super-agent-adjudication 驱动器（M3 / spec §2.1）", () => {
         "GoalCreate",
         "GoalUpdate",
         "GoalBlock",
+        "GoalChengBind",
+        "ChengGenerate",
+        "ChengVerify",
+        "ChengExplain",
+        "cheng.generate",
+        "cheng.verify",
         "Workflow",
         "AskUserQuestion",
         "ListModels",
@@ -554,7 +655,12 @@ describe("super-agent-adjudication 驱动器（M3 / spec §2.1）", () => {
       // 它无法改变工具面（工具面由 request 常量决定，与 payload 无关）。
       expect(request.prompt).toContain("rm -rf /");
       expect(request.prompt).toContain("不可信数据");
-      expect(request.toolAllowlist).toEqual(["Recall", "GoalRead"]);
+      expect(request.toolAllowlist).toEqual([
+        "Recall",
+        "GoalRead",
+        "ChengInspect",
+        "ChengPlan",
+      ]);
     });
   });
 

@@ -82,6 +82,53 @@ async function settle() {
 }
 
 describe("v4 原生 compact", () => {
+  it.each([false, true])("compact 固定提交的 B：busy=%s", async (busy) => {
+    const modelSelection = { providerId: "provider-b", modelId: "model-b" };
+    const app = makeApp();
+    const record = makeRecord({
+      app,
+      ...(busy ? { activeAbortController: new AbortController() } : {}),
+    });
+    await new V4CommandExecutor(makeHost(record)).execute(envelope("compact", { modelSelection }));
+    const call = (busy ? app.steerTurn : app.submitPrompt).mock.calls[0];
+    expect(call?.[0]).toBe("/compact");
+    expect(call?.[1]).toMatchObject({
+      intent: { kind: "compact", sourceCommandId: "cmd-1", modelSelection },
+    });
+    expect(call?.[1]?.intent).not.toHaveProperty("mode");
+    expect(call?.[1]?.intent).not.toHaveProperty("planEnabled");
+    await settle();
+  });
+
+  it("旧 compact 在接收时固定 A，就绪等待期间切到 C 不改写请求", async () => {
+    let ready!: () => void;
+    const readyGate = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const app = makeApp();
+    const record = makeRecord({ app });
+    const executing = new V4CommandExecutor(
+      makeHost(record, {
+        ensureModelReady: vi.fn().mockReturnValue(readyGate),
+      }),
+    ).execute(envelope("compact", {}));
+    app.getModel.mockReturnValue("provider-c/model-c");
+    ready();
+    await executing;
+    expect(app.submitPrompt).toHaveBeenCalledWith(
+      "/compact",
+      expect.objectContaining({
+        intent: expect.objectContaining({
+          modelSelection: {
+            providerId: "primary-provider",
+            modelId: "default-model",
+          },
+        }),
+      }),
+    );
+    await settle();
+  });
+
   it("正路径：后台 submitPrompt('/compact') + 上锁 + ready 边界释放", async () => {
     let finishCompact!: () => void;
     const compactGate = new Promise<Record<string, never>>((resolve) => {
@@ -192,15 +239,20 @@ describe("v4 原生 compact", () => {
   });
 
   it("goal verifier busy routing：即使没有 steerable active turn，也进入 deferred FIFO", async () => {
+    const modelSelection = { providerId: "provider-b", modelId: "model-b" };
     const enqueueDeferredInput = vi.fn().mockResolvedValue({ kind: "queued" });
     const app = makeApp({ enqueueDeferredInput });
     const record = makeRecord({ app });
     await new V4CommandExecutor(
       makeHost(record, { getInputRoutingMode: vi.fn().mockReturnValue("enqueue") }),
-    ).execute(envelope("compact", {}));
+    ).execute(envelope("compact", { modelSelection }));
     expect(enqueueDeferredInput).toHaveBeenCalledWith(
       "/compact",
-      expect.objectContaining({ commandKind: "compact", delivery: "queue" }),
+      expect.objectContaining({
+        commandKind: "compact",
+        delivery: "queue",
+        intent: expect.objectContaining({ modelSelection }),
+      }),
     );
     expect(app.submitPrompt).not.toHaveBeenCalled();
   });
@@ -613,5 +665,112 @@ describe("supports 分流（goal/compact 组）", () => {
     const executor = new V4CommandExecutor(makeHost(makeRecord()));
     expect(executor.supports("pauseGoal")).toBe(true);
     expect(executor.supports("clearGoal")).toBe(true);
+  });
+});
+
+describe("v4 原生 updateGoalAcceptance / bindGoalChengRef（S4 用户直改）", () => {
+  const GOAL = { targetID: "g1", objective: "目标", status: "active", revision: 3 };
+
+  it("updateGoalAcceptance：CAS 命中 → app 直改 + goal_acceptance_edited 收口", async () => {
+    const updateGoalAcceptance = vi
+      .fn()
+      .mockResolvedValue({ ...GOAL, acceptanceLevel: "diagnostic" });
+    const app = makeApp({ updateGoalAcceptance });
+    const host = makeHost(makeRecord({ app }));
+
+    await new V4CommandExecutor(host).execute(
+      envelope("updateGoalAcceptance", {
+        targetID: "g1",
+        revision: 3,
+        acceptanceLevel: "diagnostic",
+      }),
+    );
+
+    expect(updateGoalAcceptance).toHaveBeenCalledWith({
+      targetID: "g1",
+      revision: 3,
+      acceptanceLevel: "diagnostic",
+    });
+    expect(host.legacyMutations).toContain("goal_acceptance_edited");
+  });
+
+  it("updateGoalAcceptance：CAS 过期 → staleTarget 拒绝，不伪装 accepted", async () => {
+    const app = makeApp({ updateGoalAcceptance: vi.fn().mockResolvedValue(null) });
+    const host = makeHost(makeRecord({ app }));
+
+    await expect(
+      new V4CommandExecutor(host).execute(
+        envelope("updateGoalAcceptance", {
+          targetID: "g1",
+          revision: 2,
+          acceptanceLevel: "production",
+        }),
+      ),
+    ).rejects.toMatchObject({ reasonCode: "staleTarget" });
+    expect(host.legacyMutations).toEqual([]);
+  });
+
+  it("bindGoalChengRef：绑定/清除直通 app（host inspect 复核在 app 侧）", async () => {
+    const bindGoalChengRef = vi
+      .fn()
+      .mockResolvedValueOnce({ ...GOAL, chengRef: { jobId: "job-9", task: "p06", runId: "run-1" } })
+      .mockResolvedValueOnce({ ...GOAL, chengRef: null });
+    const app = makeApp({ bindGoalChengRef });
+    const host = makeHost(makeRecord({ app }));
+    const executor = new V4CommandExecutor(host);
+
+    await executor.execute(
+      envelope("bindGoalChengRef", {
+        targetID: "g1",
+        revision: 3,
+        chengRef: { jobId: "job-9", task: "p06" },
+      }),
+    );
+    await executor.execute(
+      envelope("bindGoalChengRef", { targetID: "g1", revision: 4, chengRef: null }),
+    );
+
+    expect(bindGoalChengRef).toHaveBeenNthCalledWith(1, {
+      targetID: "g1",
+      revision: 3,
+      chengRef: { jobId: "job-9", task: "p06" },
+    });
+    expect(bindGoalChengRef).toHaveBeenNthCalledWith(2, {
+      targetID: "g1",
+      revision: 4,
+      chengRef: null,
+    });
+    expect(host.legacyMutations).toEqual(["goal_cheng_ref_edited", "goal_cheng_ref_edited"]);
+  });
+
+  it("bindGoalChengRef：CAS 过期 → staleTarget；cheng 端口缺席 → chengUnavailable", async () => {
+    const app = makeApp({
+      bindGoalChengRef: vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockRejectedValueOnce(new Error("Cheng host 未接线")),
+    });
+    const host = makeHost(makeRecord({ app }));
+    const executor = new V4CommandExecutor(host);
+
+    await expect(
+      executor.execute(
+        envelope("bindGoalChengRef", {
+          targetID: "g1",
+          revision: 1,
+          chengRef: { jobId: "job-9", task: "p06" },
+        }),
+      ),
+    ).rejects.toMatchObject({ reasonCode: "staleTarget" });
+    await expect(
+      executor.execute(
+        envelope("bindGoalChengRef", {
+          targetID: "g1",
+          revision: 3,
+          chengRef: { jobId: "job-9", task: "p06" },
+        }),
+      ),
+    ).rejects.toMatchObject({ reasonCode: "chengUnavailable" });
+    expect(host.legacyMutations).toEqual([]);
   });
 });

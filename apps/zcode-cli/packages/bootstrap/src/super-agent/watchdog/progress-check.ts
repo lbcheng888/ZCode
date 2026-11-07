@@ -123,7 +123,8 @@ export async function runProgressCheck(
 /**
  * 裁决提案的目标解析（程序、确定性，spec §5）。
  * notify-user 无目标（targetId 保持缺席，调用方用 progress:<streak> 作记录键）；
- * cancel-stalled 复用探针 stall 资格；pause-automation 要求行携带 workspaceKey。
+ * cancel-stalled 复用探针 stall 资格；pause-automation 要求行携带 workspaceKey
+ * （命令面再从行 id 解析 automation runId/automationId）。
  */
 function resolveProgressTarget(
   action: RepairAction,
@@ -137,7 +138,7 @@ function resolveProgressTarget(
   if (action === "cancel-stalled") {
     return isWorkflowStallCandidate(row, ctx.now, ctx.config) ? { ok: true, targetId } : { ok: false };
   }
-  // pause-automation：workspaceKey 是命令面的定位键（spec §1.1）。
+  // pause-automation：workspaceKey + 行 id（automation runId）是命令面的定位键（spec §1.1）。
   return row.workspaceKey !== undefined ? { ok: true, targetId } : { ok: false };
 }
 

@@ -28,7 +28,9 @@ import {
   sessionUsageStateSchema,
   subagentProjectionStateSchema,
   workspaceHookAdmissionStateSchema,
+  workspaceMcpAdmissionStateSchema,
 } from "./snapshot.js";
+import { backgroundRunViewSchema } from "./background-run-view.js";
 import { pendingWouldAcceptCardSchema } from "./would-accept.js";
 import {
   WORKFLOW_RUNS_LIMITS,
@@ -68,8 +70,10 @@ export const statePatchSchema = z.object({
   // spec §5.4 P2 additive 槽位（与快照同名同形冻结；P2 无生产者）：StatePatch 是封闭
   // 键集，只冻快照不冻这里，后续期发增量时还得重走一遍 closed-set 偏斜评估。
   mandateState: z.unknown().optional(),
-  backgroundRuns: z.array(z.unknown()).optional(),
+  // 背景执行读面：键级整体替换，语义与快照一致（缺席 unknown，显式 [] 为清零）。
+  backgroundRuns: z.array(backgroundRunViewSchema).optional(),
   watchdogAlerts: z.array(z.unknown()).optional(),
+  workspaceMcpAdmission: workspaceMcpAdmissionStateSchema.nullable().optional(),
 });
 export type StatePatch = z.infer<typeof statePatchSchema>;
 

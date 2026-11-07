@@ -67,6 +67,7 @@ export class StdioHostClient {
   }
 
   static async connect(options: StdioClientOptions): Promise<StdioHostClient> {
+    const startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
     const child = spawn(options.command, [...options.args], {
       cwd: options.cwd,
       env: options.env,
@@ -77,7 +78,7 @@ export class StdioHostClient {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new HostError("host.responseTimeout", "host did not start in time"));
-      }, options.startupTimeoutMs ?? 15_000);
+      }, startupTimeoutMs);
       child.once("spawn", () => {
         clearTimeout(timer);
         resolve();
@@ -101,7 +102,28 @@ export class StdioHostClient {
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       },
     });
-    await client.capabilities();
+    // startupTimeoutMs 也必须覆盖 hello + capabilities 握手：spawn 成功不代表子进程
+    // 会读协议。host 活着但不回帧时（Electron 误启动、启动期卡死），request 自带的
+    // deadline 只随帧发送、依赖 host 侧计时，客户端此前会永久 pending。这里用同一预算
+    // 兜住握手，超时杀掉子进程并返回 host.responseTimeout，保证 cheng.* fail-closed。
+    let handshakeTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        client.capabilities(),
+        new Promise<never>((_, reject) => {
+          handshakeTimer = setTimeout(() => {
+            reject(
+              new HostError("host.responseTimeout", "host handshake did not complete in time"),
+            );
+          }, startupTimeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      void client.close();
+      throw error;
+    } finally {
+      if (handshakeTimer !== undefined) clearTimeout(handshakeTimer);
+    }
     return client;
   }
 

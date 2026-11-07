@@ -59,6 +59,10 @@ export type WorkflowErrorCode =
   | "ScriptHashMismatch"
   | "Interrupted"
   | "ProviderStop"
+  // ——————————— Cheng 数据面（facade `cheng.*`）———————————
+  // 节点级：装配里没有 Cheng host 端口，或端口拒绝时大声拒绝该节点（脚本可 catch、节点以
+  // failed 落 journal）。与 DriverError 区分，宿主据码判断“接线缺失”而不是“世界读取失败”。
+  | "ChengHostUnavailable"
   // ——————————— 用户面产物（docs/dynamic-workflow/authoring.md「Publishing content」）———————————
   // ⚠ 术语：这一批 artifact 全是**用户面产物**（脚本发布给用户看的产出），与
   // `RunSettlement.artifact`（顶层返回值）无关。

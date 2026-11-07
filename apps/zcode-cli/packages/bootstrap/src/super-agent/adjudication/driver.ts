@@ -24,6 +24,7 @@ import {
   ADJUDICATION_KV_WINDOW_MS,
   ADJUDICATION_MAX_BATCH_SIZE,
   ADJUDICATION_OLDEST_AGE_MS,
+  type AdjudicationChengPlanReceipt,
   type AdjudicationMandateTier,
   type AdjudicationUsageInput,
   type AdjudicationVerdictDecision,
@@ -33,7 +34,7 @@ import {
 } from "./contract.js";
 import { buildAdjudicationPrompt } from "./prompt.js";
 import { ADJUDICATION_TOOL_ALLOWLIST, ADJUDICATION_TOOL_DISALLOWLIST } from "./toolface.js";
-import { validateVerdictBatch } from "./verdict.js";
+import { validateChengPlanReferences, validateVerdictBatch } from "./verdict.js";
 
 interface KvWindow {
   key: string;
@@ -112,7 +113,13 @@ export function createAdjudicationDriver(
   const usage = new Map<string, Map<string, number>>();
   /** 会话故障冷却（固定 = T）：冷却内 notify/评估点不重试，防故障热循环。 */
   const failureRetryAt = new Map<string, number>();
-  const counters = { batchesRun: 0, schemaFailures: 0, budgetTrips: 0, sessionFaults: 0 };
+  const counters = {
+    batchesRun: 0,
+    schemaFailures: 0,
+    planReferenceFailures: 0,
+    budgetTrips: 0,
+    sessionFaults: 0,
+  };
 
   function spentToday(workspaceIdentity: string): number {
     return usage.get(workspaceIdentity)?.get(utcDay(Date.now())) ?? 0;
@@ -278,6 +285,7 @@ export function createAdjudicationDriver(
     const prompt = buildAdjudicationPrompt(rows);
     let outputText: string;
     let usageResult: { inputTokens: number; outputTokens: number } | undefined;
+    let chengPlanReceipts: readonly AdjudicationChengPlanReceipt[] = [];
     try {
       const result = await session.run({
         workspaceIdentity,
@@ -291,6 +299,7 @@ export function createAdjudicationDriver(
       });
       outputText = result.outputText;
       usageResult = result.usage;
+      chengPlanReceipts = result.chengPlanReceipts ?? [];
     } catch (error) {
       // 会话故障：留 pending，冷却 T 后由评估点/notify 重试；告警不静默（A10）。
       counters.sessionFaults += 1;
@@ -319,7 +328,22 @@ export function createAdjudicationDriver(
     let decisions: AdjudicationVerdictDecision[];
     let verdictDegraded: BatchOutcome["verdictDegraded"];
     if (validation.ok) {
-      decisions = validation.decisions;
+      const planReferences = validateChengPlanReferences(
+        validation.decisions,
+        chengPlanReceipts,
+      );
+      if (planReferences.ok) {
+        decisions = validation.decisions;
+      } else {
+        counters.planReferenceFailures += 1;
+        verdictDegraded = "cheng_plan";
+        const unmatched = planReferences.unmatchedPlanIds.join(",");
+        decisions = rows.map((row) => ({
+          triggerId: row.id,
+          disposition: "record-only" as const,
+          reason: `cheng-plan-reference-unverified:${unmatched}`,
+        }));
+      }
     } else {
       counters.schemaFailures += 1;
       verdictDegraded = validation.failure;

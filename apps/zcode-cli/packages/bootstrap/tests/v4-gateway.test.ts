@@ -24,6 +24,7 @@ import {
   createSessionId,
 } from "@zcode/contracts";
 import type {
+  BackgroundRunView,
   CommandAck,
   CommandEnvelope,
   CommandKey,
@@ -128,6 +129,8 @@ interface HostStub {
   configSeeds: Map<string, SessionConfigSeed>;
   /** would-accept 投影种子：sessionId → 控制面读面卡片（缺省 = 钩子返回 null）。 */
   wouldAcceptSeeds: Map<string, readonly PendingWouldAcceptCard[]>;
+  /** backgroundRuns 投影种子：sessionId → registry 读面行（缺省 = 钩子返回 null）。 */
+  backgroundRunSeeds: Map<string, readonly BackgroundRunView[]>;
   memorySettings?: Map<string, boolean>;
   fileChangeCalls: Array<{ sessionId: string; targetRowId: number; messageIds: string[] }>;
   fileChangesResult: V4ConversationFileChangesResult;
@@ -157,6 +160,7 @@ function makeHost(): HostStub {
     synthesizedSessions: new Set(),
     configSeeds: new Map(),
     wouldAcceptSeeds: new Map(),
+    backgroundRunSeeds: new Map(),
     fileChangeCalls: [],
     fileChangesResult: { files: 0, additions: 0, deletions: 0, items: [] },
     fileRewindPreviewCalls: [],
@@ -233,6 +237,7 @@ function makeGateway(host: HostStub): ConversationV4Gateway {
         },
       getSessionConfigSeed: (sessionId) => host.configSeeds.get(sessionId) ?? null,
       getSessionWouldAcceptSeed: (sessionId) => host.wouldAcceptSeeds.get(sessionId) ?? null,
+      getSessionBackgroundRunsSeed: (sessionId) => host.backgroundRunSeeds.get(sessionId) ?? null,
       getSessionMemoryEnabled: (sessionId) => host.memorySettings?.get(sessionId),
       getConversationFileChanges: async (sessionId, targetRowId, messageIds) => {
         host.fileChangeCalls.push({ sessionId, targetRowId, messageIds });
@@ -337,6 +342,44 @@ describe("订阅与帧调度", () => {
     const absent = await noPlaneGateway.subscribe(subscribeParams());
     if (absent.initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot");
     expect(absent.initialFrame.payload.snapshot.pendingWouldAccept).toBeUndefined();
+  });
+
+  it("backgroundRuns registry 种子进初始 snapshot；[] 是已发布空态，缺席不发布键", async () => {
+    const host = makeHost();
+    const gateway = makeGateway(host);
+    const log = new EventLog();
+    gateway.ingest("session-1", sessionCreated(log));
+    const run: BackgroundRunView = {
+      id: "cheng-job-1",
+      kind: "cheng-job",
+      owner: "cheng-host",
+      state: "running",
+      registeredAt: 1_000,
+      updatedAt: 2_000,
+      stalledSince: 3_000,
+    };
+    host.backgroundRunSeeds.set("session-1", [run]);
+
+    const { initialFrame } = await gateway.subscribe(subscribeParams());
+    if (initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot frame");
+    expect(initialFrame.payload.snapshot.backgroundRuns).toEqual([run]);
+
+    // 显式 [] = 控制面在场且 registry 零行（不是 unknown）。
+    const emptyHost = makeHost();
+    const emptyGateway = makeGateway(emptyHost);
+    emptyGateway.ingest("session-1", sessionCreated(new EventLog()));
+    emptyHost.backgroundRunSeeds.set("session-1", []);
+    const empty = await emptyGateway.subscribe(subscribeParams());
+    if (empty.initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot");
+    expect(empty.initialFrame.payload.snapshot.backgroundRuns).toEqual([]);
+
+    // 控制面缺席：host 返回 null → 键不发布。
+    const noPlaneHost = makeHost();
+    const noPlaneGateway = makeGateway(noPlaneHost);
+    noPlaneGateway.ingest("session-1", sessionCreated(new EventLog()));
+    const absent = await noPlaneGateway.subscribe(subscribeParams());
+    if (absent.initialFrame?.payload.kind !== "snapshot") throw new Error("expected snapshot");
+    expect(absent.initialFrame.payload.snapshot.backgroundRuns).toBeUndefined();
   });
 
   it("控制面批转/产出后 refreshWouldAcceptPublishers 给已订阅会话发 delta，无需重订阅", async () => {

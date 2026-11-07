@@ -6,6 +6,7 @@
  * 任一步失败返回 degraded，驱动器整批降级 record-only（无部分执行）。
  */
 import type {
+  AdjudicationChengPlanReceipt,
   AdjudicationDisposition,
   AdjudicationSchemeCard,
   AdjudicationVerdictDecision,
@@ -93,6 +94,12 @@ function parseDecision(raw: unknown): AdjudicationVerdictDecision | undefined {
     if (!scheme) return undefined;
     decision.scheme = scheme;
   }
+  if (record.chengPlanId !== undefined) {
+    if (typeof record.chengPlanId !== "string" || record.chengPlanId.length === 0) {
+      return undefined;
+    }
+    decision.chengPlanId = record.chengPlanId;
+  }
   return decision;
 }
 
@@ -130,4 +137,28 @@ export function validateVerdictBatch(
   // 覆盖：模型不得遗漏候选（缺失 = 覆盖失败，整批降级）。
   if (seen.size !== candidateIds.size) return { ok: false, failure: "coverage" };
   return { ok: true, decisions };
+}
+
+export type ChengPlanReferenceValidation =
+  | { ok: true }
+  | { ok: false; unmatchedPlanIds: readonly string[] };
+
+/**
+ * verdict 的 chengPlanId 必须命中本批真实 ChengPlan 工具回执。没有引用 = 通过；
+ * 任一引用未命中 = 整批降级（返回全部未命中 id，供审计原因）。
+ */
+export function validateChengPlanReferences(
+  decisions: readonly AdjudicationVerdictDecision[],
+  receipts: readonly AdjudicationChengPlanReceipt[],
+): ChengPlanReferenceValidation {
+  const receiptPlanIds = new Set(receipts.map((receipt) => receipt.planId));
+  const unmatchedPlanIds = [
+    ...new Set(
+      decisions
+        .map((decision) => decision.chengPlanId)
+        .filter((planId): planId is string => planId !== undefined)
+        .filter((planId) => !receiptPlanIds.has(planId)),
+    ),
+  ];
+  return unmatchedPlanIds.length === 0 ? { ok: true } : { ok: false, unmatchedPlanIds };
 }

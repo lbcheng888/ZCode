@@ -1,10 +1,26 @@
 /**
- * super-agent-write-leases 对外契约：write_leases 仓储（spec §1.5，P2 建表不启用）。
- * 语义收窄（M12①）：只服务 spec-lane 静默 run 与活 worker 的并发写互斥；
- * P2 只提供仓储 API，不接 workspace 写工具 admission 检查点（Phase 5 才接 features.specWriteLease）。
+ * super-agent-write-leases 对外契约：write_leases 仓储（spec §1.5）。
+ * 语义收窄（M12①）：只服务 spec-lane 静默 run 与活 worker 的并发写互斥。
+ * S1 起：同 workspace 只允许一条 active 租约；第二写者由仓储与数据库唯一索引
+ * 双重拒绝（typed conflict，不排队、不合并）。
  */
 
 export type WriteLeaseStatus = "active" | "released";
+
+/** 第二写者：workspace 已有 active 租约。fail-closed，调用方必须拒绝启动写入。 */
+export class WriteLeaseConflictError extends Error {
+  readonly code = "write_lease_conflict";
+  constructor(
+    readonly workspaceIdentity: string,
+    readonly activeOwnerRunId: string,
+  ) {
+    super(
+      `write lease conflict: workspace ${workspaceIdentity} already has an active lease owned by ${activeOwnerRunId}`,
+    );
+    this.name = "WriteLeaseConflictError";
+  }
+}
+
 
 export interface WriteLeaseRow {
   id: string;
@@ -33,7 +49,8 @@ export interface AcquireWriteLeaseInput {
 export interface SuperAgentWriteLeasesContract {
   /**
    * 插入一条 active 租约并返回落行。前置：scope 已序列化。
-   * P2 仅建表语义：不查第二写者冲突（响亮拒绝是 Phase 5 admission 检查点的职责）。
+   * 先回收过期租约（lease_expires_at < now），再拒绝同 workspace 的其它 active 租约：
+   * 抛 `WriteLeaseConflictError`，不排队、不合并。数据库 partial unique index 兜底并发竞态。
    * 同步执行，返回即已持久化；不发事件。
    */
   acquire(input: AcquireWriteLeaseInput): WriteLeaseRow;

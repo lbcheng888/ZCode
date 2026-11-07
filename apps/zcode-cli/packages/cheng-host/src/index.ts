@@ -9,5 +9,7 @@ export * from "./job-store.js";
 export * from "./job-engine.js";
 export * from "./runner.js";
 export * from "./projections.js";
+export type { ChengPlanResult } from "@zcode/cheng-contract";
 export * from "./server.js";
 export * from "./client.js";
+export { parseHostArgs, runHost, type HostArgs, type HostScope } from "./main.js";

@@ -2,6 +2,7 @@ import type {
   ZCodeAutomationRunOutcome,
   ZCodeAutomationTrigger,
 } from "@zcode/shared";
+import type { AutomationRunProjectionSqlite } from "@zcode/services/node";
 
 export interface CronRunLifecycleRepo {
   ensureRunClaimed(params: {
@@ -36,6 +37,8 @@ export interface CronRunLifecycleIdentity {
 type LogWarn = (message: string, error: unknown) => void;
 
 const MANUAL_CLAIM_HEARTBEAT_MS = 60_000;
+/** host 运行期续租 automation_runs.updated_at；必须明显小于 scheduler stale 窗口（10min）。 */
+export const AUTOMATION_RUN_HEARTBEAT_MS = 60_000;
 
 export function startManualClaimHeartbeat(
   params: Pick<CronRunLifecycleIdentity, "automationId" | "runId" | "workspaceKey"> & {
@@ -57,17 +60,52 @@ export function startManualClaimHeartbeat(
   return { dispose: () => clearInterval(timer) };
 }
 
+/**
+ * host 已接住 run（task 已创建、终态订阅已挂）后的运行期心跳：
+ * 刷新 automation_runs.updated_at 与 registry 行 updated_at，避免长任务被 scheduler
+ * 的 stale reconciler 误判成 host 丢失。终态落库/进程退出时由持有者 dispose。
+ */
+export function startCronRunOutcomeHeartbeat(
+  params: Pick<CronRunLifecycleIdentity, "runId"> & {
+    repo: Pick<CronRunLifecycleRepo, "markRunOutcome">;
+    projection?: Pick<AutomationRunProjectionSqlite, "touch">;
+    logWarn: LogWarn;
+    intervalMs?: number;
+  },
+): { dispose(): void } {
+  const timer = setInterval(() => {
+    void params.repo
+      .markRunOutcome(params.runId, "running")
+      .then(() => params.projection?.touch(params.runId, "automation", {}))
+      .catch((error) => params.logWarn(`续租 automation run 失败 runId=${params.runId}`, error));
+  }, params.intervalMs ?? AUTOMATION_RUN_HEARTBEAT_MS);
+  return { dispose: () => clearInterval(timer) };
+}
+
 export async function recordCronRunOutcomeBestEffort(
   params: CronRunLifecycleIdentity & {
     repo: CronRunLifecycleRepo;
     outcome: ZCodeAutomationRunOutcome;
     error?: string;
     logWarn: LogWarn;
+    /** 同库 super-agent registry 的 automation 行终态投影（可选）。 */
+    projection?: Pick<AutomationRunProjectionSqlite, "settle">;
   },
 ): Promise<void> {
   try {
     await params.repo.ensureRunClaimed(params);
     await params.repo.markRunOutcome(params.runId, params.outcome, params.error);
+    const terminalState =
+      params.outcome === "succeeded"
+        ? "completed"
+        : params.outcome === "failed"
+          ? "failed"
+          : params.outcome === "stopped"
+            ? "cancelled"
+            : undefined;
+    if (terminalState !== undefined) {
+      params.projection?.settle(params.runId, "automation", terminalState);
+    }
   } catch (error) {
     params.logWarn(
       `回写定时任务运行结果失败 automation=${params.automationId} runId=${params.runId}`,

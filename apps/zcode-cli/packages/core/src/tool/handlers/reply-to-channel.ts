@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { channelReplyPartsSchema, channelReplyResultSchema } from "@zcode/shared";
-import type { SessionId } from "@zcode/contracts";
+import { evaluateChengDeliveryGate, type SessionId } from "@zcode/contracts";
 
 import type { ToolEntry, ToolHandler } from "../types.js";
 
@@ -38,6 +38,23 @@ export const replyToChannelHandler: ToolHandler = async (input, context) => {
   if (!identity.success)
     throw new Error("Channel reply execution input unavailable; retrying will not restore it");
   context.abortSignal.throwIfAborted();
+  // 非 trigger 出站面（渠道回复）复用同一 Cheng 交付门：目标显式绑定了 Cheng job 时，
+  // 红/blocked gate 在此拦下，零投递；无绑定 = 非 Cheng 会话，照常发送。
+  const target = await context.sessionStore.readTarget({
+    sessionID: context.sessionId as SessionId,
+  });
+  const chengJobId = target?.chengRef?.jobId;
+  if (chengJobId !== undefined) {
+    if (context.chengReadPort === undefined) {
+      throw new Error(
+        "Cheng delivery gate unavailable for a goal-bound Cheng job; refusing channel reply",
+      );
+    }
+    const verified = await context.chengReadPort.verify(chengJobId);
+    const gate = evaluateChengDeliveryGate(verified.gate);
+    if (!gate.allowed) throw new Error(gate.reason);
+    context.abortSignal.throwIfAborted();
+  }
   return context.topicResourcePort.reply(
     {
       taskId: context.sessionId,

@@ -19,6 +19,12 @@ const noAuth = process.env.TEST_NO_AUTH === "1";
 const healthIntervalMs = Number(process.env.TEST_HEALTH_INTERVAL_MS) || undefined;
 const dispatchIntervalMs = Number(process.env.TEST_DISPATCH_INTERVAL_MS) || undefined;
 const dispatchGraceMs = Number(process.env.TEST_DISPATCH_GRACE_MS) || undefined;
+// E2E 用真实 watchdog 跨进程 repair：缩短 tick/熔断参数（生产缺省 DEFAULT_WATCHDOG_CONFIG）。
+const watchdogTickMs = Number(process.env.TEST_WATCHDOG_TICK_MS) || undefined;
+const watchdogEscalationThreshold =
+  Number(process.env.TEST_WATCHDOG_ESCALATION_THRESHOLD) || undefined;
+const watchdogEscalationCooldownMs =
+  Number(process.env.TEST_WATCHDOG_ESCALATION_COOLDOWN_MS) || undefined;
 
 const resolver: PeerIdentityResolver = {
   async resolve(): Promise<PeerIdentity> {
@@ -42,6 +48,19 @@ void (async () => {
     ...(healthIntervalMs ? { healthIntervalMs } : {}),
     ...(dispatchIntervalMs ? { dispatchIntervalMs } : {}),
     ...(dispatchGraceMs ? { dispatchGraceMs } : {}),
+    ...(watchdogTickMs || watchdogEscalationThreshold || watchdogEscalationCooldownMs
+      ? {
+          watchdogConfig: {
+            ...(watchdogTickMs ? { tickIntervalMs: watchdogTickMs } : {}),
+            ...(watchdogEscalationThreshold
+              ? { escalationFailureThreshold: watchdogEscalationThreshold }
+              : {}),
+            ...(watchdogEscalationCooldownMs
+              ? { escalationCooldownMs: watchdogEscalationCooldownMs }
+              : {}),
+          },
+        }
+      : {}),
     // §3.8 生产路径：凭据文件认证；只有未提供凭据的用例才退到测试 peer 门。
     // TEST_NO_AUTH 用于断言「既无凭据又无 peer 门 → 拒绝绑定」的 fail-closed 路径。
     ...(authTokenFile
@@ -54,7 +73,11 @@ void (async () => {
     },
     subscribeShutdownCommand: (listener) => {
       process.on("message", (raw: unknown) => {
-        if (typeof raw === "object" && raw !== null && (raw as { command?: unknown }).command === "shutdown") {
+        if (
+          typeof raw === "object" &&
+          raw !== null &&
+          (raw as { command?: unknown }).command === "shutdown"
+        ) {
           listener();
         }
       });

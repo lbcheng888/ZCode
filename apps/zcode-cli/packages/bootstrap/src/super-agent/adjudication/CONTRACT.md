@@ -17,6 +17,8 @@ A6）；独立每日微预算（M12③）。
 - verdict 校验 fail-closed（T2）：JSON/schema/外键/覆盖任一失败 = 整批降级
   record-only（reason 标 `verdict-validation-failed:<failure>`），无部分执行，
   `schemaFailures` 计数；确定性提取只剥单层 markdown 围栏（verdict.ts，非启发式）。
+  chengPlanId 未命中本批真实 ChengPlan 工具回执（`cheng-plan://<jobId>`）同样整批
+  降级 record-only，`verdictDegraded=cheng_plan`、`planReferenceFailures` 计数。
 - 交付接缝 = spec §2.1 `super-agent-trigger.applyVerdicts`（结构端口
   AdjudicationDeliveryPort，组合根直接接线）：accept/record-only →
   decision_log(would_accept) + adjudication_status=record_only，reject →
@@ -28,9 +30,20 @@ A6）；独立每日微预算（M12③）。
   `<source>:<域键>`）并记录 `mandateTier`；P2 恒隐式 record_only，执行档分流
   是 Phase 3 的事。
 - 工具面双闸（T1 零副作用锚点）：toolAllowlist（会话级 fail-closed 主闸）只放行
-  `Recall`/`GoalRead`（M3 钦定只读面，未知未来工具默认排除）；toolDisallowlist
-  （turn 级纵深，automation/off-peak sendPrompt 同型）枚举全部已知执行/副作用
-  工具。verdict JSON 之外零副作用。
+  `Recall`/`GoalRead`/`ChengInspect`/`ChengPlan`（M3 + S2 只读面，未知未来工具默认
+  排除）；toolDisallowlist（turn 级纵深，automation/off-peak sendPrompt 同型）枚举
+  全部已知执行/副作用工具，并显式禁用 ChengGenerate/ChengVerify/ChengExplain。
+  verdict JSON 之外零副作用。ChengInspect/ChengPlan 已注册为 core 只读工具。
+  **前台 `create-app` 已切到 `createToolAdjudicationSession`**：每批一个隔离 AgentRuntime，
+  按 allowlist 过滤 tool contracts，模型 toolCalls 复核后执行并把结果回灌。daemon headless
+  在 `ZCODE_CHENG_ROOT`/host entry 在场时走同一 tool-loop（只读 Cheng host 端口），
+  否则保持 `createRuntimeAdjudicationSession` 的 `tools=[]` model-only——host 缺席是
+  能力缺席，此时 plan 引用无回执可命中并 fail-closed 降级。
+- verdict 可选 `chengPlanId`：非空字符串才合法；前台 tool-loop 把实际执行的
+  `ChengPlan` 回执收进 `AdjudicationModelSessionResult.chengPlanReceipts`（成功且
+  输出 `status=ok`；planId 由入参 jobId 派生），驱动器逐条比对。命中才允许执行，
+  并在同一事务落 `trigger_events.cheng_plan_id`（migration 0006）与
+  `decision_log.cheng_plan_id`（migration 0005）；未命中不写引用列、整批 record-only。
 - 前台隔离（A6）：modelTier=`adjudicator` 轻量档 pin + scheduling=
   `background-low-priority` 低优先/错峰槽，裁决批不占前台首 token 延迟。
 - 微预算（M12③）：`recordUsage` 按 workspace×UTC 日换桶，耗尽 → 不调模型、

@@ -61,7 +61,7 @@ const SPEC_RESTRICTED_OUTBOUND_DISALLOWED_TOOLS = [
   "Agent", "Task", "Workflow", "CreateWorkflow", "AmendWorkflow", "ResumeWorkflowRun",
   "CronCreate", "CronUpdate", "CronDelete", "OffPeakCreate",
   // goal 层续跑会派生未来的自主 run（同样绕过 verdict 前零出站）。
-  "GoalCreate", "GoalUpdate", "GoalBlock",
+  "GoalCreate", "GoalUpdate", "GoalBlock", "GoalChengBind",
   // mcp__* 前缀规则：动态 MCP 名（任意 server 可出站）精确表覆盖不了，必须前缀剔除。
   // 同时进 disallowedTools——tools:["*"] 展开路径（resolveSubagentToolAllowlist）只吃这份规则。
   "mcp__*",

@@ -2,6 +2,7 @@ import {
   type GoalHintSource,
   type GoalStateSource,
   type NoProgressAdjudicator,
+  type NotifyUserContext,
   type SuperAgentWatchdogConfig,
   type SuperAgentWatchdogContract,
   type TickReport,
@@ -45,6 +46,8 @@ export interface WatchdogDeps {
   now?: () => number;
   /** 观测钩子（组合根挂日志/遥测；不承载状态）。 */
   onTick?: (report: TickReport) => void;
+  /** 跨进程 projection 刷新（automation 行由 services 写共享库）；每个 tick 探针前调用。 */
+  refreshRuns?: () => void;
 }
 
 /**
@@ -62,6 +65,8 @@ export class SuperAgentWatchdog implements SuperAgentWatchdogContract {
   private inFlight: Promise<TickReport> | undefined;
   private consecutiveRepairFailures = 0;
   private lastEscalationAt: number | undefined;
+  /** 最近一次 repair 的路由事实；熔断升级 notify 复用它定位 owner session。 */
+  private lastNotifyContext: NotifyUserContext | undefined;
   private readonly repairLastFiredAt = new Map<string, number>();
   private readonly progressState: ProgressCheckState = {
     zeroProgressStreak: 0,
@@ -160,6 +165,7 @@ export class SuperAgentWatchdog implements SuperAgentWatchdogContract {
   }
 
   private async tickOnce(at: number): Promise<TickReport> {
+    this.deps.refreshRuns?.();
     const rows = this.registry.list();
     const probes = runProbes({
       now: at,
@@ -248,6 +254,10 @@ export class SuperAgentWatchdog implements SuperAgentWatchdogContract {
   ): Promise<WatchdogRepairRecord | undefined> {
     const row = this.registry.get(target.id);
     const workspaceKey = row?.workspaceKey;
+    this.lastNotifyContext = {
+      ownerSession: row?.ownerSession,
+      workspaceKey,
+    };
     const result = await executeRepair(this.deps.commands, action, {
       id: target.id,
       row,
@@ -281,7 +291,11 @@ export class SuperAgentWatchdog implements SuperAgentWatchdogContract {
     }
     // 升级 = pause goal（既有 goal 命令面）+ notify 升级信道。
     const failureCount = this.consecutiveRepairFailures;
-    const goalId = this.deps.goalState?.read()?.goalId;
+    const goalSource = this.deps.goalState;
+    const goalSnapshot = goalSource?.readAsync
+      ? await goalSource.readAsync()
+      : goalSource?.read();
+    const goalId = goalSnapshot?.goalId;
     let goalPaused = false;
     let notified = false;
     if (goalId) {
@@ -295,6 +309,7 @@ export class SuperAgentWatchdog implements SuperAgentWatchdogContract {
       goalId
         ? `看门狗升级：连续 ${failureCount} 次 repair 失败，已暂停 goal ${goalId}`
         : `看门狗升级：连续 ${failureCount} 次 repair 失败（goal 状态端口缺席，无法定位 goal）`,
+      this.lastNotifyContext,
     );
     notified = notifyResult.ok;
     this.lastEscalationAt = at;

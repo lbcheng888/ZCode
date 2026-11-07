@@ -42,6 +42,7 @@ import { skillToolEntry } from "./skill.js";
 import { todoReadToolEntry, todoWriteToolEntry } from "./todo.js";
 import {
   goalBlockToolEntry,
+  goalChengBindToolEntry,
   goalCreateToolEntry,
   goalUpdateToolEntry,
 } from "./target.js";
@@ -49,6 +50,7 @@ import {
   cronCreateToolEntry,
   cronDeleteToolEntry,
   cronListToolEntry,
+  cronPauseSelfToolEntry,
   cronUpdateToolEntry,
 } from "./cron.js";
 import { offPeakCreateToolEntry, offPeakListToolEntry } from "./off-peak.js";
@@ -68,6 +70,7 @@ import { taskOutputToolEntry } from "./task-output.js";
 import { taskStopToolEntry } from "./task-stop.js";
 import { readSessionContextToolEntry } from "./read-session-context.js";
 import { recallToolEntry } from "./recall.js";
+import { chengExplainToolEntry, chengInspectToolEntry, chengPlanToolEntry, chengVerifyToolEntry } from "./cheng.js";
 import { amendWorkflowToolEntry } from "./amend-workflow.js";
 import { createWorkflowToolEntry } from "./create-workflow.js";
 import { saveWorkflowToolEntry } from "./save-workflow.js";
@@ -101,10 +104,12 @@ export const builtInTools: ToolEntry[] = [
   goalCreateToolEntry,
   goalUpdateToolEntry,
   goalBlockToolEntry,
+  goalChengBindToolEntry,
   cronCreateToolEntry,
   cronListToolEntry,
   cronUpdateToolEntry,
   cronDeleteToolEntry,
+  cronPauseSelfToolEntry,
   offPeakCreateToolEntry,
   offPeakListToolEntry,
   enterPlanModeToolEntry,
@@ -124,6 +129,12 @@ export const builtInTools: ToolEntry[] = [
   // M9 引用图链式召回：与 ReadSessionContext 同档的常驻只读发现面（ToolSearch 下非
   // resident）。裁决回合与 worker 都可用——只读、scope 过滤，没有可关的门。
   recallToolEntry,
+  // Cheng 数据面的只读发现面：Inspect/Verify/Explain/Plan 只消费已有 jobId，端口缺席即
+  // capability_absent。与 Recall 同档的只读、无 gate；defer 到 ToolSearch 之后按需出现。
+  chengInspectToolEntry,
+  chengVerifyToolEntry,
+  chengExplainToolEntry,
+  chengPlanToolEntry,
   replyToChannelToolEntry,
   agentToolEntry,
   taskToolEntry,
@@ -135,8 +146,10 @@ export const builtInTools: ToolEntry[] = [
   saveWorkflowToolEntry,
   // workflow 创作的实验通道：同步、只读（v1）、完全瞬态。
   evalWorkflowSnippetToolEntry,
-  // run 内省的两个只读工具：always-on、无 gate。它们不进 WORKFLOW_CHILD_DISALLOWED_TOOLS——
-  // 那条禁令的理由是 CreateWorkflow 的 alwaysAsk 在子 runtime 里无窗可弹，只读查询不适用。
+  // run 内省的两个只读工具：主会话 always-on、无 gate。它们不进 WORKFLOW_CHILD_DISALLOWED_TOOLS——
+  // 那条禁令的理由是 CreateWorkflow 的 alwaysAsk 在子 runtime 里无窗可弹，只读查询不适用；但子
+  // runtime 不持有 run 端口，它们在那里必然失败，所以按另一条规则从子 runtime 移除
+  // （runtime/helpers/tool-allowlist.ts 的 RUN_INTROSPECTION_TOOLS）。
   listWorkflowRunsToolEntry,
   getWorkflowRunToolEntry,
   // run 的恢复入口：与上面两个只读内省工具同族（run_id 键、端口探测失败同款），但它是
@@ -197,6 +210,7 @@ const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set([
   goalCreateToolEntry.metadata.name,
   goalUpdateToolEntry.metadata.name,
   goalBlockToolEntry.metadata.name,
+  goalChengBindToolEntry.metadata.name,
 ]);
 
 interface RegisterBuiltInToolsOptions {
@@ -206,7 +220,7 @@ interface RegisterBuiltInToolsOptions {
   includeSendMessage?: boolean;
   includeRespondToCoordinator?: boolean;
   includeSubmitResult?: boolean;
-  /** goal 灰度旗（goalLayerEnabled）。只有显式 true 才注册 GoalCreate/GoalUpdate/GoalBlock。 */
+  /** goal 灰度旗（goalLayerEnabled）。只有显式 true 才注册 GoalCreate/GoalUpdate/GoalBlock/GoalChengBind。 */
   includeGoalTools?: boolean;
   /**
    * 在场时 submit_result 以 typed 声明注册（`{ result: <schema> }`，strict 资格），供 dwf mono
@@ -289,7 +303,8 @@ export function registerBuiltInTools(
       (entry.metadata.name === "CronCreate" ||
         entry.metadata.name === "CronList" ||
         entry.metadata.name === "CronUpdate" ||
-        entry.metadata.name === "CronDelete") &&
+        entry.metadata.name === "CronDelete" ||
+        entry.metadata.name === "CronPauseSelf") &&
       options.includeAutomation !== true
     ) {
       continue;

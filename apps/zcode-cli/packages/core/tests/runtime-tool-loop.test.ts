@@ -53,6 +53,7 @@ import type {
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
 import { MessageHistoryImpl } from "../src/agent/message-history.js";
 import { hydrateMessageHistoryFromSession } from "../src/agent/session-history-hydrator.js";
+import { buildProviderRequestMessages } from "../src/runtime/helpers/provider-request-messages.js";
 import { DEFAULT_MODEL_REQUEST_MEDIA_BUDGET_BYTES } from "../src/runtime/helpers/media-budget.js";
 import { MAX_TURN_STEER_INPUT_BYTES } from "../src/runtime/helpers/steering.js";
 import { projectIdFromDirectory } from "../src/runtime/helpers/project.js";
@@ -63,6 +64,7 @@ import {
 import { InMemoryRuntimeTaskRegistry } from "../src/runtime-task/registry.js";
 import { createToolRegistry } from "../src/tool/registry.js";
 import { BackgroundTaskTracker } from "../src/tool/executor/background-tasks.js";
+import { formatReadBatchNotice } from "../src/tool/handlers/read-text.js";
 import type { ToolExecutionContext } from "../src/tool/types.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
 import { START_PLAN_BUSY_AUTO_RETRY_EXHAUSTED_MESSAGE } from "../src/runtime/methods/streaming-recovery.js";
@@ -3192,6 +3194,110 @@ describe("AgentRuntime tool loop", () => {
     });
   });
 
+  it("injects a compact ChengPlan route card into the goal continuation prompt", async () => {
+    const sessionId = createSessionId("runtime-target-cheng-plan-card");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    let capturedMessages: Array<{ role: string; content: unknown }> = [];
+    const planCard = {
+      planId: "cheng-plan://job-1",
+      runId: "m5-run-1",
+      frontier: {
+        stage: "spec",
+        target: "p02_min2",
+        evidence: ["jobId:job-1", "settle_not_solved"],
+      },
+      recommended: { action: "fix_spec", target: "p02_min2" },
+      evidenceRefs: ["jobId:job-1", "settle_not_solved", "gate:blocked"],
+    };
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target-card" },
+      {
+        eventStore,
+        sessionStore,
+        goalContinuationChengPlan: async () => planCard,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            capturedMessages = withoutAgentListingMessages(request.messages);
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "continued with plan",
+              usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await runtime.recordExternalUserPrompt("Ship target");
+    await sessionStore.setTarget({ objective: "Ship target", sessionID: sessionId });
+    await runtime.continueActiveTargetIfIdle({ inputId: "client-target-plan-card" });
+
+    const continuationText = capturedMessages
+      .map((message) => providerContentToText(message.content))
+      .find((content) => content.includes("ChengPlan route card"));
+    expect(continuationText).toBeDefined();
+    expect(continuationText).toContain("plan_id: cheng-plan://job-1");
+    expect(continuationText).toContain("run_id: m5-run-1");
+    expect(continuationText).toContain("frontier: spec@p02_min2");
+    expect(continuationText).toContain("recommended: fix_spec@p02_min2");
+    expect(continuationText).toContain(
+      "evidence_refs: jobId:job-1 | settle_not_solved | gate:blocked",
+    );
+    expect(continuationText).not.toContain("expectedGain");
+  });
+
+  it("continues the goal round with the red Cheng gate reasons as the next action", async () => {
+    const sessionId = createSessionId("runtime-target-cheng-gate-red-continue");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    let capturedMessages: Array<{ role: string; content: unknown }> = [];
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-gate-red" },
+      {
+        eventStore,
+        sessionStore,
+        targetCompletionChengGate: async () => ({
+          ok: false,
+          level: "BLOCKED",
+          reasons: ["settle_not_solved"],
+        }),
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            capturedMessages = withoutAgentListingMessages(request.messages);
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "continued after red gate",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await runtime.recordExternalUserPrompt("Ship target");
+    await sessionStore.setTarget({ objective: "Ship target", sessionID: sessionId });
+    const result = await runtime.continueActiveTargetIfIdle({
+      inputId: "client-target-gate-red",
+      verifyBeforeContinue: true,
+    });
+
+    expect(result?.response).toBe("continued after red gate");
+    const continuationText = capturedMessages
+      .map((message) => providerContentToText(message.content))
+      .join("\n");
+    expect(continuationText).toContain(
+      "Next action: Cheng gate blocked: settle_not_solved. Inspect the run evidence, fix the failing gate, then re-verify.",
+    );
+    const stored = await sessionStore.readTarget({ sessionID: sessionId });
+    expect(stored).toMatchObject({ status: "active" });
+  });
+
   it("runs the last budgeted goal turn fully, then a vetoed outcome turn after the flip", async () => {
     const sessionId = createSessionId("runtime-target-turn-budget-outcome");
     const eventStore = createTestSessionEventStore();
@@ -5603,6 +5709,105 @@ describe("AgentRuntime tool loop", () => {
     expect(requestText).not.toContain(objective);
   });
 
+  it.each([
+    { mcs: false, taskType: undefined },
+    { mcs: true, taskType: undefined },
+    { mcs: true, taskType: "subagent_child" as const },
+  ])(
+    "collects and restores silent reminders only for main continuations %j",
+    async ({ mcs, taskType }) => {
+      const sessionId = createSessionId("runtime-silent-reminder");
+      const sessionStore = new RecordingSessionStore();
+      const registry = createToolRegistry();
+      registry.register({
+        inputSchema: {},
+        metadata: {
+          name: "Inspect",
+          concurrentSafe: true,
+          destructive: false,
+          needsApproval: false,
+          readOnly: true,
+          riskLevel: "low",
+          sideEffectScope: "none",
+        },
+        handler: async () => "inspection result",
+      });
+      const requests: any[][] = [];
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        {
+          mode: "yolo",
+          taskType,
+          maxTurns: 30,
+          workingDirectory: "/tmp/silent-reminder-test",
+        },
+        {
+          eventStore: createTestSessionEventStore(),
+          sessionStore,
+          toolRegistry: registry,
+          modelFactory: createTestModelFactory({
+            properties: { supportsMidConversationSystem: mcs },
+            async generateText(request) {
+              requests.push(request.messages);
+              const step = requests.length;
+              return {
+                finishReason: step <= 20 ? "tool-calls" : "stop",
+                text: step <= 20 ? "" : "Finished inspection.",
+                toolCalls:
+                  step <= 20 ? [{ id: `inspect-${step}`, name: "Inspect", input: { step } }] : [],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          }),
+        },
+      );
+      await runtime.executeTurn("Inspect the code");
+      expect(requests).toHaveLength(21);
+      const marker = "The user hasn't heard from you in a while.";
+      const reminderCounts = requests.map(
+        (messages) => providerMessagesToText(messages).split(marker).length - 1,
+      );
+      expect(reminderCounts).toEqual(
+        Array.from({ length: 21 }, (_, index) =>
+          taskType ? 0 : Math.min(3, Math.floor(index / 5)),
+        ),
+      );
+      // 静默提醒在 MCS 开启时投影为 system 消息。
+      expect(
+        requests
+          .flat()
+          .filter((message) => message.role === "system")
+          .some((message) => providerContentToText(message.content).includes(marker)),
+      ).toBe(mcs && !taskType);
+      const persisted = await sessionStore.messages({ sessionID: sessionId });
+      const notices = persisted
+        .flatMap((message) => message.parts)
+        .filter(
+          (part) =>
+            part.type === "text" &&
+            part.metadata?.runtimeMessage?.source === "silent_turn_reminder",
+        );
+      expect(notices).toHaveLength(taskType ? 0 : 3);
+      expect(
+        notices.every(
+          (part) =>
+            part.type === "text" && part.synthetic && !part.text.includes("<system-reminder>"),
+        ),
+      ).toBe(true);
+      const restored = new MessageHistoryImpl();
+      await hydrateMessageHistoryFromSession({ history: restored, messages: persisted });
+      expect(
+        restored
+          .borrowReadOnlyRuntimeEntries()
+          .filter((entry) => entry.metadata?.source === "silent_turn_reminder"),
+      ).toHaveLength(taskType ? 0 : 3);
+      await runtime.executeTurn("New user request");
+      expect(providerMessagesToText(requests.at(-1)!).split(marker).length - 1).toBe(
+        taskType ? 0 : 3,
+      );
+    },
+  );
+
   it("does not inject todo reminders before the cadence threshold", async () => {
     const sessionId = createSessionId("runtime-todo-current-turn-context");
     const eventStore = createTestSessionEventStore();
@@ -6074,7 +6279,7 @@ describe("AgentRuntime tool loop", () => {
     expect(persistedTodoReminders).toHaveLength(0);
   });
 
-  it("keeps output style reminders in runtime history without persisting them", async () => {
+  it("persists output style reminders like other input attachments", async () => {
     const sessionId = createSessionId("runtime-output-style-in-memory-history");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -6120,10 +6325,11 @@ describe("AgentRuntime tool loop", () => {
 
     expect(firstRequestText.match(/Learning output style is active/g)).toHaveLength(1);
     expect(secondRequestText.match(/Learning output style is active/g)).toHaveLength(2);
-    expect(persistedTexts).not.toContain("Learning output style is active");
+    // output_style 与其他输入附件一样写入历史，resume 后前缀不变。
+    expect(persistedTexts.match(/Learning output style is active/g)).toHaveLength(2);
   });
 
-  it("does not duplicate output style reminders across model requests in the same turn", async () => {
+  it("repeats the output style reminder on every input attachment run in a turn", async () => {
     const sessionId = createSessionId("runtime-output-style-single-per-turn");
     const eventStore = createTestSessionEventStore();
     const registry = createToolRegistry();
@@ -6182,7 +6388,8 @@ describe("AgentRuntime tool loop", () => {
     await runtime.executeTurn("read marker with style");
 
     const secondRequestText = providerMessagesToText(requests[1]!);
-    expect(secondRequestText.match(/Learning output style is active/g)).toHaveLength(1);
+    // 每次附件收集都产出 output_style，不去重；工具批次后的请求因此有两条。
+    expect(secondRequestText.match(/Learning output style is active/g)).toHaveLength(2);
   });
 
   it("uses hydrated todo reminder metadata to avoid duplicate cadence reminders after resume", async () => {
@@ -6355,7 +6562,13 @@ describe("AgentRuntime tool loop", () => {
       (message: any) => message.role === "user",
     );
     const verifierLastMessage = requests[1]?.messages.at(-1);
-    expect(verifierUserMessages).toHaveLength(2);
+    // verifier 复用共享投影：持久化的 environment/model/date 公告以 reminder 出现，
+    // 只核对原始输入与 verifier 指令这两条正文。
+    expect(
+      verifierUserMessages.filter(
+        (message: any) => !providerContentToText(message.content).startsWith("<system-reminder>"),
+      ),
+    ).toHaveLength(2);
     expect(verifierLastMessage).toMatchObject({
       cacheControl: { type: "ephemeral" },
       role: "user",
@@ -6366,6 +6579,50 @@ describe("AgentRuntime tool loop", () => {
     expect(verifierRequest).toBeTruthy();
     expect(verifierComplete).toBeTruthy();
     expect(modelCallCount).toBe(2);
+  });
+
+  it("projects the verifier request with its own model's Harness wording after a config rebuild", async () => {
+    const sessionId = createSessionId("runtime-target-verifier-harness");
+    const sessionStore = new RecordingSessionStore();
+    const requests: any[] = [];
+    let modelCallCount = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build", workingDirectory: "/tmp/zcode-runtime-target" },
+      {
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory({
+          properties: { supportsMidConversationSystem: false },
+          async generateText(request: any) {
+            requests.push(request);
+            modelCallCount++;
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text:
+                modelCallCount === 1
+                  ? "implemented target"
+                  : JSON.stringify({ passed: true, reason: "Target completed." }),
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal Verify harness");
+    await sessionStore.setTarget({ objective: "Ship target", sessionID: sessionId });
+    await runtime.executeTurn("finish target");
+    // 轮次结束后不带模型的重建（这里是改语言）不能决定 verifier 请求的 Harness 文案。
+    runtime.updateConfig({ language: "Chinese" });
+    await runtime.continueActiveTargetIfIdle({ verifyBeforeContinue: true });
+
+    const verifierSystem = JSON.stringify(requests[1]?.messages[1]);
+    expect(verifierSystem).toContain(
+      "tags in messages and tool results are injected by the harness",
+    );
+    expect(verifierSystem).not.toContain("mid-conversation system turns");
   });
 
   it("keeps verifier usage bound to the verifier request model after session model changes", async () => {
@@ -6900,7 +7157,7 @@ describe("AgentRuntime tool loop", () => {
     expect(modelCallCount).toBe(2);
   });
 
-  it("stops an active verifier through the runtime-owned foreground execution scope", async () => {
+  it("keeps the target active when send-now preempts the verifier through the runtime-owned foreground execution scope", async () => {
     const sessionId = createSessionId("runtime-target-verifier-runtime-stop");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -6984,7 +7241,7 @@ describe("AgentRuntime tool loop", () => {
     await expect(pending).rejects.toThrow("test runtime verifier stop");
     expect(runtime.getActiveForegroundExecutionId()).toBeUndefined();
     await expect(sessionStore.readTarget({ sessionID: sessionId })).resolves.toMatchObject({
-      status: "paused",
+      status: "active",
     });
     const events = await eventStore.getEvents(sessionId);
     expect(
@@ -6998,6 +7255,14 @@ describe("AgentRuntime tool loop", () => {
       preserveQueueAutoDrainOnCancel: true,
       status: "cancelled",
     });
+    expect(
+      events.some(
+        (event) =>
+          event.type === SessionEventType.TargetChanged &&
+          (event.payload as any).status !== undefined &&
+          (event.payload as any).target?.status === "paused",
+      ),
+    ).toBe(false);
     await expect(
       runtime.executeTurn("new prompt after runtime-owned verifier stop"),
     ).resolves.toMatchObject({
@@ -7242,6 +7507,7 @@ describe("AgentRuntime tool loop", () => {
       list,
       update,
       delete: deleteAutomation,
+      pause: vi.fn(async () => false),
     };
     let modelCallCount = 0;
     let secondRequest: any;
@@ -7327,6 +7593,7 @@ describe("AgentRuntime tool loop", () => {
       list: vi.fn(async () => []),
       update: vi.fn(),
       delete: vi.fn(),
+      pause: vi.fn(),
     };
     let modelCallCount = 0;
     const runtime = createTestAgentRuntime(
@@ -7343,7 +7610,7 @@ describe("AgentRuntime tool loop", () => {
                 request.tools
                   .map((tool: { name: string }) => tool.name)
                   .filter((name: string) => name.startsWith("Cron")),
-              ).toEqual(["CronList"]);
+              ).toEqual(["CronList", "CronPauseSelf"]);
               // 模拟 provider 无视声明工具面，直接返回三种 mutation tool call。
               return {
                 finishReason: "tool-calls",
@@ -7408,6 +7675,131 @@ describe("AgentRuntime tool loop", () => {
           error: expect.objectContaining({ type: CoreErrorType.PermissionDenied }),
         }),
       ]),
+    );
+  });
+
+  it("automation turn 的 CronPauseSelf 只暂停 Host 准入注入的本轮 automationId", async () => {
+    const sessionId = createSessionId("runtime-automation-pause-self");
+    const eventStore = createTestSessionEventStore();
+    const automationPort: AutomationPort = {
+      create: vi.fn(),
+      list: vi.fn(async () => []),
+      update: vi.fn(),
+      delete: vi.fn(),
+      pause: vi.fn(async () => true),
+    };
+    let modelCallCount = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build" },
+      {
+        automationPort,
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            modelCallCount++;
+            if (modelCallCount === 1) {
+              expect(request.tools.map((tool: { name: string }) => tool.name)).toContain(
+                "CronPauseSelf",
+              );
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [{ id: "pause-self", input: {}, name: "CronPauseSelf" }],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "paused",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        permissionBroker: {
+          async requestPermission() {
+            return { decision: "allow" };
+          },
+        },
+      },
+    );
+
+    await runtime.executeTurn("stop when the condition is met", undefined, {
+      automationId: "automation-1",
+      toolDisallowlist: ["CronCreate", "CronUpdate", "CronDelete"],
+    });
+
+    // 暂停目标只能是 loop state 的 automationId，模型输入为空对象。
+    expect(automationPort.pause).toHaveBeenCalledTimes(1);
+    expect(automationPort.pause).toHaveBeenCalledWith({ id: "automation-1" });
+    const errors = (await eventStore.getEvents(sessionId)).filter(
+      (event) => event.type === SessionEventType.ToolCallError,
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it("普通用户轮即使 provider 直接提交 CronPauseSelf 也由 handler 拒绝且不调用端口", async () => {
+    const sessionId = createSessionId("runtime-user-turn-pause-self-guard");
+    const eventStore = createTestSessionEventStore();
+    const automationPort: AutomationPort = {
+      create: vi.fn(),
+      list: vi.fn(async () => []),
+      update: vi.fn(),
+      delete: vi.fn(),
+      pause: vi.fn(async () => true),
+    };
+    let modelCallCount = 0;
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "build" },
+      {
+        automationPort,
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            modelCallCount++;
+            if (modelCallCount === 1) {
+              // 普通用户轮没有本轮 automationId，provider 工具面不得出现 CronPauseSelf。
+              expect(request.tools.map((tool: { name: string }) => tool.name)).not.toContain(
+                "CronPauseSelf",
+              );
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [{ id: "pause-self-blocked", input: {}, name: "CronPauseSelf" }],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        permissionBroker: {
+          async requestPermission() {
+            return { decision: "allow" };
+          },
+        },
+      },
+    );
+
+    await runtime.executeTurn("pause my automation");
+
+    expect(automationPort.pause).not.toHaveBeenCalled();
+    const errors = (await eventStore.getEvents(sessionId)).filter(
+      (event) => event.type === SessionEventType.ToolCallError,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.payload).toEqual(
+      expect.objectContaining({
+        error: expect.objectContaining({ type: CoreErrorType.PermissionDenied }),
+      }),
     );
   });
 
@@ -8655,6 +9047,48 @@ describe("AgentRuntime tool loop", () => {
     expect((await runtime.getProjection()).pendingSteerInputs).toEqual([]);
   });
 
+  it("collects input attachments again for a text-only guide continuation", async () => {
+    const sessionId = createSessionId("runtime-guide-text-only-attachments");
+    let runtime: AgentRuntime;
+    const requests: unknown[] = [];
+
+    runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "build",
+        outputStyle: { name: "Learning", prompt: "Explain tradeoffs while solving the task." },
+      },
+      {
+        eventStore: createTestSessionEventStore(),
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(request.messages);
+            if (requests.length === 1) {
+              const activeTurn = runtime.getActiveTurnInfo();
+              await runtime.steerTurn({
+                expectedTurnId: activeTurn?.turnId,
+                input: "guide without a tool boundary",
+                delivery: "guide",
+              });
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "text-only completion",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await runtime.executeTurn("finish without tools");
+
+    expect(requests).toHaveLength(2);
+    // 文本回复后续上的 guide 是新输入，和工具批次之后一样收集输入附件。
+    expect(JSON.stringify(requests[1]).match(/Learning output style is active/g)).toHaveLength(2);
+  });
+
   it("does not inline-drain an ordinary queue item at a text-only model boundary", async () => {
     const sessionId = createSessionId("runtime-ordinary-queue-not-inline-drained");
     const eventStore = createTestSessionEventStore();
@@ -8945,14 +9379,14 @@ describe("AgentRuntime tool loop", () => {
     ]);
   });
 
-  it("drains multiple guides one per completed tool batch with distinct query ids", async () => {
+  it("drains all waiting guides together after the next completed tool batch", async () => {
     const sessionId = createSessionId("runtime-turn-steer-query-queue");
     const eventStore = createTestSessionEventStore();
     const registry = createToolRegistry();
     let runtime: AgentRuntime;
     let modelCallCount = 0;
     const requestQueryIds: Array<string | undefined> = [];
-    const lastUserContents: string[] = [];
+    const trailingUserTexts: string[][] = [];
 
     registry.register({
       inputSchema: {},
@@ -8978,10 +9412,14 @@ describe("AgentRuntime tool loop", () => {
           async generateText(request: any, observation) {
             modelCallCount++;
             requestQueryIds.push(observation.invocationContext?.traceContext?.queryId);
-            const lastUserMessage = [...withoutAgentListingMessages(request.messages)]
-              .reverse()
-              .find((message) => message.role === "user");
-            lastUserContents.push(String(lastUserMessage?.content ?? ""));
+            const messages = withoutAgentListingMessages(request.messages);
+            const lastResult = messages.findLastIndex((message: any) => message.role === "tool");
+            trailingUserTexts.push(
+              messages
+                .slice(lastResult + 1)
+                .filter((message: any) => message.role === "user")
+                .map((message: any) => String(message.content)),
+            );
             if (modelCallCount === 1) {
               const activeTurn = runtime.getActiveTurnInfo();
               expect(activeTurn?.steerable).toBe(true);
@@ -9012,24 +9450,16 @@ describe("AgentRuntime tool loop", () => {
               };
             }
 
-            return modelCallCount === 2
-              ? {
-                  finishReason: "tool-calls",
-                  providerMetadata: undefined,
-                  text: "",
-                  toolCalls: [{ id: "guide-boundary-2", name: "GuideBoundary", input: {} }],
-                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-                }
-              : {
-                  finishReason: "stop",
-                  providerMetadata: undefined,
-                  text: "answer after second queued follow-up",
-                  usage: {
-                    inputTokens: 1,
-                    outputTokens: 1,
-                    totalTokens: 2,
-                  },
-                };
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "answer after both queued follow-ups",
+              usage: {
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+            };
           },
         } as never),
       },
@@ -9044,24 +9474,415 @@ describe("AgentRuntime tool loop", () => {
       (event) => event.type === SessionEventType.TurnSteerDrained,
     );
 
-    expect(result.response).toBe("answer after second queued follow-up");
-    expect(requestQueryIds).toEqual([
-      "query_original_request",
-      "query_first_steer",
-      "query_second_steer",
-    ]);
-    expect(lastUserContents).toEqual([
-      "original request",
-      "first queued follow-up",
-      "second queued follow-up",
-    ]);
-    expect(drainedEvents.map((event) => (event.payload as any).queryIds)).toEqual([
+    expect(result.response).toBe("answer after both queued follow-ups");
+    // 同一边界一次取出全部已等待的 guide；下一次请求归因到最后一条的 query。
+    expect(requestQueryIds).toEqual(["query_original_request", "query_second_steer"]);
+    // 默认测试模型不合并相邻 user 内容，不补换行。
+    expect(trailingUserTexts[1]).toEqual(["first queued follow-up", "second queued follow-up"]);
+    // 一起取出，但每条各自落库并各发一个 drained 事件。
+    const drainedPayloads = drainedEvents.map((event) => event.payload as any);
+    expect(drainedPayloads.map((payload) => payload.queryIds)).toEqual([
       ["query_first_steer"],
       ["query_second_steer"],
+    ]);
+    expect(drainedPayloads.map((payload) => payload.injectedMessageIds)).toEqual([
+      [expect.any(String)],
+      [expect.any(String)],
     ]);
     // 普通 active-turn steer 不需要显式 source；缺省即表示普通 guided steer。
     expect(queuedEvents.every((event) => !("source" in event.payload))).toBe(true);
     expect(drainedEvents.every((event) => !("sources" in event.payload))).toBe(true);
+  });
+
+  it.each([true, false])(
+    "keeps each guide's page state next to it when guides drain together, live and cold (MCS=%s)",
+    async (mcs) => {
+      const sessionId = createSessionId(`runtime-guide-gen-ui-pairing-${mcs}`);
+      const sessionStore = new RecordingSessionStore();
+      const registry = createToolRegistry();
+      let runtime: AgentRuntime;
+      let modelCallCount = 0;
+      let continuationMessages: any[] = [];
+      // guide 和页面状态带 mk: 标记，按出现顺序比较位置。
+      const guideMarkers = (messages: readonly unknown[]) =>
+        [...JSON.stringify(messages).matchAll(/mk:(st[a-z]+-\d)/g)].map((match) => match[1]);
+      const steerWithPageState = (input: string, state: string) =>
+        runtime.steerTurn({
+          delivery: "guide",
+          expectedTurnId: runtime.getActiveTurnInfo()?.turnId,
+          input,
+          // 与 App 发送 guide 的路径相同（input-facade 标为 user_steer）。
+          inputPresentation: "user_steer",
+          intent: { genUiContext: [{ path: "/workspace/gen-ui/widget.html", state }] },
+        });
+
+      registry.register({
+        inputSchema: {},
+        metadata: {
+          concurrentSafe: true,
+          destructive: false,
+          name: "GuideBoundary",
+          needsApproval: false,
+          readOnly: true,
+          riskLevel: "low",
+          sideEffectScope: "none",
+        },
+        handler: async () => "tool boundary complete",
+      });
+
+      runtime = createTestAgentRuntime(
+        sessionId,
+        { mode: "yolo" },
+        {
+          eventStore: createTestSessionEventStore(),
+          sessionStore,
+          toolRegistry: registry,
+          modelFactory: createTestModelFactory({
+            properties: { supportsMidConversationSystem: mcs },
+            async generateText(request: any) {
+              modelCallCount++;
+              if (modelCallCount === 1) {
+                // 工具运行期间，用户在两个不同的页面状态下各发一条消息；同一边界一起取出。
+                await steerWithPageState("mk:steer-1", "mk:state-1");
+                await steerWithPageState("mk:steer-2", "mk:state-2");
+                return {
+                  finishReason: "tool-calls",
+                  providerMetadata: undefined,
+                  text: "",
+                  toolCalls: [{ id: "guide-boundary-1", name: "GuideBoundary", input: {} }],
+                  usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                };
+              }
+              continuationMessages = withoutAgentListingMessages(request.messages);
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "answered both",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          } as never),
+        },
+      );
+
+      await runtime.executeTurn("original request");
+      // MCS 下两条 guide 合成一条 system，状态都在它之前的 user 侧；MCS 关时每个状态紧跟它的 guide。
+      const expected = mcs
+        ? ["state-1", "state-2", "steer-1", "steer-2"]
+        : ["steer-1", "state-1", "steer-2", "state-2"];
+      expect(modelCallCount).toBe(2);
+      expect(guideMarkers(continuationMessages)).toEqual(expected);
+
+      // 冷恢复从同一份输入快照派生状态，请求里的顺序与 live 相同。
+      const restored = new MessageHistoryImpl();
+      await hydrateMessageHistoryFromSession({
+        history: restored,
+        messages: await sessionStore.messages({ sessionID: sessionId }),
+      });
+      const coldMessages = buildProviderRequestMessages({
+        entries: restored.borrowReadOnlyRuntimeEntries(),
+        useMidConversationSystem: mcs,
+      }).messages;
+      expect(guideMarkers(coldMessages)).toEqual(expected);
+    },
+  );
+
+  it.each([true, false])(
+    "keeps the page state of a user_steer input that opens a new turn, live and cold (MCS=%s)",
+    async (mcs) => {
+      const sessionId = createSessionId(`runtime-send-now-gen-ui-${mcs}`);
+      const sessionStore = new RecordingSessionStore();
+      let lastMessages: any[] = [];
+      const runtime = createTestAgentRuntime(
+        sessionId,
+        { mode: "yolo" },
+        {
+          eventStore: createTestSessionEventStore(),
+          sessionStore,
+          modelFactory: createTestModelFactory({
+            properties: { supportsMidConversationSystem: mcs },
+            async generateText(request: any) {
+              lastMessages = withoutAgentListingMessages(request.messages);
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "done",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            },
+          } as never),
+        },
+      );
+      const markers = (messages: readonly unknown[]) =>
+        [...JSON.stringify(messages).matchAll(/mk:([a-z-]+)/g)].map((match) => match[1]);
+
+      await runtime.executeTurn("mk:original");
+      // 旧版本的立即发送以 user_steer 开新一轮，已存会话仍是这种形式；页面状态要留在输入旁边。
+      await runtime.executeTurn("mk:send-now", undefined, {
+        inputPresentation: "user_steer",
+        intent: {
+          genUiContext: [{ path: "/workspace/gen-ui/widget.html", state: "mk:send-now-state" }],
+        },
+      } as never);
+      // 接在 text-only 回复之后，MCS 下也没有 system 锚点，降级为 user reminder，状态跟在它之后。
+      const expected = ["original", "send-now", "send-now-state"];
+      expect(markers(lastMessages)).toEqual(expected);
+
+      const restored = new MessageHistoryImpl();
+      await hydrateMessageHistoryFromSession({
+        history: restored,
+        messages: await sessionStore.messages({ sessionID: sessionId }),
+      });
+      const coldMessages = buildProviderRequestMessages({
+        entries: restored.borrowReadOnlyRuntimeEntries(),
+        useMidConversationSystem: mcs,
+      }).messages;
+      expect(markers(coldMessages)).toEqual(expected);
+    },
+  );
+
+  it("stops the guide drain at a guide reserved by send-now", async () => {
+    const sessionId = createSessionId("runtime-turn-steer-reserved-guide");
+    const eventStore = createTestSessionEventStore();
+    let runtime: AgentRuntime;
+    const trailingUserTexts: string[][] = [];
+
+    runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "yolo" },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const messages = withoutAgentListingMessages(request.messages);
+            const lastAssistant = messages.findLastIndex(
+              (message: any) => message.role === "assistant",
+            );
+            trailingUserTexts.push(
+              messages
+                .slice(lastAssistant + 1)
+                .filter((message: any) => message.role === "user")
+                .map((message: any) => String(message.content)),
+            );
+            if (trailingUserTexts.length === 1) {
+              const turnId = runtime.getActiveTurnInfo()?.turnId;
+              await runtime.steerTurn({
+                delivery: "guide",
+                expectedTurnId: turnId,
+                input: "guide a",
+              });
+              const reserved = await runtime.steerTurn({
+                delivery: "guide",
+                expectedTurnId: turnId,
+                input: "guide b reserved",
+              });
+              await runtime.steerTurn({
+                delivery: "guide",
+                expectedTurnId: turnId,
+                input: "guide c",
+              });
+              if (reserved.kind !== "queued") throw new Error("expected queued input");
+              await expect(
+                runtime.reservePendingInputById({
+                  pendingInputId: reserved.pendingInputId,
+                  reservationId: "send-now-command",
+                  traceContext: { sessionId, traceId: createTraceId("trace-reserved-guide") },
+                }),
+              ).resolves.toBe(true);
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: `step ${trailingUserTexts.length}`,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await runtime.executeTurn("original request");
+    const drainedEvents = (await eventStore.getEvents(sessionId)).filter(
+      (event) => event.type === SessionEventType.TurnSteerDrained,
+    );
+
+    // 已被 send-now 预留的 guide 归预留方提升；按 FIFO 取到它为止，后面的 guide 也不越过它。
+    expect(trailingUserTexts[1]).toEqual(["guide a"]);
+    expect(drainedEvents).toHaveLength(1);
+    expect(
+      (drainedEvents[0]!.payload as any).drainedInputs.map((input: any) => input.text),
+    ).toEqual(["guide a"]);
+  });
+
+  it("settles each drained guide before the next, so a later persistence failure keeps the earlier one and leaves the rest queued", async () => {
+    const sessionId = createSessionId("runtime-turn-steer-partial-drain");
+    const eventStore = createTestSessionEventStore();
+    // 第二条 guide 的 user message + session input promote 提交失败。
+    class FailingGuideBStore extends RecordingSessionStore {
+      override async promoteSessionInput(
+        input: Parameters<RecordingSessionStore["promoteSessionInput"]>[0],
+      ): Promise<void> {
+        if (input.parts.some((part) => part.type === "text" && part.text === "guide b")) {
+          throw new Error("injected guide b promote failure");
+        }
+        await super.promoteSessionInput(input);
+      }
+    }
+    const sessionStore = new FailingGuideBStore();
+    let runtime: AgentRuntime;
+    let modelCallCount = 0;
+    const requestTexts: string[] = [];
+
+    runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "yolo" },
+      {
+        eventStore,
+        sessionStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            modelCallCount++;
+            requestTexts.push(JSON.stringify(request.messages));
+            if (modelCallCount === 1) {
+              const turnId = runtime.getActiveTurnInfo()?.turnId;
+              for (const input of ["guide a", "guide b", "guide c"]) {
+                await runtime.steerTurn({ delivery: "guide", expectedTurnId: turnId, input });
+              }
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: `step ${modelCallCount}`,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await runtime.executeTurn("original request").catch(() => undefined);
+    const events = await eventStore.getEvents(sessionId);
+    const drainedTexts = events
+      .filter((event) => event.type === SessionEventType.TurnSteerDrained)
+      .map((event) => (event.payload as any).drainedInputs.map((input: any) => input.text));
+    const queuedIds = events
+      .filter((event) => event.type === SessionEventType.TurnSteerQueued)
+      .map((event) => (event.payload as any).pendingInputId);
+
+    // A 的记录、移出队列与 drained 事实已按条完成；B 没有提交，不进入 drained，也不再请求模型。
+    expect(drainedTexts).toEqual([["guide a"]]);
+    expect(sessionStore.promotedSessionInputIds).toEqual([queuedIds[0]]);
+    expect(modelCallCount).toBe(1);
+    // B 与之后的 C 仍在队列里（error-paused），等待用户继续。
+    expect((await runtime.getProjection()).pendingSteerInputs.map((item) => item.input)).toEqual([
+      "guide b",
+      "guide c",
+    ]);
+
+    // B 仍在队列里，下一轮请求不能已经带着它；否则继续队列时模型会看到两次。
+    await runtime.executeTurn("next request");
+    expect(requestTexts.at(-1)).toContain("guide a");
+    expect(requestTexts.at(-1)).not.toContain("guide b");
+  });
+
+  it("finishes a started guide drain when the turn is stopped mid-way, and the next turn sends a valid request", async () => {
+    const sessionId = createSessionId("runtime-turn-steer-stop-during-drain");
+    const eventStore = createTestSessionEventStore();
+    const registry = createToolRegistry();
+    let runtime: AgentRuntime;
+    // 第一条 guide 提交期间用户按停止。
+    class StopDuringGuideAStore extends RecordingSessionStore {
+      override async promoteSessionInput(
+        input: Parameters<RecordingSessionStore["promoteSessionInput"]>[0],
+      ): Promise<void> {
+        if (input.parts.some((part) => part.type === "text" && part.text === "guide a")) {
+          runtime.stopActiveForegroundExecution({ reason: "user stop" });
+        }
+        await super.promoteSessionInput(input);
+      }
+    }
+    const sessionStore = new StopDuringGuideAStore();
+    const requests: any[][] = [];
+
+    registry.register({
+      inputSchema: {},
+      metadata: {
+        concurrentSafe: true,
+        destructive: false,
+        name: "GuideBoundary",
+        needsApproval: false,
+        readOnly: true,
+        riskLevel: "low",
+        sideEffectScope: "none",
+      },
+      handler: async () => "tool boundary complete",
+    });
+
+    runtime = createTestAgentRuntime(
+      sessionId,
+      { mode: "yolo" },
+      {
+        eventStore,
+        sessionStore,
+        toolRegistry: registry,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            requests.push(withoutAgentListingMessages(request.messages));
+            if (requests.length === 1) {
+              const turnId = runtime.getActiveTurnInfo()?.turnId;
+              for (const input of ["guide a", "guide b", "guide c"]) {
+                await runtime.steerTurn({ delivery: "guide", expectedTurnId: turnId, input });
+              }
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [{ id: "guide-boundary-1", name: "GuideBoundary", input: {} }],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "next answer",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+      },
+    );
+
+    await expect(runtime.executeTurn("original request")).rejects.toMatchObject({
+      type: CoreErrorType.TurnCancelled,
+    });
+    const drainedTexts = (await eventStore.getEvents(sessionId))
+      .filter((event) => event.type === SessionEventType.TurnSteerDrained)
+      .map((event) => (event.payload as any).drainedInputs.map((input: any) => input.text));
+
+    // 已开始的取出做完整批：停止在 a 提交期间到达，b、c 仍按条提交并各有自己的 drained 事件。
+    expect(drainedTexts).toEqual([["guide a"], ["guide b"], ["guide c"]]);
+    // 停止在本批提交后生效：本轮不再请求模型，也没有 guide 退回队列。
+    expect(requests).toHaveLength(1);
+    expect((await runtime.getProjection()).pendingSteerInputs).toEqual([]);
+
+    // 下一轮照常：tool call 后紧跟它的结果，之后依次是三条 guide、中断标记与新输入。
+    await expect(runtime.executeTurn("next request")).resolves.toMatchObject({
+      response: "next answer",
+    });
+    const next = requests.at(-1)!;
+    const toolCallIndex = next.findIndex(
+      (message: any) =>
+        message.role === "assistant" &&
+        message.toolCalls?.some((call: any) => call.id === "guide-boundary-1"),
+    );
+    expect(toolCallIndex).toBeGreaterThan(-1);
+    expect(next[toolCallIndex + 1]?.role).toBe("tool");
+    expect(
+      next
+        .slice(toolCallIndex + 2)
+        .filter((message: any) => message.role === "user")
+        .map((message: any) => providerContentToText(message.content)),
+    ).toEqual(["guide a", "guide b", "guide c", "[Request interrupted by user]", "next request"]);
   });
 
   it("rejects steering when the expected turn id is stale", async () => {
@@ -9260,6 +10081,101 @@ describe("AgentRuntime tool loop", () => {
       resultType: "cancelled",
     });
     expect((await runtime.getProjection()).pendingSteerInputs).toHaveLength(1);
+  });
+
+  it("idle goal driver resumes after send-now preempts a continuation turn", async () => {
+    const sessionId = createSessionId("runtime-goal-driver-after-preempt");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const continuationStarted = deferred();
+    const requestOrder: string[] = [];
+    let continuationCount = 0;
+    let continuationAfterDone = false;
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-driver-after-preempt",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const text = providerMessagesToText(request.messages);
+            if (text.includes("Verify whether the active session goal")) {
+              requestOrder.push("verifier");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: JSON.stringify(
+                  continuationAfterDone
+                    ? { nextAction: "", passed: true, reason: "done" }
+                    : { nextAction: "continue the goal", passed: false, reason: "not done" },
+                ),
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            continuationCount += 1;
+            if (continuationCount === 1) {
+              requestOrder.push("continuation-before-preempt");
+              continuationStarted.resolve();
+              await waitForAbort(request.abortSignal);
+              throw request.abortSignal.reason ?? new Error("cancelled");
+            }
+            requestOrder.push("continuation-after-preempt");
+            continuationAfterDone = true;
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "resumed after preempt",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("/goal preempt continuation");
+    await sessionStore.setTarget({
+      objective: "Resume after send-now preemption",
+      sessionID: sessionId,
+    });
+    armIdleGoalRoundDriver(runtime);
+
+    const pending = runtime.continueActiveTargetIfIdle({
+      idleDriver: true,
+      verifyBeforeContinue: false,
+    });
+    await continuationStarted.promise;
+    expect(
+      runtime.stopActiveForegroundExecution({
+        preserveQueueAutoDrainOnCancel: true,
+        reason: "test send-now preempts continuation",
+      }),
+    ).toMatchObject({ kind: "stopped" });
+    await expect(pending).rejects.toThrow("Turn was cancelled.");
+    // send-now 取消不是“驱动器无事可做”；落 standing-down 会吞掉用户回合后的下一次预约。
+    expect(
+      (runtime as unknown as { goalRoundDriverStandingDown?: boolean }).goalRoundDriverStandingDown,
+    ).toBeFalsy();
+
+    await runtime.executeTurn("user question after preempt");
+    await delay(80);
+
+    expect(requestOrder.slice(0, 3)).toEqual([
+      "continuation-before-preempt",
+      "verifier",
+      "continuation-after-preempt",
+    ]);
+    expect(
+      requestOrder.filter((item) => item === "continuation-after-preempt").length,
+    ).toBeGreaterThanOrEqual(1);
+    await expect(sessionStore.readTarget({ sessionID: sessionId })).resolves.toMatchObject({
+      status: "complete",
+    });
   });
 
   it("persists queue edit/reorder and settles user deletion before removing the authoritative item", async () => {
@@ -10123,8 +11039,8 @@ describe("AgentRuntime tool loop", () => {
       toolCallId: "unknown-tool-call",
       toolName: "UnknownFixture",
     });
-    expect(providerContentToText(unknownToolResult?.content)).toContain(
-      "Tool not found: UnknownFixture",
+    expect(providerContentToText(unknownToolResult?.content)).toBe(
+      "<tool_use_error>Error: No such tool available: UnknownFixture</tool_use_error>",
     );
     expect(emptyNameToolResult).toMatchObject({
       isError: true,
@@ -13624,9 +14540,12 @@ describe("AgentRuntime tool loop", () => {
     const events = await eventStore.getEvents(sessionId);
     const forkEvent = events.find((event) => event.type === SessionEventType.SessionForked);
     const child = sessionStore.createdSessions.find((session) => session.parentID === sessionId);
+    // 模型专用公告不属于可见对话结构，与 agent listing 一样排除。
     const childMessages = child
       ? (await sessionStore.messages({ sessionID: child.id })).filter(
-          (message) => message.info.source !== "agent_listing_delta",
+          (message) =>
+            message.info.source !== "agent_listing_delta" &&
+            message.info.semantics?.kind !== "system_reminder",
         )
       : [];
     const visibleChildText = childMessages
@@ -13638,13 +14557,15 @@ describe("AgentRuntime tool loop", () => {
       .map(messageText)
       .join("\n");
 
-    expect(fork.response).toContain("copied 5 messages");
+    // 复制数包含首轮持久化的 environment、model、date 公告，fork 后无需重新宣告。
+    expect(fork.response).toContain("copied 8 messages");
     // Bugfix 回归：fork 历史包含目标回合，工作区必须保留该回合的产出，
     // 不能恢复目标回合自身 checkpoint 的 beforeContent。
     expect(fileSystemPort.files.get("/work/src/demo.ts")).toBe("export const value = 2;\n");
     expect(fork.targetMessageId).toBe(editedAssistants[0]!.info.id);
     expect(forkEvent?.payload).toMatchObject({
-      forkPoint: 5,
+      // 与复制数一致，含 environment、model、date 公告。
+      forkPoint: 8,
       targetMessageId: editedAssistants[0]!.info.id,
       restoredFileCount: 0,
     });
@@ -13756,12 +14677,16 @@ describe("AgentRuntime tool loop", () => {
       source: "agent_listing_delta",
       agentListingDelta: { addedTypes: ["Explore", "general-purpose"] },
     });
+    // 模型专用公告不属于可见对话结构，与 agent listing 一样排除。
     const childMessages = allChildMessages.filter(
-      (message) => message.info.source !== "agent_listing_delta",
+      (message) =>
+        message.info.source !== "agent_listing_delta" &&
+        message.info.semantics?.kind !== "system_reminder",
     );
 
     expect(fork).toMatchObject({
-      copiedMessageCount: 4,
+      // 用户输入、environment、model、agent listing、date 公告与两条 assistant 消息。
+      copiedMessageCount: 7,
       parentSessionId: sessionId,
       targetMessageId: target!.info.id,
       restoredFiles: [],

@@ -10,6 +10,7 @@ import type {
   SuperAgentTriggerContract,
   TriggerMandatePort,
   TriggerSpecRunPort,
+  TriggerChengGateVerdict,
   TriggerSubscriptionRecord,
   TriggerVerdictDecision,
   UpsertTriggerSubscriptionInput,
@@ -38,6 +39,11 @@ export interface TriggerSubsystemDeps {
   mandate?: TriggerMandatePort;
   /** M5 spec run 启动端口；additive-optional，档位要求执行时缺席 = 事务前响亮抛错。 */
   specRun?: TriggerSpecRunPort;
+  /**
+   * Cheng jobId → 真实 gate 的解析端口（组合根接 host verify）。trigger payload 带
+   * `chengJobId` 时必需；缺失/失败 = 不启动 run（fail-closed）。
+   */
+  resolveSpecRunGate?: (jobId: string) => Promise<TriggerChengGateVerdict>;
   /** M6 五字段方案门；缺省 false（P2 字节兼容）。 */
   proposalGate?: boolean;
   /** 异步 spec run dispatch 失败告警缝（组合根注入）。 */
@@ -56,6 +62,7 @@ export function createTriggerSubsystem(deps: TriggerSubsystemDeps): SuperAgentTr
     db: deps.db,
     subscriptions,
     delivery: deps.delivery,
+    resolveGate: deps.resolveSpecRunGate,
     now: deps.now,
   };
   const dispatchDeps = {
@@ -71,6 +78,7 @@ export function createTriggerSubsystem(deps: TriggerSubsystemDeps): SuperAgentTr
     now: deps.now,
     mandate: deps.mandate,
     specRun: deps.specRun,
+    resolveSpecRunGate: deps.resolveSpecRunGate,
     proposalGate: deps.proposalGate,
     onError: deps.onError,
   };
@@ -94,8 +102,8 @@ export function createTriggerSubsystem(deps: TriggerSubsystemDeps): SuperAgentTr
     dispatchHumanExplicit(triggerId: string): Promise<DispatchHumanExplicitOutcome> {
       return dispatchHumanExplicit(dispatchDeps, triggerId);
     },
-    applyVerdicts(batchId: string, decisions: readonly TriggerVerdictDecision[]): void {
-      applyVerdicts(verdictDeps, batchId, decisions);
+    applyVerdicts(batchId: string, decisions: readonly TriggerVerdictDecision[]): Promise<void> {
+      return applyVerdicts(verdictDeps, batchId, decisions);
     },
     tryClaimLeadership(input: LeaderClaimInput): LeaderClaimResult {
       return controlPlaneLease.tryClaim(input);

@@ -34,6 +34,7 @@ import {
 } from "@zcode/dynamic-workflow";
 import { runWorkflowScript } from "@zcode/dynamic-workflow-runtime";
 import { createJournalSequenceCapture } from "./dynamic-workflow-run-sequence-capture.js";
+import { createScopedChengHostPort } from "./workflow-cheng-scoped-port.js";
 import type { CompiledHole } from "./dynamic-workflow-run-holes.js";
 import { toProgressPayload } from "./dynamic-workflow-run-progress-payload.js";
 import {
@@ -224,6 +225,9 @@ export function launchDynamicWorkflowRun(
   // 「append 紧跟 emit、一一对应」这个前提由测试钉住：钩子看到的 sequence 序列必须与
   // listEvents 返回的逐条相等。
   const sequenceCapture = createJournalSequenceCapture(deps.journal);
+  // Cheng host 的 run-scoped 视图：只跟踪/取消本 run 的 job；dispose 时触发取消并退订。
+  const chengScope =
+    deps.chengHostPort === undefined ? undefined : createScopedChengHostPort(deps.chengHostPort);
 
   const makeDriver = createAgentRuntimeWorkflowDriver({
     journal: sequenceCapture.journal,
@@ -265,6 +269,24 @@ export function launchDynamicWorkflowRun(
     },
     executionPort: deps.executionPort,
     fileSystemPort: deps.fileSystemPort,
+    ...(chengScope === undefined
+      ? {}
+      : {
+          chengHostPort: chengScope.port,
+          onDispose: () => {
+            void chengScope
+              .cancelActive()
+              .catch((error: unknown) => {
+                deps.logger?.warn?.("Failed to cancel workflow Cheng jobs", {
+                  errorMessage: error instanceof Error ? error.message : String(error),
+                  event: "dynamic_workflow.cheng_cancel.failed",
+                  module: "bootstrap.app",
+                  runId,
+                });
+              })
+              .finally(() => chengScope.dispose());
+          },
+        }),
     escalationRegistry,
     cwd,
     // 用户面产物的落点。会话作用域取**本服务
@@ -406,7 +428,9 @@ export function launchDynamicWorkflowRun(
     // 关联锚点随 run 落库：重启后工具卡 join 与 resume 通知都只能从 dwf_run 还原它。
     ...(toolCallId === undefined ? {} : { toolCallId }),
     // 修订续跑：lineage 指针落库（createRun 一次写死），导入缓存注入引擎（纯数据，核心零 I/O）。
-    ...(resumedFrom === undefined ? {} : { resumedFrom }),
+    // 传的是 lineageFrom 而不是入参：它同时是脚本读到的 run.resumedFrom，resume 那一世入参缺席，
+    // 只递入参的话脚本在续跑时会读到 undefined（引擎命中既有行时不再落库，传它无害）。
+    ...(lineageFrom === undefined ? {} : { resumedFrom: lineageFrom }),
     ...(importedCache === undefined ? {} : { importedCache }),
     // 用量起点与缓存同车：引擎在 createRun 时把它写成 spent_tokens 的初值，命中既有行时忽略。
     ...(input.inheritedTokens === undefined ? {} : { inheritedTokens: input.inheritedTokens }),

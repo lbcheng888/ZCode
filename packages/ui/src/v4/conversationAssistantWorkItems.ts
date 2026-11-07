@@ -426,3 +426,48 @@ export function buildAssistantWorkRenderItems(
 
   return items;
 }
+
+/**
+ * 「突出代码」分组判据：终端/文件写入/子代理/CUA 等动作逐条保留；思考、查阅、
+ * 网页、todo 等非代码工作项由调用方折叠成组。assistantText 是回复正文，永远不折叠。
+ */
+const CODE_TOOL_NAMES = new Set([
+  "Agent",
+  "ApplyPatch",
+  "Bash",
+  "Edit",
+  "Execute",
+  "MultiEdit",
+  "NotebookEdit",
+  "Task",
+  "Terminal",
+  "Write",
+]);
+
+function isCodeToolCallRow(row: ToolCallRow): boolean {
+  if (CODE_TOOL_NAMES.has(row.toolName)) return true;
+  const legacyNode = toolCallRowToLegacyNode(row);
+  return (
+    isExecuteToolCall({ kind: legacyNode.toolCall.kind, input: legacyNode.toolCall.input }) ||
+    resolveToolCallIdentity(legacyNode.toolCall).family === "file-write"
+  );
+}
+
+export function isCodeAssistantWorkItem(item: ConversationAssistantWorkRenderItem): boolean {
+  switch (item.kind) {
+    case "executeGroup":
+    case "changesGroup":
+    case "cuaGroup":
+    case "agentToolCall":
+      return true;
+    case "exploreGroup":
+      return false;
+    case "row": {
+      if (item.row.kind === "reasoning") return false;
+      if (item.row.kind !== "toolCall") return true;
+      return isCodeToolCallRow(item.row);
+    }
+    default:
+      return true;
+  }
+}

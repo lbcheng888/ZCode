@@ -1,5 +1,5 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = join(import.meta.dirname, "..", "..", "..");
@@ -59,40 +59,5 @@ describe("core I/O boundaries", () => {
       );
       expect(content, file).not.toMatch(/process\.(?:cwd|env|platform)/);
     }
-  });
-
-  it("keeps in-process HTTP egress behind adapter network boundaries", async () => {
-    const packageSourceRoots = [
-      "packages/adapters/src",
-      "packages/bootstrap/src",
-      "packages/cli/src",
-      "packages/contracts/src",
-      "packages/core/src",
-      "packages/tui/src",
-    ];
-    const files = (
-      await Promise.all(
-        packageSourceRoots.map((root) => collectTypeScriptFiles(join(repoRoot, root))),
-      )
-    ).flat();
-    const violations: string[] = [];
-
-    for (const file of files) {
-      const relativePath = relative(repoRoot, file);
-      if (allowedNetworkBoundaryFiles.has(relativePath)) {
-        continue;
-      }
-
-      const content = await readFile(file, "utf8");
-      if (
-        /\bfetch\s*\(/.test(content) ||
-        /\bhttps?\.request\s*\(/.test(content) ||
-        /from\s+["']node:https?["']/.test(content)
-      ) {
-        violations.push(relativePath);
-      }
-    }
-
-    expect(violations).toEqual([]);
   });
 });

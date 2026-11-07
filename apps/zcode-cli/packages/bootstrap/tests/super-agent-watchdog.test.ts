@@ -35,7 +35,9 @@ function mockCommands(overrides?: Partial<WatchdogRepairCommandSurface>) {
 function watchdogFixture(options?: {
   config?: Partial<SuperAgentWatchdogConfig>;
   commands?: WatchdogRepairCommandSurface;
-  goalState?: () => { goalId: string; status: "active" | "budget_limited"; openQuestionCount: number } | undefined;
+  goalState?: () =>
+    | { goalId: string; status: "active" | "budget_limited"; openQuestionCount: number }
+    | undefined;
   triggerBacklog?: () => { oldestAgeMs: number; pendingCount: number } | undefined;
   goalHint?: () => string | undefined;
   adjudicator?: {
@@ -63,6 +65,40 @@ function watchdogFixture(options?: {
 }
 
 describe("探针命中矩阵（spec §2/§8）", () => {
+  it("refreshes external projection rows before probes", async () => {
+    const registry = new BackgroundRunRegistry(100);
+    const commands = mockCommands();
+    const refreshRuns = vi.fn(() => {
+      registry.register(
+        {
+          id: "refresh-wf",
+          kind: "workflow",
+          owner: "dynamic-workflow",
+          stallClockRef: "dwf-run:refresh-wf",
+        },
+        1_000,
+      );
+    });
+    const watchdog = createSuperAgentWatchdog({
+      registry,
+      commands,
+      now: () => 1_000,
+      config: { repairCooldownMs: 0 },
+      refreshRuns,
+    });
+
+    const report = await watchdog.tick(1_000 + DEFAULT_WATCHDOG_CONFIG.workflowStallMs);
+
+    expect(refreshRuns).toHaveBeenCalledTimes(1);
+    expect(commands.cancelStalledRun).toHaveBeenCalledWith("refresh-wf");
+    expect(report.repairs[0]).toMatchObject({
+      probe: "workflow-run-stalled",
+      targetId: "refresh-wf",
+      action: "cancel-stalled",
+      ok: true,
+    });
+  });
+
   it("stalled workflow run ⇒ cancel-stalled（经命令面，不直写状态）", async () => {
     const { registry, commands, watchdog, now } = watchdogFixture();
     registry.register(
@@ -113,7 +149,10 @@ describe("探针命中矩阵（spec §2/§8）", () => {
 
     const report = await watchdog.tick();
 
-    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("registry-stall"));
+    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("registry-stall"), {
+      ownerSession: undefined,
+      workspaceKey: undefined,
+    });
     expect(report.repairs).toEqual([
       expect.objectContaining({ probe: "registry-stall", action: "notify-user", ok: true }),
     ]);
@@ -145,10 +184,13 @@ describe("探针命中矩阵（spec §2/§8）", () => {
 
     const report = await watchdog.tick();
 
-    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("goal-budget-limited"));
-    expect(report.probes.find((p) => p.probe === "goal-budget-limited-open-questions")?.status).toBe(
-      "hit",
+    expect(commands.notifyUser).toHaveBeenCalledWith(
+      expect.stringContaining("goal-budget-limited"),
+      { ownerSession: undefined, workspaceKey: undefined },
     );
+    expect(
+      report.probes.find((p) => p.probe === "goal-budget-limited-open-questions")?.status,
+    ).toBe("hit");
   });
 
   it("trigger 积压龄超阈值 ⇒ notify-user；端口缺席 ⇒ skipped", async () => {
@@ -158,6 +200,7 @@ describe("探针命中矩阵（spec §2/§8）", () => {
     const report = await watchdogWithSource.tick();
     expect(commandsWithSource.notifyUser).toHaveBeenCalledWith(
       expect.stringContaining("trigger-backlog-age"),
+      { ownerSession: undefined, workspaceKey: undefined },
     );
     expect(report.probes.find((p) => p.probe === "trigger-backlog-age")?.status).toBe("hit");
 
@@ -210,7 +253,10 @@ describe("熔断升级（spec §4/§8）", () => {
       expect.objectContaining({ consecutiveFailures: 3, goalPaused: true, notified: true }),
     ]);
     expect(commands.pauseGoal).toHaveBeenCalledTimes(1);
-    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("看门狗升级"));
+    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("看门狗升级"), {
+      ownerSession: undefined,
+      workspaceKey: undefined,
+    });
 
     // 冷却窗内不再升级；升级成功已清零连续失败，此后需要新一轮 N 次失败。
     now.value += 1_000;
@@ -257,7 +303,11 @@ describe("熔断升级（spec §4/§8）", () => {
     expect(first.repairs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ probe: "registry-stall", action: "notify-user", ok: true }),
-        expect.objectContaining({ probe: "workflow-run-stalled", action: "cancel-stalled", ok: false }),
+        expect.objectContaining({
+          probe: "workflow-run-stalled",
+          action: "cancel-stalled",
+          ok: false,
+        }),
       ]),
     );
     expect(first.escalations).toHaveLength(0);
@@ -571,7 +621,11 @@ describe("progress-vs-objective 与 LLM 无进展裁决（spec §5/§8）", () =
     // 探针与裁决都指向同一真实行（探针先发，裁决按目标通道再发）。
     expect(report.repairs).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ probe: "workflow-run-stalled", action: "cancel-stalled", ok: true }),
+        expect.objectContaining({
+          probe: "workflow-run-stalled",
+          action: "cancel-stalled",
+          ok: true,
+        }),
         expect.objectContaining({
           probe: "progress-vs-objective",
           action: "cancel-stalled",
@@ -597,7 +651,12 @@ describe("progress-vs-objective 与 LLM 无进展裁决（spec §5/§8）", () =
       });
       // run-healthy：workflow 行恒带 stallClockRef，但未 stalled 且未满 20min —— 不合格。
       registry.register(
-        { id: "run-healthy", kind: "workflow", owner: "dynamic-workflow", stallClockRef: "dwf-run:run-healthy" },
+        {
+          id: "run-healthy",
+          kind: "workflow",
+          owner: "dynamic-workflow",
+          stallClockRef: "dwf-run:run-healthy",
+        },
         now.value,
       );
 
@@ -627,7 +686,7 @@ describe("progress-vs-objective 与 LLM 无进展裁决（spec §5/§8）", () =
 
     const report = await watchdog.tick();
 
-    expect(commands.pauseWorkspaceAutomation).toHaveBeenCalledWith("ws:9");
+    expect(commands.pauseWorkspaceAutomation).toHaveBeenCalledWith("ws:9", "auto-1");
     expect(report.repairs).toEqual([
       expect.objectContaining({
         probe: "progress-vs-objective",
@@ -748,6 +807,9 @@ describe("owner 心跳周期与 registry-stall 判据（spec §9）", () => {
     expect(report.probes.find((p) => p.probe === "registry-stall")).toEqual(
       expect.objectContaining({ probe: "registry-stall", status: "hit" }),
     );
-    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("registry-stall"));
+    expect(commands.notifyUser).toHaveBeenCalledWith(expect.stringContaining("registry-stall"), {
+      ownerSession: undefined,
+      workspaceKey: undefined,
+    });
   });
 });

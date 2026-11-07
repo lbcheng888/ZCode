@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { schemeCardSchema } from "@zcode/shared/zcode-protocol-v4";
 
 import type {
+  TriggerChengGateVerdict,
   TriggerMandatePort,
   TriggerSchemeCard,
   TriggerSpecRunInput,
@@ -14,6 +15,10 @@ import {
   setTriggerEventAdjudicationStatus,
   type TriggerEventRow,
 } from "./trigger-events-access.js";
+import {
+  chengJobIdOfTriggerEvent,
+  evaluateTriggerOutboundChengGate,
+} from "./outbound-gate.js";
 
 export interface VerdictInterpretDeps {
   db: DatabaseSync;
@@ -29,6 +34,11 @@ export interface VerdictInterpretDeps {
    * 异步调用（两阶段：同步事务不 await 执行）。
    */
   specRun?: TriggerSpecRunPort;
+  /**
+   * trigger payload 带 `chengJobId` 时的真实 gate 解析端口（组合根接 host verify）。
+   * 缺失 = 装配错误；解析失败原样上抛，不启动 run。
+   */
+  resolveSpecRunGate?: (jobId: string) => Promise<TriggerChengGateVerdict>;
   /**
    * M6 五字段方案门（= features.mandateGate，缺省 false 字节兼容）：
    * accept 缺 scheme 直接降级 record_only，不产卡、不执行。
@@ -95,7 +105,7 @@ function validateSchemeCard(
 /**
  * applyVerdicts（§2.1 / M3 解释执行 / M4 档位分派 / M6 方案门）。
  *
- * 阶段一（同步 BEGIN IMMEDIATE 事务）：
+ * 阶段一（事务前异步 ChengGate 预检 → 同步 BEGIN IMMEDIATE 事务）：
  * - reject → adjudication_status=rejected + decision_log(reject)。
  * - record-only 决议 → adjudication_status=record_only + decision_log(record_only)，不执行。
  * - accept → mandate.resolveFor 三档：
@@ -114,34 +124,86 @@ function validateSchemeCard(
  * decision_log append-only 产生重复行）；verdict JSON/schema 解析失败的整批
  * record-only 降级由裁决驱动器在调用本方法前完成（T2 归 adjudication）。
  */
-export function applyVerdicts(
+export async function applyVerdicts(
   deps: VerdictInterpretDeps,
   batchId: string,
   decisions: readonly TriggerVerdictDecision[],
-): void {
+): Promise<void> {
   const dispatches: TriggerSpecRunInput[] = [];
+
+  // 出站门预检（事务前）：卡/回复在落库前就要知道 Cheng gate。同一 job 只求一次；
+  // 带 chengJobId 但未注入 resolver 是装配错误，事务前抛错 => 零写入。
+  const events = decisions.map((decision) => {
+    const event = getTriggerEvent(deps.db, decision.triggerId);
+    if (!event) {
+      throw new Error(
+        `applyVerdicts: triggerId 未命中 trigger_events 行，整批拒绝执行 (${decision.triggerId})`,
+      );
+    }
+    return event;
+  });
+  const gatePromises = new Map<
+    string,
+    ReturnType<typeof evaluateTriggerOutboundChengGate>
+  >();
+  const blockedByTrigger = new Map<string, string>();
+  for (let index = 0; index < decisions.length; index += 1) {
+    const decision = decisions[index]!;
+    if (decision.disposition === "reject") continue;
+    const event = events[index]!;
+    const jobId = chengJobIdOfTriggerEvent(event);
+    if (jobId === undefined) continue;
+    let gatePromise = gatePromises.get(jobId);
+    if (gatePromise === undefined) {
+      gatePromise = evaluateTriggerOutboundChengGate(event, {
+        resolveGate: deps.resolveSpecRunGate,
+      });
+      gatePromises.set(jobId, gatePromise);
+    }
+    const gate = await gatePromise;
+    if (!gate.allowed) blockedByTrigger.set(decision.triggerId, gate.reason);
+  }
 
   // 事务前提：decisionLog 端口与 deps.db 是同一库句柄（组合根注入同一
   // openSuperAgentDatabase 句柄），否则 decision_log 写不在本事务覆盖内。
   deps.db.exec("begin immediate");
   try {
-    // 校验步顺带取行：避免写入循环里二次读库，且保证校验与写入看到同一快照内容。
-    const events = decisions.map((decision) => {
-      const event = getTriggerEvent(deps.db, decision.triggerId);
-      if (!event) {
-        throw new Error(
-          `applyVerdicts: triggerId 未命中 trigger_events 行，整批拒绝执行 (${decision.triggerId})`,
-        );
-      }
-      return event;
-    });
-
     const now = deps.now?.() ?? Date.now();
     decisions.forEach((decision, index) => {
       const event = events[index]!;
       const evidence = decision.evidence ?? [];
+      const planRef =
+        decision.chengPlanId === undefined ? {} : { chengPlanId: decision.chengPlanId };
+      const blockedReason = blockedByTrigger.get(decision.triggerId);
+      if (blockedReason !== undefined) {
+        setTriggerEventAdjudicationStatus(
+          deps.db,
+          decision.triggerId,
+          "record_only",
+          now,
+          decision.chengPlanId,
+        );
+        deps.decisionLog.record({
+          workspaceIdentity: event.workspaceIdentity,
+          triggerId: decision.triggerId,
+          origin: "adjudication",
+          disposition: "record_only",
+          batchId,
+          reason: blockedReason,
+          evidence,
+          ...planRef,
+          createdAt: now,
+        });
+        return;
+      }
       if (decision.disposition === "reject") {
-        setTriggerEventAdjudicationStatus(deps.db, decision.triggerId, "rejected", now);
+        setTriggerEventAdjudicationStatus(
+          deps.db,
+          decision.triggerId,
+          "rejected",
+          now,
+          decision.chengPlanId,
+        );
         deps.decisionLog.record({
           workspaceIdentity: event.workspaceIdentity,
           triggerId: decision.triggerId,
@@ -150,6 +212,7 @@ export function applyVerdicts(
           batchId,
           reason: decision.reason ?? null,
           evidence,
+          ...planRef,
           createdAt: now,
         });
         return;
@@ -158,7 +221,13 @@ export function applyVerdicts(
       // 显式 record-only：纯审计，不执行。flag 关保持 P2 收敛（would_accept 行）；
       // flag 开（proposalGate）按语义落 record_only——不产卡、不打扰用户。
       if (decision.disposition === "record-only") {
-        setTriggerEventAdjudicationStatus(deps.db, decision.triggerId, "record_only", now);
+        setTriggerEventAdjudicationStatus(
+          deps.db,
+          decision.triggerId,
+          "record_only",
+          now,
+          decision.chengPlanId,
+        );
         deps.decisionLog.record({
           workspaceIdentity: event.workspaceIdentity,
           triggerId: decision.triggerId,
@@ -167,6 +236,7 @@ export function applyVerdicts(
           batchId,
           reason: decision.reason ?? null,
           evidence,
+          ...planRef,
           createdAt: now,
         });
         return;
@@ -175,7 +245,13 @@ export function applyVerdicts(
       // accept：M6 方案门先于档位分派——没有完整方案就没有可交付/可执行的内容。
       const scheme = validateSchemeCard(decision);
       if (deps.proposalGate === true && !scheme.ok) {
-        setTriggerEventAdjudicationStatus(deps.db, decision.triggerId, "record_only", now);
+        setTriggerEventAdjudicationStatus(
+          deps.db,
+          decision.triggerId,
+          "record_only",
+          now,
+          decision.chengPlanId,
+        );
         deps.decisionLog.record({
           workspaceIdentity: event.workspaceIdentity,
           triggerId: decision.triggerId,
@@ -184,6 +260,7 @@ export function applyVerdicts(
           batchId,
           reason: `scheme_card_incomplete:${scheme.detail}`,
           evidence,
+          ...planRef,
           createdAt: now,
         });
         return;
@@ -197,7 +274,13 @@ export function applyVerdicts(
         : "record_only";
 
       if (mandateTier === "record_only") {
-        setTriggerEventAdjudicationStatus(deps.db, decision.triggerId, "record_only", now);
+        setTriggerEventAdjudicationStatus(
+          deps.db,
+          decision.triggerId,
+          "record_only",
+          now,
+          decision.chengPlanId,
+        );
         deps.decisionLog.record({
           workspaceIdentity: event.workspaceIdentity,
           triggerId: decision.triggerId,
@@ -206,6 +289,7 @@ export function applyVerdicts(
           batchId,
           reason: decision.reason ?? null,
           evidence,
+          ...planRef,
           ...(scheme.ok ? { card: scheme.card } : {}),
           createdAt: now,
         });
@@ -217,7 +301,13 @@ export function applyVerdicts(
           `applyVerdicts: mandate 档位要求执行但未注入 specRun 端口 (triggerId=${decision.triggerId}, tier=${mandateTier})`,
         );
       }
-      setTriggerEventAdjudicationStatus(deps.db, decision.triggerId, "accepted", now);
+      setTriggerEventAdjudicationStatus(
+        deps.db,
+        decision.triggerId,
+        "accepted",
+        now,
+        decision.chengPlanId,
+      );
       deps.decisionLog.record({
         workspaceIdentity: event.workspaceIdentity,
         triggerId: decision.triggerId,
@@ -226,9 +316,11 @@ export function applyVerdicts(
         batchId,
         reason: decision.reason ?? null,
         evidence,
+        ...planRef,
         ...(scheme.ok ? { card: scheme.card } : {}),
         createdAt: now,
       });
+      const chengJobId = chengJobIdOfTriggerEvent(event);
       dispatches.push({
         triggerId: decision.triggerId,
         workspaceIdentity: event.workspaceIdentity,
@@ -238,6 +330,7 @@ export function applyVerdicts(
         ...(decision.reason === undefined ? {} : { reason: decision.reason }),
         evidence,
         ...(scheme.ok ? { card: scheme.card } : {}),
+        ...(chengJobId === undefined ? {} : { chengJobId }),
       });
     });
     deps.db.exec("commit");
@@ -253,7 +346,37 @@ export function applyVerdicts(
   // 阶段二：commit 之后才启动执行，事务内零 await；失败不静默（A10 告警缝）。
   for (const input of dispatches) {
     void Promise.resolve()
-      .then(() => deps.specRun!.start(input))
+      .then(async () => {
+        let gate: TriggerChengGateVerdict | undefined;
+        if (input.chengJobId !== undefined) {
+          if (!deps.resolveSpecRunGate) {
+            throw new Error(
+              `applyVerdicts: trigger payload 带 chengJobId 但未注入 resolveSpecRunGate (triggerId=${input.triggerId})`,
+            );
+          }
+          gate = await deps.resolveSpecRunGate(input.chengJobId);
+        }
+        if (gate !== undefined && !gate.ok) {
+          // 红 gate = 静默丢弃：不启动 spec run、不产生出站；只留 decision_log 计数与状态收敛。
+          const now = deps.now?.() ?? Date.now();
+          deps.decisionLog.record({
+            workspaceIdentity: input.workspaceIdentity,
+            triggerId: input.triggerId,
+            origin: "adjudication",
+            disposition: "record_only",
+            batchId,
+            reason: `cheng_gate_blocked:${gate.reasons.join(",") || gate.level}`,
+            evidence: input.evidence ?? [],
+            createdAt: now,
+          });
+          setTriggerEventAdjudicationStatus(deps.db, input.triggerId, "record_only", now);
+          return;
+        }
+        await deps.specRun!.start({
+          ...input,
+          ...(gate === undefined ? {} : { chengGate: gate }),
+        });
+      })
       .catch((error: unknown) => {
         if (deps.onError) {
           deps.onError(error, `super_agent.trigger.spec_run ${input.triggerId}`);

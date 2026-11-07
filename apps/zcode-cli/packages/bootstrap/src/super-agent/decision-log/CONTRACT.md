@@ -8,5 +8,7 @@
 - 保留窗口：`created_at < now − 90天` 的行在 sweep 后不可恢复；调用方（daemon 控制面循环）负责周期触发，P2 只提供 API。
 - 同步落库：`record` / `sweepRetention` 返回即已持久化（node:sqlite 同步语义），不假装异步。
 - 表结构（列/索引）由 super-agent-storage 迁移创建；本模块不建表、不迁移。
+- `cheng_plan_id`（migration 0005，可空）：verdict 的 `chengPlanId` 经 `record()` 落行；
+  只在场时写值，旧行/无 plan 为 NULL。
 
 与其它模块的交集（hook 点）：组合根 open 域库后以 `createDecisionLog(db)` 注入 Intake 与裁决驱动器；两者只依赖 `SuperAgentDecisionLogContract`，不 import 本模块实现。

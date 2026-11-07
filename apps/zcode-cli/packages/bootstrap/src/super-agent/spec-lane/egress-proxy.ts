@@ -37,6 +37,15 @@ export interface StartEgressProxyRequest {
 }
 
 /**
+ * 启动期 repo 配置校验入口：形状非法立即抛（同 normalize 的 fail-closed 语义）；
+ * 返回 trim 后的原始字面量，交给 dispatcher `resolveAllowHosts`，prepare 时再归一化。
+ */
+export function resolveSpecEgressAllowHosts(raw: readonly string[]): string[] {
+  normalizeSpecEgressAllowlist(raw);
+  return raw.map((entry) => entry.trim());
+}
+
+/**
  * per-repo 白名单配置值收敛（spec §4.3）。非字符串/空串条目**抛错**——配置损坏
  * 必须暴露，不静默丢弃（fail-closed）。条目形如 "host"、"host:port" 或 IPv6
  * 方括号形态 "[::1]"、"[::1]:port"；host 大小写归一，port 必须是 1-65535 整数。

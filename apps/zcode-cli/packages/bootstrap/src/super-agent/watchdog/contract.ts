@@ -7,7 +7,13 @@
 export type SuperAgentWatchdogId = string & { readonly __brand: "SuperAgentWatchdogId" };
 
 /** registry 行的类别；异质状态机不合并，kind 只做观察面分桶。 */
-export type BackgroundRunKind = "workflow" | "automation" | "offpeak" | "background_task" | "goal";
+export type BackgroundRunKind =
+  | "workflow"
+  | "automation"
+  | "offpeak"
+  | "background_task"
+  | "goal"
+  | "cheng-job";
 
 /** 行级 owner：register 时定死，终身不变；仅 owner 写本行。 */
 export type BackgroundRunOwner =
@@ -15,7 +21,8 @@ export type BackgroundRunOwner =
   | "runtime-background-task"
   | "automation"
   | "offpeak"
-  | "goal";
+  | "goal"
+  | "cheng-host";
 
 /** 终态枚举；与各子系统既有状态机的映射见 spec §1.1。 */
 export type BackgroundRunTerminalState =
@@ -53,6 +60,11 @@ export interface BackgroundRunRow {
   /** 最近一次 owner 写；registry-stall 探针的 staleness 判据。 */
   updatedAt: number;
   terminalAt?: number;
+  /**
+   * 终态原因（稳定字符串）。`host_restarted` 由启动对账写入：该行绝不能补投终态通知，
+   * 否则进程死亡会被当成业务结果。
+   */
+  terminalReason?: string;
 }
 
 /** register 入参（时间戳由 registry 盖，调用方不传）。 */
@@ -114,6 +126,7 @@ export type RepairAction = (typeof REPAIR_ACTIONS)[number];
 export type {
   CommandResult,
   WatchdogRepairCommandSurface,
+  NotifyUserContext,
   GoalStateSnapshot,
   GoalStateSource,
   TriggerBacklogSnapshot,

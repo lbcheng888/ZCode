@@ -13,6 +13,8 @@ describe("super-agent Phase 2 feature flags 缺省关", () => {
     expect(DefaultRuntimeConfig.features.durableSchedulerDispatch).toBe(false);
     // P6 围栏缺省关 = 现状协作式 env 代理（字节行为不变）。
     expect(DefaultRuntimeConfig.features.specEgressFence).toBe(false);
+    // spec lane egress 缺省零白名单 = 零 egress。
+    expect(DefaultRuntimeConfig.specEgress.allowHosts).toEqual([]);
     // 既有开关不受影响（goalLayer 缺省开是 Phase 1 转正结论）。
     expect(DefaultRuntimeConfig.features.goalLayer).toBe(true);
   });
@@ -23,6 +25,7 @@ describe("super-agent Phase 2 feature flags 缺省关", () => {
     expect(ConfigKey.FeatureSpecWriteLease).toBe("features.specWriteLease");
     expect(ConfigKey.FeatureDurableSchedulerDispatch).toBe("features.durableSchedulerDispatch");
     expect(ConfigKey.FeatureSpecEgressFence).toBe("features.specEgressFence");
+    expect(ConfigKey.SpecEgressAllowHosts).toBe("specEgress.allowHosts");
   });
 
   it("BotConfig.eventRouterEnabled 可选：未配置即 undefined（legacy 直路）", () => {

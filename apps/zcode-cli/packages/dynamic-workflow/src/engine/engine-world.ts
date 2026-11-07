@@ -71,8 +71,10 @@ export function readWorld(
     // status === "running"：崩溃于执行中，落到下面重新 live 执行。
   }
 
-  // op "run" 是效应而不是读，journal 单列一种（world-run）：机制同构，审计面诚实。其余 op 保持 world-read。
-  const kind: NodeKind = op === "run" ? "world-run" : "world-read";
+  // op "run" 与 "cheng-generate" 是效应而不是读，journal 单列一种（world-run）：机制同构，
+  // 审计面诚实；效应在派发前会关导入缓存。其余 op 保持 world-read。
+  const kind: NodeKind =
+    op === "run" || op === "cheng-generate" ? "world-run" : "world-read";
 
   // amend-resume：本 run 的 journal 里没有这一行，才轮到导入缓存（journal replay 永远优先——
   // 修订 run 自己崩溃后 resume 时，已消费的命中早已是真行，重放它们不能再动游标）。

@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { EventReducer } from "../src/events/event-reducer.js";
 import { SessionEventType } from "../src/events/session.events.js";
-import type { SessionEvent } from "../src/events/session.events.js";
+import type { SessionEvent, TargetChangedPayload } from "../src/events/session.events.js";
 import { createSessionEvent } from "../src/events/session.events.js";
 import { CompactTrigger } from "../src/compact/index.js";
 import { RewindScope, RewindStrategy } from "../src/rewind/index.js";
@@ -408,6 +408,61 @@ describe("EventReducer", () => {
 
       expect(projection.target).toBeNull();
       expect(projection.updatedAt).toEqual(events.at(-1)?.timestamp);
+    });
+
+    it("should project a green-gate ChengPlan card and clear it on reference rebind or replacement", () => {
+      const target = buildTarget(sessionId, "shipping Cheng evidence", "active");
+      const chengPlanCard = {
+        planId: "cheng-plan://job-1",
+        runId: "run-1",
+        frontier: {
+          stage: "spec",
+          target: "p02_min2",
+          evidence: ["jobId:job-1", "settle_not_solved"],
+        },
+        recommended: { action: "fix_spec", target: "p02_min2" },
+        evidenceRefs: ["jobId:job-1", "settle_not_solved", "gate:blocked"],
+      };
+      const event = (payload: TargetChangedPayload) =>
+        createSessionEvent(SessionEventType.TargetChanged, sessionId, payload);
+
+      const projection = reducer.reduce([
+        event({ action: "set", source: "command", target }),
+        event({
+          action: "cheng_plan_card",
+          chengPlanCard,
+          source: "runtime",
+          target,
+        }),
+      ]);
+
+      expect(projection.target).toBe(target);
+      expect(projection.targetChengPlanCard).toEqual(chengPlanCard);
+
+      const rebound = reducer.apply(
+        projection,
+        event({
+          action: "cheng_ref_edited",
+          previousTarget: target,
+          reason: "bound",
+          source: "tool",
+          target: { ...target, revision: 2 },
+        }),
+      );
+      expect(rebound.targetChengPlanCard).toBeUndefined();
+      expect(rebound.target).toMatchObject({ targetID: target.targetID });
+
+      const replaced = reducer.apply(
+        projection,
+        event({
+          action: "set",
+          previousTarget: target,
+          source: "command",
+          target: { ...target, targetID: "target_2" },
+        }),
+      );
+      expect(replaced.targetChengPlanCard).toBeUndefined();
+      expect(replaced.target).toMatchObject({ targetID: "target_2" });
     });
 
     it("should persist target completion verification timeline without duplicating completed summaries", () => {

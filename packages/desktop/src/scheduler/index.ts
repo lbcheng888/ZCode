@@ -18,11 +18,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AUTOMATION_RUN_STALE_MS,
   AutomationRepo,
   computeAutomationNextRunAt,
+  createAutomationRunProjectionSqlite,
   getAppConfigDir,
   isOneShotAutomation,
   OffPeakTaskRepo,
+  reconcileStaleAutomationRuns,
 } from "@zcode/services/node";
 import {
   resolveWorkspaceKey,
@@ -33,6 +36,7 @@ import {
 } from "@zcode/shared";
 import type { MainToSchedulerMessage, SchedulerToMainMessage } from "./schedulerProtocol.js";
 import { settleManualClaimForDispatchResult } from "./manualClaimRelease.js";
+import { registerClaimedAutomationRun } from "./automationRunProjection.js";
 import { settleOffPeakDispatchResult } from "./offPeakDispatchSettlement.js";
 import {
   startSchedulerResourceTelemetry,
@@ -107,6 +111,53 @@ function log(level: "info" | "warn" | "error", message: string): void {
  */
 function resolveSuperAgentDatabasePath(): string {
   return join(getAppConfigDir(), "super-agent.sqlite");
+}
+
+/** 定时 automation run 的 claim/outcome 投影到同一 super-agent registry（懒打开）。 */
+let automationRunProjection: ReturnType<typeof createAutomationRunProjectionSqlite> | undefined;
+function automationRunProjectionPort() {
+  automationRunProjection ??= createAutomationRunProjectionSqlite({
+    databasePath: resolveSuperAgentDatabasePath(),
+    onError: (error) => {
+      log(
+        "warn",
+        `automation run projection failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  });
+  return automationRunProjection;
+}
+
+/** stale 扫描周期：启动立即一次，之后每 5 分钟一次（scan 与 heartbeat 共同保证不误杀长任务）。 */
+const AUTOMATION_RUN_RECONCILE_INTERVAL_MS = 5 * 60_000;
+let lastAutomationRunReconcileAt = 0;
+
+/**
+ * scheduler claim 后 host 既未回写终态、也无心跳续租的 run：台账 stale 事务置 failed，
+ * 再把 registry 同 id 行 settle failed。启动时先跑一次覆盖上个进程残留；tick 周期跑覆盖
+ * 本进程存活期间 host 崩溃/终态订阅丢失。错误原样上抛到 tick 告警，不静默降级。
+ */
+async function reconcileAutomationRunProjections(now: number): Promise<void> {
+  const projection = automationRunProjectionPort();
+  try {
+    const stale = await reconcileStaleAutomationRuns({
+      repo,
+      projection,
+      now,
+      staleAfterMs: AUTOMATION_RUN_STALE_MS,
+    });
+    if (stale.length > 0) {
+      log(
+        "warn",
+        `reconciled ${stale.length} stale automation run(s) as failed (host outcome missing)`,
+      );
+    }
+  } catch (error) {
+    log(
+      "error",
+      `automation run stale reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /** 按路径缓存的第二连接（AutomationRepo / OffPeakTaskRepo 各自持有自己的句柄，不暴露）。 */
@@ -303,6 +354,10 @@ async function tick(): Promise<void> {
       tickRequested = false;
       try {
         const now = Date.now();
+        if (now - lastAutomationRunReconcileAt >= AUTOMATION_RUN_RECONCILE_INTERVAL_MS) {
+          lastAutomationRunReconcileAt = now;
+          await reconcileAutomationRunProjections(now);
+        }
         // §5.3 per-workspace 仲裁门控：读未过期租约集合（与 §5.2 审计门同源）。不再
         // 「任一租约全局暂停」——租约按 workspace 主键，全局暂停会连带冻结控制面未领导
         // 的 workspace；集合内 workspace 的认领在各 handler 里释放跳过，其余照常认领。
@@ -428,6 +483,7 @@ async function handleClaimed(
     trigger: "schedule",
     // 原意图在 dispatch request 中传递，首次有效选择由目标 Host 固定；此处不提前冻结。
   });
+  registerClaimedAutomationRun(automationRunProjectionPort(), { runId, workspaceKey });
   inFlight.set(runId, {
     automationId: automation.automationId,
     workspaceKey,
@@ -477,6 +533,11 @@ async function handleClaimedManual(
     await repo.releaseManualClaim(automation.automationId, workspaceKey);
     return;
   }
+  registerClaimedAutomationRun(automationRunProjectionPort(), {
+    runId: run.runId,
+    workspaceKey,
+    ...(run.sessionId === undefined ? {} : { ownerSession: run.sessionId }),
+  });
   inFlight.set(run.runId, {
     automationId: automation.automationId,
     workspaceKey,
@@ -670,6 +731,8 @@ async function dispose(): Promise<void> {
   } catch {
     // 忽略。
   }
+  automationRunProjection?.close();
+  automationRunProjection = undefined;
   // 租约/审计探测的第二连接一并收口（同库 WAL，关闭无跨进程影响）。
   for (const db of superAgentStores.values()) {
     try {
@@ -731,6 +794,11 @@ parentPort?.on("message", (event: Electron.MessageEvent) => {
 
 async function main(): Promise<void> {
   await repo.ensureReady();
+  // 启动立即对账：上个 scheduler/host 进程 claim 后未回写终态的 run 置 failed，
+  // 之后 tick 每 5 分钟再跑一次（host 心跳负责让仍存活的 run 不落入 stale 窗口）。
+  const startupNow = Date.now();
+  lastAutomationRunReconcileAt = startupNow;
+  await reconcileAutomationRunProjections(startupNow);
   // 闲时任务中断恢复：scheduler 是 app 单例、先于任何派发启动——此刻 DB 里的
   // running 必属上一个 app 实例残留，安全置回 queued（session 保留供 resume 续跑）。
   try {

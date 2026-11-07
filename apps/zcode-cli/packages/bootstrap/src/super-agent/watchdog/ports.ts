@@ -6,11 +6,18 @@
 /** 组合根绑定的既有命令面；watchdog 不直写业务状态，只经这里执行。 */
 export type CommandResult = { ok: boolean; error?: string };
 
+/** notify-user 的路由事实：daemon 真实 task-notification 需要 owner session/workspace。 */
+export interface NotifyUserContext {
+  ownerSession?: string;
+  workspaceKey?: string;
+}
+
 export interface WatchdogRepairCommandSurface {
   /** 仅 cancel 带 stall 时钟的 run；程序执行前复核 stallClockRef。 */
   cancelStalledRun(runId: string): Promise<CommandResult>;
-  pauseWorkspaceAutomation(workspaceKey: string): Promise<CommandResult>;
-  notifyUser(message: string): Promise<CommandResult>;
+  /** workspaceKey 用于归属复核；automationRunId 是 registry 行 id（runId 含 automationId）。 */
+  pauseWorkspaceAutomation(workspaceKey: string, automationRunId?: string): Promise<CommandResult>;
+  notifyUser(message: string, context?: NotifyUserContext): Promise<CommandResult>;
   /** 升级信道：连续 N 次 repair 失败后经既有 goal 命令面 pause。 */
   pauseGoal(goalId: string): Promise<CommandResult>;
 }
@@ -25,6 +32,11 @@ export interface GoalStateSnapshot {
 
 export interface GoalStateSource {
   read(): GoalStateSnapshot | undefined;
+  /**
+   * 生产异步读面（sessionStore 是 async）：tick 的升级判定 await 此方法；探针仍用
+   * 同步 read()（可返回最近一次缓存快照）。缺席时回退 read()。
+   */
+  readAsync?(): Promise<GoalStateSnapshot | undefined>;
 }
 
 /** trigger 积压端口（trigger 子系统未落地前缺席 ⇒ 探针 skipped）。 */

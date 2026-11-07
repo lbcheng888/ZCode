@@ -32,11 +32,25 @@ export {
 } from "./contract.js";
 export {
   createBackgroundRunProjectionPort,
+  createWorkflowOnlyBackgroundRunProjection,
   type BackgroundRunProjectionPort,
 } from "./composition.js";
 export { BackgroundRunRegistry } from "./registry.js";
+export {
+  createChengStallRepairCommands,
+  createStallRepairCommands,
+  type AutomationPausePort,
+  type ChengJobCancelPort,
+  type ChengStallRepairCommandsDeps,
+  type StallRepairCommandsDeps,
+  type WorkflowRunCancelPort,
+} from "./cheng-stall-commands.js";
 export { validateRepairAction, isRepairAction, executeRepair } from "./repair.js";
-export { runProbes, type ProbeReadContext } from "./probes.js";
+export {
+  runProbes,
+  isWorkflowStallCandidate,
+  type ProbeReadContext,
+} from "./probes.js";
 export {
   runProgressCheck,
   extractKeywords,

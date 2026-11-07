@@ -52,7 +52,11 @@ import type { SkillTelemetryMetadata } from "../skills/index.js";
 import type { ModelApiErrorPhase, ModelFailureExceptionKind } from "../telemetry/index.js";
 import type { ToolSideEffectScope } from "../tools/contract.js";
 import type { SavedWorkflowScope } from "../tools/saved-workflow.js";
-import type { GoalCompletionVerificationOutput, SessionGoal } from "../tools/target.js";
+import type {
+  GoalCompletionVerificationOutput,
+  GoalContinuationChengPlanCard,
+  SessionGoal,
+} from "../tools/target.js";
 import type { TodoItem } from "../tools/todo.js";
 import type { ToolResultDisplayPayload } from "../tools/tool-result-metadata.js";
 import type {
@@ -163,6 +167,7 @@ export const SessionEventType = {
   WorkspaceHookReviewSuperseded: "workspace_hook_review_superseded",
   // 软门禁:准入状态变化时发射,pendingCount=0 时投影层清空 snapshot 字段。
   WorkspaceHookAdmissionUpdated: "workspace_hook_admission_updated",
+  WorkspaceMcpAdmissionUpdated: "workspace_mcp_admission_updated",
   HookRunStarted: "hook_run_started",
   HookRunProgress: "hook_run_progress",
   HookRunCompleted: "hook_run_completed",
@@ -334,16 +339,34 @@ export interface WorkflowBlockedMeta {
   sinceMs: number;
 }
 
+/** 后台 Agent 的终态；产品状态读它，不解析通知文本。error 只在 failed 时出现，与 summary 里的原因相同。 */
+export interface SubagentResultMeta {
+  status: "completed" | "failed" | "killed";
+  error?: string;
+}
+
+/** Cheng job 终态通知的展示载荷；只在 backgroundSource === "cheng-job" 的单条通知轮上在场。 */
+export interface ChengJobNotificationMeta {
+  jobId: string;
+  runId?: string;
+  /** 交付档位：diagnostic 永不等于生产验收。 */
+  gateLevel?: "DIAGNOSTIC_NOT_ACCEPTANCE" | "PRODUCTION";
+}
+
 /** 独立后台结果轮的展示元信息；批量轮可复用代表任务身份并合成 title，不从通知文本反向解析。 */
 export interface BackgroundResultOriginMeta {
-  /** `workflow` 是 dynamic-workflow run（workId ≡ runId），复用整条后台通知管线。 */
-  backgroundSource: "bash" | "subagent" | "workflow";
+  /** `workflow` 是 dynamic-workflow run（workId ≡ runId），`cheng-job` 是 Cheng host job。 */
+  backgroundSource: "bash" | "subagent" | "workflow" | "cheng-job";
   workId: string;
   title: string;
   /** 只在 backgroundSource === "workflow" 的单条通知轮上在场；manifest 渲染的唯一数据源。 */
   workflowNotification?: WorkflowNotificationMeta;
+  /** 只在 backgroundSource === "cheng-job" 的单条通知轮上在场。 */
+  chengJob?: ChengJobNotificationMeta;
   /** 空闲提醒的载荷；与 workflowNotification 至多在场一个。 */
   workflowBlocked?: WorkflowBlockedMeta;
+  /** 只在 backgroundSource === "subagent" 的单条通知轮上在场；合并轮不带。 */
+  subagentResult?: SubagentResultMeta;
 }
 
 /**
@@ -485,6 +508,8 @@ export function boundWorkflowLaunchMeta(input: WorkflowLaunchMeta): WorkflowLaun
 }
 
 export interface TurnStartedPayloadBase {
+  /** 当前输入/后台因果链的客户端来源，仅用于统计。 */
+  inputOrigin?: "desktop" | "mobile";
   /** 执行入口的单调 epoch 毫秒；hooks/持久化发生在 TurnStarted 发布前，不能据发布时间反推执行开始。 */
   executionStartedAt?: number;
   turnNumber: number;
@@ -542,6 +567,8 @@ export interface TurnSteerQueuedPayload {
   commandKind?: TurnSteerCommandKind;
   source?: TurnSteerSource;
   inputPresentation?: RuntimeInputPresentation;
+  /** Host 准入注入的可信 automation 身份；禁止从追踪字段恢复。 */
+  automationId?: string;
   /** 当前排队输入消费时不向 provider 暴露的工具名。 */
   toolDisallowlist?: readonly string[];
   /** 投递语义：queue=消费时切新 product turn；guide=内联当前轮。 */
@@ -1148,12 +1175,25 @@ export interface WorkspaceHookAdmissionUpdatedPayload {
   workspaceIdentity?: string;
 }
 
+/** MCP 的声明集合摘要仅供提示去重；逐条授权仍使用各自的 declarationDigest。 */
+export interface WorkspaceMcpAdmissionUpdatedPayload {
+  pendingCount: number;
+  bundleDigest: string;
+  workspaceIdentity?: string;
+}
+
 export type PermissionDecision = "allow" | "deny" | "escalate" | "modify";
 
 export type TargetChangedAction =
   | "set"
   /** 模型改写 objective：同一 targetID，投影保留 iteration/verifications。 */
   | "objective_edited"
+  /** 模型只改 acceptanceLevel（不改 objective）：revision 同时递增。 */
+  | "acceptance_level_edited"
+  /** 显式 Cheng plan/run 引用被绑定或清除；revision 同时递增。 */
+  | "cheng_ref_edited"
+  /** 绿 ChengGate 产出的 compact 路线卡；target 本身不变。 */
+  | "cheng_plan_card"
   | "status_updated"
   | "cleared"
   | "usage_accounted"
@@ -1172,6 +1212,8 @@ export interface TargetChangedPayload {
   reason?: string;
   /** blocked 迁移的稳定 blocker code(budget-exhausted 或模型 GoalBlock 自报的 code)。 */
   blockerCode?: string;
+  /** `cheng_plan_card` 的紧凑路线卡；其它 action 不携带。 */
+  chengPlanCard?: GoalContinuationChengPlanCard;
 }
 
 /**
@@ -1385,6 +1427,7 @@ export type SessionEventPayload =
   | WorkspaceHookReviewSettledPayload
   | WorkspaceHookReviewSupersededPayload
   | WorkspaceHookAdmissionUpdatedPayload
+  | WorkspaceMcpAdmissionUpdatedPayload
   | HookRunLifecyclePayload
   | CompactLifecyclePayload
   | MicrocompactBoundaryEventPayload

@@ -56,3 +56,39 @@ export function createBackgroundRunProjectionPort(
     },
   };
 }
+
+/**
+ * 生产 workflow-only 投影：core 的 background-run 钩子同时会报 background_task 行；
+ * 本切片只为 workflow 行建行（cheng 行由 S0 observer 独占），其余 kind 丢弃。
+ * settle/touch 对未登记行由 registry no-op，不阻断业务路径。
+ *
+ * `ownerSession`/`workspaceKey` 由会话组合根补齐：core 钩子只给 run identity，
+ * daemon cancel-workflow 需要 owner session 才能经 Core 投 `cancelBackgroundWork`。
+ */
+export function createWorkflowOnlyBackgroundRunProjection(
+  registry: BackgroundRunRegistry,
+  now: () => number = () => Date.now(),
+  context: { ownerSession?: string; workspaceKey?: string } = {},
+): BackgroundRunProjectionPort {
+  const projection = createBackgroundRunProjectionPort(registry, now);
+  return {
+    register(row) {
+      if (row.kind !== "workflow") return;
+      projection.register({
+        ...row,
+        ...(row.ownerSession === undefined && context.ownerSession !== undefined
+          ? { ownerSession: context.ownerSession }
+          : {}),
+        ...(row.workspaceKey === undefined && context.workspaceKey !== undefined
+          ? { workspaceKey: context.workspaceKey }
+          : {}),
+      });
+    },
+    settle(id, owner, state, opts) {
+      projection.settle(id, owner, state, opts);
+    },
+    touch(id, owner, patch) {
+      projection.touch(id, owner, patch);
+    },
+  };
+}

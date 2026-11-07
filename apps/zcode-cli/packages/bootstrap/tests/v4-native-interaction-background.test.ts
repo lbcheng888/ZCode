@@ -877,6 +877,49 @@ describe("v4 原生 cancelBackgroundWork", () => {
   });
 });
 
+describe("v4 原生 notifyUser", () => {
+  function makeRecord(enqueueBackgroundTaskNotification: unknown): V4SessionRecordView {
+    return {
+      app: {
+        sessionId: "s1",
+        runtime: { enqueueBackgroundTaskNotification },
+      },
+      workspace: { workspacePath: "/w" },
+      persistence: "immediate",
+      traceContext: { traceId: "trace-notify" },
+    } as unknown as V4SessionRecordView;
+  }
+
+  it("正路径：直驱 runtime 唯一 task-notification 队列，commandId 即幂等键", async () => {
+    const enqueueBackgroundTaskNotification = vi.fn(() => true);
+    const record = makeRecord(enqueueBackgroundTaskNotification);
+    const host = makeHost({ getRecord: () => record });
+
+    await new V4CommandExecutor(host).execute(
+      envelope("notifyUser", { text: "watchdog escalation" }),
+    );
+
+    expect(enqueueBackgroundTaskNotification).toHaveBeenCalledWith({
+      commandId: "cmd-1",
+      text: "watchdog escalation",
+      traceContext: { traceId: "trace-notify" },
+    });
+  });
+
+  it("runtime 拒绝（shutdown/分支收口）→ 结构化 reasonCode，不伪装 accepted", async () => {
+    const enqueueBackgroundTaskNotification = vi.fn(() => false);
+    const record = makeRecord(enqueueBackgroundTaskNotification);
+    const host = makeHost({ getRecord: () => record });
+
+    const run = new V4CommandExecutor(host).execute(
+      envelope("notifyUser", { text: "watchdog escalation" }),
+    );
+    await expect(run).rejects.toMatchObject({
+      reasonCode: "fault.command.notificationRejected",
+    });
+  });
+});
+
 // ── broker 竞速接线（interaction-broker × V4InteractionRegistry）──────────────
 
 /** requestClient 假实现：挂起直到 signal abort（模拟悬空反向 RPC），或按脚本应答。 */

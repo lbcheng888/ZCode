@@ -139,7 +139,11 @@ SQLite migration `0005_session_target_accounting` rebuilds the table to add `bud
 
 SQLite migration `0011_session_target_summary_title` adds nullable `summary_title`. This is display metadata generated from the user-provided objective with the same title-generation prompt used for session titles. It is not injected into goal prompts or verifier prompts. The async writeback is guarded by `session_id + target_id` so a title generated for a replaced/cleared goal cannot overwrite the current goal.
 
-SQLite migration `0026_session_target_revision` adds `revision integer not null default 1`. It is the optimistic-concurrency token for model-initiated goal writes: replacing the goal increments it across the `on conflict` update, and each successful objective edit increments it again. `GoalUpdate` / `GoalBlock` write only when `session_id + target_id + revision` all match the current row, so a call built on stale state is rejected instead of silently rewriting a goal the user or runtime already changed. Status/usage/accounting writes do not bump it.
+SQLite migration `0026_session_target_revision` adds `revision integer not null default 1`. It is the optimistic-concurrency token for model-initiated goal writes: replacing the goal increments it across the `on conflict` update, each successful `GoalUpdate` edit (objective and/or acceptanceLevel) increments it again, and binding/clearing the explicit Cheng reference also increments it. `GoalUpdate` / `GoalBlock` / `GoalChengBind` write only when `session_id + target_id + revision` all match the current row, so a call built on stale state is rejected instead of silently rewriting a goal the user or runtime already changed. Status/usage/accounting writes do not bump it.
+
+SQLite migration `0027_session_target_acceptance_level` adds `acceptance_level` with a default of `production`; the goal completion gate reads the goal row first, so a diagnostic goal can never satisfy a production requirement.
+
+SQLite migration `0028_session_target_cheng_ref` adds nullable `cheng_job_id` / `cheng_run_id` / `cheng_task`. All three null means no binding; a partially populated binding is a storage error and fails closed. Replacement clears the columns; fork clears them too because a Cheng job/run belongs to the parent session, not the branched target. The stable plan id is derived as `cheng-plan://<jobId>` rather than stored twice.
 
 ## Tool Contract
 
@@ -147,10 +151,11 @@ Built-in model tools (gated by the goal layer flag; without the flag none of the
 
 - `GoalRead`: read the current session goal. Read-only, definition only, not registered.
 - `GoalCreate`: create the goal from a user-stated objective. Fails when a goal already exists; it never replaces a goal, takes no budget/status/completion input, and does not arm automatic continuation.
-- `GoalUpdate`: replace the objective under `targetID + revision`. Only `objective`, `revision`, `time_updated` and the event log change; status, budgets and usage are untouched. A stale pair returns a `409` handler failure that names the current `targetID` and `revision`, and no write occurs.
+- `GoalUpdate`: edit `objective` and/or `acceptanceLevel` under `targetID + revision`. Each field is optional; an omitted field keeps its current value, and both supplied fields commit in one revision-guarded UPDATE. Only those fields, `revision`, `time_updated` and the event log change; status, budgets and usage are untouched. A stale pair returns a `409` handler failure that names the current `targetID` and `revision`, and an empty edit returns `400` without bumping revision.
 - `GoalBlock`: pause the goal (persistent status `paused`, so the continuation gate that only accepts `active` stops) and append a `blocked` event carrying the model's stable `blocker_code`. `budget-exhausted` is reserved for runtime budget exhaustion. A completed goal cannot be blocked or edited.
+- `GoalChengBind`: bind (or clear with `chengRef: null`) the explicit Cheng plan/run reference under `targetID + revision`. Binding inspects the job through the read-only Cheng host, records the authoritative `runId` plus the supplied `task`, and derives `planId = cheng-plan://<jobId>`. It never starts, retries or cancels a job. Goal route cards and the completion gate use only this explicit reference; an unbound goal has no Cheng evidence, and unrelated jobs are never borrowed by recency.
 
-All three write tools declare `readOnly: false`, `destructive: false`, `concurrentSafe: false`, `sideEffectScope: "session"`, `riskLevel: "low"`, `needsApproval: false`, and are not allowed in plan mode (plan mode allows read-only tools only). Their model-visible descriptions carry the completion-evidence rule: plans, todo updates, checklists, phase completion, budget exhaustion and stopping work are not completion evidence.
+All four write tools declare `readOnly: false`, `destructive: false`, `concurrentSafe: false`, `sideEffectScope: "session"`, `riskLevel: "low"`, `needsApproval: false`, and are not allowed in plan mode (plan mode allows read-only tools only). Their model-visible descriptions carry the completion-evidence rule: plans, todo updates, checklists, phase completion, budget exhaustion and stopping work are not completion evidence.
 
 Goal replacement, pause/resume by the user, clear, and completion remain control/runtime operations. The tools cannot set `status`, budgets or `complete`.
 
@@ -159,6 +164,8 @@ Goal replacement, pause/resume by the user, clear, and completion remain control
 Goal creation only validates shape: objective is non-empty and within the length limit. The working model should continue implementing and verifying real evidence such as files, command output, tests, PR state, or user confirmation, but it does not mark completion itself.
 
 When completion verification is enabled, the runtime issues a separate no-tool verifier model request after a turn ends and before injecting the next continuation prompt. Automatic continuation still uses normal turns for work; the verifier is the runtime gate that decides whether the active goal is complete.
+
+For a goal with an explicit Cheng reference, a green `ChengGate` emits the compact `ChengPlan` card independently of continuation prompt assembly. The runtime writes `TargetChanged(action=cheng_plan_card, chengPlanCard=...)` before the acceptance-level check and before the LLM verifier; the same target + planId/runId is deduplicated against the projection. Event projection exposes the card as `SessionProjection.targetChengPlanCard`, and the v4 snapshot mirrors it at `goal.chengPlanCard` (additive-optional). `packages/ui`'s composer goal card consumes it as a read-only route summary (plan id, run id, frontier, recommended, evidence refs); it does not add bind/level-edit actions. Target replacement or `cheng_ref_edited` clears it. A red gate does not produce a card.
 
 ## Goal Iterations
 
@@ -270,12 +277,15 @@ calls retain their own existing policy.
 
 ## Test Coverage
 
-- Migration list includes `0004_session_target`, `0005_session_target_accounting`, `0011_session_target_summary_title`, and `0026_session_target_revision`, and remains reopen-idempotent.
+- Migration list includes `0004_session_target`, `0005_session_target_accounting`, `0011_session_target_summary_title`, `0026_session_target_revision`, `0027_session_target_acceptance_level`, and `0028_session_target_cheng_ref`, and remains reopen-idempotent.
 - Store can set, read, update status, update summary title, reject stale summary title writes, replace with a new `targetId`, and clear goals.
-- Store increments `revision` across replacement and objective edits, rejects stale `targetID + revision` writes without mutating the row, and appends `edited` / `blocked` events with the post-state snapshot.
-- Tool registry registers `GoalCreate` / `GoalUpdate` / `GoalBlock` only under `includeGoalTools`; `GoalRead` stays definition-only. Handler tests cover create, objective edit with revision conflict, block, reserved blocker code, and the completed-goal rejection.
+- Store increments `revision` across replacement, `GoalUpdate` objective/acceptanceLevel edits and Cheng-reference binding/clearing, rejects stale `targetID + revision` writes without mutating the row, and appends `edited` / `blocked` events with the post-state snapshot.
+- Acceptance-level edits persist across a store reopen; acceptance-only updates leave the objective unchanged, and objective+acceptance updates commit under one revision bump.
+- Explicit Cheng references round-trip through `cheng_job_id` / `cheng_run_id` / `cheng_task`; replacement and fork clear them, and a partially populated row fails decoding instead of degrading to “unbound”.
+- Tool registry registers `GoalCreate` / `GoalUpdate` / `GoalBlock` / `GoalChengBind` only under `includeGoalTools`; `GoalRead` stays definition-only. Handler tests cover create, objective and acceptance-level edits with revision conflict, empty edit rejection, block, reserved blocker code, binding/clearing with revision conflict, missing Cheng host, and the completed-goal rejection.
 - Goal prompts escape user-provided objectives before embedding them in system-reminder XML and explicitly say that plans, todos, checklists, proxy signals, and elapsed effort are not completion evidence by themselves. The verifier prompt also requires unfinished todos to be completed before the goal can pass.
 - Successful goal mutations emit `target_changed`; projection updates `SessionProjection.target`; ZCode app-server forwards the event through `_meta.zcode.target`.
+- A green-gate `cheng_plan_card` target_changed projects into `SessionProjection.targetChengPlanCard` and v4 `goal.chengPlanCard`; duplicate plan/run events are suppressed and reference rebinds/target replacements clear the card.
 - Runtime verifies post-turn goal completion through a separate no-tool model request; tests cover verifier pass, verifier fail continuation, disabled verifier, and prompt/query source projection.
 - Verifier malformed JSON is treated as pass so an unparseable verifier response cannot leave an otherwise finished goal active without a continuation condition.
 - Resume injects goal state into model history.

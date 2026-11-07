@@ -74,15 +74,13 @@ describe("CreateWorkflow tool description", () => {
     expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain("too small");
   });
 
-  // 用户裁决 2026-09-16：工作流只能由 `/workflow` 或明确请求发起，模型不得自行决定开一条。
-  it("只按点名路由：没有编排场景那一条，有明确的否定规则和替代动作", () => {
-    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).not.toContain("Multi-subagent orchestration");
-    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).not.toContain("deterministic control flow");
+  // 用户裁决 2026-11-06：ChengCode 内多步/并行/长跑/跨重启优先工作流；子代理只在内存。
+  it("默认优先工作流：写明 journal 可恢复与子代理重启消失的取舍", () => {
+    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain("Prefer a workflow by default");
+    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain("journaled");
+    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain("disappear when the process exits");
     expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain(
-      "Without such an explicit request, do not start a workflow",
-    );
-    expect(CREATE_WORKFLOW_TOOL_DESCRIPTION).toContain(
-      "delegate with the Agent tool or do the work yourself",
+      "Use Agent/Task only for a single short delegation",
     );
   });
 
@@ -161,6 +159,8 @@ describe("facade prose", () => {
       "declare interface Agent",
       "declare function agent(",
       "declare const args",
+      // docs/dynamic-workflow/authoring.md「The run's identity」：run 身份，与 args 同为 facade 的值。
+      "declare const run",
       "declare function log(",
       "declare function report(",
       // docs/dynamic-workflow/authoring.md「Declaring a dashboard」：内容成员 + 四种预置看板的 spec。
@@ -181,6 +181,12 @@ describe("facade prose", () => {
       "declare const git",
       "declare interface WorldRunResult",
       "declare const world",
+      // docs/dynamic-workflow/authoring.md「The facade」：Cheng 数据面段（facade/dts-cheng.ts）。
+      "declare interface ChengGenerateInput",
+      "declare interface ChengJobResult",
+      "declare interface ChengVerifySummary",
+      "declare interface ChengGraphSummary",
+      "declare const cheng",
       // docs/dynamic-workflow/authoring.md「Streams: `channel` and `future`」：facade/dts-stream.ts 段。
       "declare interface Channel<T>",
       "declare function channel<T>(",

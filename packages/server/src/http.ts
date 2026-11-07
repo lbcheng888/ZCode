@@ -1,7 +1,8 @@
 /* eslint-disable max-lines -- HTTP、WebSocket 与静态资源路由集中注册，保持同一鉴权顺序。 */
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { hostname, userInfo } from "node:os";
+import { hostname } from "node:os";
+import { resolveServerOsUser } from "@zcode/shared/node";
 import * as nodePath from "node:path";
 import { basename, extname, resolve } from "node:path";
 import { Hono, type Context } from "hono";
@@ -209,7 +210,7 @@ function createServerInfo(options: HttpServerOptions): ServerRemoteInfo {
     workspaces: resolveServerWorkspaces(options),
     compatibility: ZCODE_COMPATIBILITY_MANIFEST,
     migration: { failedPathCount: options.migrationFailedPathCount ?? 0 },
-    identity: { osUser: userInfo().username, hostname: hostname() },
+    identity: { osUser: resolveServerOsUser(), hostname: hostname() },
     capabilities: {
       desktopContinuous: true,
       websocketRpc: true,
@@ -217,6 +218,7 @@ function createServerInfo(options: HttpServerOptions): ServerRemoteInfo {
       processResourceTelemetry: true,
       // P6 C2：本 Server 能在 desktop-continuous host 连接上挂载票据 admission 反向频道。
       capabilityTicketAdmission: true,
+      remoteConversationTelemetry: true,
     },
   });
 }

@@ -9,30 +9,16 @@ import {
   TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE,
   type SessionId,
   type SessionGoal,
+  type GoalAcceptanceLevel,
   type GoalStatus,
   type SessionTargetEvent,
   type SessionTargetEventKind,
 } from "@zcode/contracts";
 
-interface TargetRow {
-  session_id: string;
-  target_id: string;
-  objective: string;
-  summary_title: string | null;
-  status: string;
-  revision: number;
-  token_budget: number | null;
-  tokens_used: number;
-  time_used_seconds: number;
-  turn_budget: number | null;
-  turns_used: number;
-  wall_clock_budget_seconds: number | null;
-  active_input_id: string | null;
-  active_run_started_at: number | null;
-  active_run_last_seen_at: number | null;
-  time_created: number;
-  time_updated: number;
-}
+import {
+  decodeSessionTargetRow,
+  type TargetRow,
+} from "./session-target-decode.js";
 
 interface TargetEventRow {
   id: number;
@@ -73,7 +59,7 @@ function blockerCodeForStatus(
   return reason ?? TARGET_BUDGET_EXHAUSTED_BLOCKER_CODE;
 }
 
-function appendSessionTargetEvent(
+export function appendSessionTargetEvent(
   db: DatabaseSync,
   input: {
     blockerCode?: string | null;
@@ -109,7 +95,7 @@ export function readSessionTarget(
   const row = db
     .prepare("select * from session_target where session_id = ?")
     .get(input.sessionID) as TargetRow | undefined;
-  return row ? decodeTargetRow(row) : null;
+  return row ? decodeSessionTargetRow(row) : null;
 }
 
 export function readSessionTargetEvents(
@@ -153,6 +139,7 @@ export function setSessionTarget(
     objective: string;
     sessionID: SessionId;
     status: GoalStatus;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
     wallClockBudgetSeconds?: number | null;
@@ -167,13 +154,14 @@ export function setSessionTarget(
   db.prepare(
     `
     insert into session_target (
-      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
-    ) values (?, ?, ?, null, ?, ?, 0, 0, ?, 0, ?, ?, ?)
+      session_id, target_id, objective, summary_title, status, acceptance_level, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
+    ) values (?, ?, ?, null, ?, ?, ?, 0, 0, ?, 0, ?, ?, ?)
     on conflict(session_id) do update set
       target_id = excluded.target_id,
       objective = excluded.objective,
       summary_title = excluded.summary_title,
       status = excluded.status,
+      acceptance_level = excluded.acceptance_level,
       token_budget = excluded.token_budget,
       tokens_used = excluded.tokens_used,
       time_used_seconds = excluded.time_used_seconds,
@@ -183,6 +171,10 @@ export function setSessionTarget(
       active_input_id = null,
       active_run_started_at = null,
       active_run_last_seen_at = null,
+      -- 替换语义:新目标不继承旧目标的 Cheng 引用。
+      cheng_job_id = null,
+      cheng_run_id = null,
+      cheng_task = null,
       time_created = excluded.time_created,
       time_updated = excluded.time_updated,
       -- 替换语义:revision 跨 replace 单调递增,旧调用携带的 revision 不可能命中新目标。
@@ -193,6 +185,7 @@ export function setSessionTarget(
     targetID,
     input.objective,
     input.status,
+    input.acceptanceLevel ?? "production",
     input.tokenBudget ?? null,
     turnBudget,
     input.wallClockBudgetSeconds ?? null,
@@ -224,6 +217,8 @@ export function cloneSessionTargetForFork(
   // fork 是 session state branch，不是新建 goal。必须保留 target_id 和
   // 原始 created time，让已复制的 goal-continuation / verifier metadata 能继续对齐。
   // active run 字段属于父 session 当前运行态，child 不能继承，否则会显示幽灵运行中。
+  // ChengRef 指向父会话的 job/run，同样属于父会话事实：子会话不继承，绑定的
+  // Cheng 证据必须由子会话自己重新建立。
   const hadExistingRow = readSessionTarget(db, { sessionID: input.sessionID }) !== null;
   db.prepare(
     `
@@ -233,6 +228,10 @@ export function cloneSessionTargetForFork(
       objective,
       summary_title,
       status,
+      acceptance_level,
+      cheng_job_id,
+      cheng_run_id,
+      cheng_task,
       revision,
       token_budget,
       tokens_used,
@@ -245,12 +244,16 @@ export function cloneSessionTargetForFork(
       active_run_last_seen_at,
       time_created,
       time_updated
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?, ?)
     on conflict(session_id) do update set
       target_id = excluded.target_id,
       objective = excluded.objective,
       summary_title = excluded.summary_title,
       status = excluded.status,
+      acceptance_level = excluded.acceptance_level,
+      cheng_job_id = excluded.cheng_job_id,
+      cheng_run_id = excluded.cheng_run_id,
+      cheng_task = excluded.cheng_task,
       revision = excluded.revision,
       token_budget = excluded.token_budget,
       tokens_used = excluded.tokens_used,
@@ -270,6 +273,10 @@ export function cloneSessionTargetForFork(
     source.objective,
     source.summaryTitle,
     input.status,
+    source.acceptanceLevel ?? "production",
+    null,
+    null,
+    null,
     // fork 快照可能来自迁移前的旧内存对象(没有 revision 字段);缺省落到 1 保持列约束。
     source.revision ?? 1,
     source.tokenBudget,
@@ -302,6 +309,7 @@ export function createSessionTarget(
   input: {
     objective: string;
     sessionID: SessionId;
+    acceptanceLevel?: GoalAcceptanceLevel;
     tokenBudget?: number | null;
     turnBudget?: number | null;
   },
@@ -311,13 +319,14 @@ export function createSessionTarget(
   db.prepare(
     `
     insert or ignore into session_target (
-      session_id, target_id, objective, summary_title, status, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
-    ) values (?, ?, ?, null, 'active', ?, 0, 0, ?, 0, ?, ?, ?)
+      session_id, target_id, objective, summary_title, status, acceptance_level, token_budget, tokens_used, time_used_seconds, turn_budget, turns_used, wall_clock_budget_seconds, time_created, time_updated
+    ) values (?, ?, ?, null, 'active', ?, ?, 0, 0, ?, 0, ?, ?, ?)
     `,
   ).run(
     input.sessionID,
     targetID,
     input.objective,
+    input.acceptanceLevel ?? "production",
     input.tokenBudget ?? null,
     input.turnBudget === undefined ? DEFAULT_TARGET_TURN_BUDGET : input.turnBudget,
     null,
@@ -339,20 +348,43 @@ export function createSessionTarget(
 
 export function updateSessionTargetStatus(
   db: DatabaseSync,
-  input: { sessionID: SessionId; status: GoalStatus; reason?: string },
+  input: {
+    sessionID: SessionId;
+    status: GoalStatus;
+    reason?: string;
+    expectedTargetID?: string;
+    expectedRevision?: number;
+    expectedStatus?: GoalStatus;
+  },
 ): SessionGoal | null {
   const now = Date.now();
   const previous = readSessionTarget(db, { sessionID: input.sessionID });
   if (!previous) return null;
+  // 可选 CAS：完成写入必须绑定发起验证时的目标身份。目标在验证期间被替换或
+  // revision 被改写时，旧验证结论不得落到新目标行上。
+  const conditions = ["session_id = ?"];
+  const params: Array<string | number> = [input.status, now, input.sessionID];
+  if (input.expectedTargetID !== undefined) {
+    conditions.push("target_id = ?");
+    params.push(input.expectedTargetID);
+  }
+  if (input.expectedRevision !== undefined) {
+    conditions.push("revision = ?");
+    params.push(input.expectedRevision);
+  }
+  if (input.expectedStatus !== undefined) {
+    conditions.push("status = ?");
+    params.push(input.expectedStatus);
+  }
   const result = db
     .prepare(
       `
       update session_target
       set status = ?, time_updated = ?
-      where session_id = ?
+      where ${conditions.join(" and ")}
       `,
     )
-    .run(input.status, now, input.sessionID);
+    .run(...params);
   if (result.changes === 0) return null;
   touchSessionForTarget(db, input.sessionID, now);
   const target = mustReadTarget(db, input.sessionID);
@@ -703,9 +735,10 @@ export function updateSessionTargetSummaryTitle(
 }
 
 /**
- * 乐观并发的 objective 改写:只有 target_id + revision 同时命中当前行才写入,
- * 否则返回 null(目标被替换/objective 已被改写),调用方据此要求模型重读。
- * 只动 objective/revision/time_updated;status、预算与用量一概不碰。
+ * 乐观并发的 goal 字段改写:只有 target_id + revision 同时命中当前行才写入,
+ * 否则返回 null(目标被替换/已被别的调用改过),调用方据此要求模型重读。
+ * objective/acceptanceLevel 各自可选,两者都在场时同一条 UPDATE 原子提交；
+ * 只动这些字段 + revision/time_updated;status、预算与用量一概不碰。
  */
 export function updateSessionTargetObjective(
   db: DatabaseSync,
@@ -713,25 +746,45 @@ export function updateSessionTargetObjective(
     sessionID: SessionId;
     targetID: string;
     revision: number;
-    objective: string;
+    objective?: string;
+    acceptanceLevel?: GoalAcceptanceLevel;
   },
 ): SessionGoal | null {
+  if (input.objective === undefined && input.acceptanceLevel === undefined) {
+    throw new Error("updateSessionTargetObjective requires objective or acceptanceLevel");
+  }
   const now = Date.now();
+  const assignments = ["revision = revision + 1", "time_updated = ?"];
+  const params: Array<string | number> = [now];
+  if (input.objective !== undefined) {
+    assignments.push("objective = ?");
+    params.push(input.objective);
+  }
+  if (input.acceptanceLevel !== undefined) {
+    assignments.push("acceptance_level = ?");
+    params.push(input.acceptanceLevel);
+  }
+  params.push(input.sessionID, input.targetID, input.revision);
   const result = db
     .prepare(
       `
       update session_target
-      set objective = ?, revision = revision + 1, time_updated = ?
+      set ${assignments.join(", ")}
       where session_id = ? and target_id = ? and revision = ? and status <> 'complete'
       `,
     )
-    .run(input.objective, now, input.sessionID, input.targetID, input.revision);
+    .run(...params);
   if (result.changes === 0) return null;
   touchSessionForTarget(db, input.sessionID, now);
   const target = mustReadTarget(db, input.sessionID);
   appendSessionTargetEvent(db, {
     kind: "edited",
-    reason: "objective-updated",
+    reason:
+      input.objective === undefined
+        ? "acceptance-level-updated"
+        : input.acceptanceLevel === undefined
+          ? "objective-updated"
+          : "objective-and-acceptance-updated",
     sessionID: input.sessionID,
     snapshot: target,
     targetID: target.targetID,
@@ -796,7 +849,7 @@ export function clearSessionTarget(db: DatabaseSync, input: { sessionID: Session
   return true;
 }
 
-function mustReadTarget(db: DatabaseSync, sessionID: SessionId): SessionGoal {
+export function mustReadTarget(db: DatabaseSync, sessionID: SessionId): SessionGoal {
   const target = readSessionTarget(db, { sessionID });
   if (!target) {
     throw new Error(`Session target not found after write: ${sessionID}`);
@@ -804,35 +857,11 @@ function mustReadTarget(db: DatabaseSync, sessionID: SessionId): SessionGoal {
   return target;
 }
 
-function touchSessionForTarget(db: DatabaseSync, sessionID: SessionId, timeUpdated: number): void {
+export function touchSessionForTarget(db: DatabaseSync, sessionID: SessionId, timeUpdated: number): void {
   db.prepare("update session set time_updated = max(time_updated, ?) where id = ?").run(
     timeUpdated,
     sessionID,
   );
-}
-
-function decodeTargetRow(row: TargetRow): SessionGoal {
-  return {
-    sessionID: row.session_id as SessionId,
-    targetID: row.target_id,
-    objective: row.objective,
-    summaryTitle: row.summary_title,
-    status: row.status as GoalStatus,
-    revision: row.revision,
-    tokenBudget: row.token_budget,
-    tokensUsed: row.tokens_used,
-    timeUsedSeconds: row.time_used_seconds,
-    turnBudget: row.turn_budget,
-    turnsUsed: row.turns_used,
-    wallClockBudgetSeconds: row.wall_clock_budget_seconds,
-    activeInputId: row.active_input_id,
-    activeRunStartedAtMs: row.active_run_started_at,
-    activeRunLastSeenAtMs: row.active_run_last_seen_at,
-    time: {
-      created: row.time_created,
-      updated: row.time_updated,
-    },
-  };
 }
 
 function createStorageTargetId(): string {

@@ -16,7 +16,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   CONTROL_PLANE_MAX_WORKSPACE_ERRORS,
   CONTROL_PLANE_PROTOCOL_VERSION,
+  CONTROL_PLANE_RPC_TIMEOUTS_MS,
   controlPlaneMessageSchema,
+  hostWatchdogCommandResultSchema,
   resolveControlPlaneAuthTokenPath,
   resolveControlPlaneSocketPath,
 } from "@zcode/shared/super-agent-control-plane-protocol";
@@ -32,6 +34,12 @@ import {
   DaemonPlaneManager,
   resolveTasksIndexDatabasePath,
 } from "../super-agent/daemon/planeManager.js";
+import { createCoreTaskNotificationPort } from "../super-agent/daemon/coreWatchdogPorts.js";
+import {
+  createDaemonWatchdog,
+  type DaemonWatchdogAssembly,
+} from "../super-agent/daemon/watchdog.js";
+import type { SuperAgentWatchdogConfig } from "../super-agent/watchdog/contract.js";
 import {
   CONTROL_PLANE_TRUSTED_PIDS_ENV,
   PEER_CREDENTIALS_NATIVE_PATH_ENV,
@@ -106,7 +114,9 @@ function readArgValue(argv: readonly string[], index: number): string | undefine
 /**
  * 解析入口参数：argv 覆盖 env；未知参数响亮失败（不忽略拼错的 flag）。
  */
-export function parseControlPlaneEntryConfig(input: ParseControlPlaneEntryInput): ControlPlaneEntryConfig {
+export function parseControlPlaneEntryConfig(
+  input: ParseControlPlaneEntryInput,
+): ControlPlaneEntryConfig {
   const overrides: Partial<Record<keyof typeof CONTROL_PLANE_ENV, string>> = {};
   for (let index = 0; index < input.argv.length; index += 1) {
     const token = input.argv[index];
@@ -128,11 +138,15 @@ export function parseControlPlaneEntryConfig(input: ParseControlPlaneEntryInput)
 
   const generation = Number(read("generation"));
   if (!Number.isInteger(generation) || generation < 0) {
-    throw new Error(`control-plane generation must be a non-negative integer (${read("generation")})`);
+    throw new Error(
+      `control-plane generation must be a non-negative integer (${read("generation")})`,
+    );
   }
   const protocolVersion = Number(read("protocolVersion"));
   if (!Number.isInteger(protocolVersion)) {
-    throw new Error(`control-plane protocol-version is missing or invalid (${read("protocolVersion")})`);
+    throw new Error(
+      `control-plane protocol-version is missing or invalid (${read("protocolVersion")})`,
+    );
   }
   const dataBaseDir = read("dataBaseDir")?.trim();
   if (!dataBaseDir) throw new Error("control-plane data-base-dir is required");
@@ -199,6 +213,11 @@ export interface StartControlPlaneDaemonOptions {
   dispatchIntervalMs?: number;
   /** 测试可缩短 in_window 宽限；生产缺省控制面常量（5 分钟）。 */
   dispatchGraceMs?: number;
+  /**
+   * daemon watchdog 配置覆盖（与 health/dispatch 间隔同为组合根注入口）；生产缺省
+   * DEFAULT_WATCHDOG_CONFIG。E2E 用它缩短 tick/熔断阈值驱动真实跨进程 repair。
+   */
+  watchdogConfig?: Partial<SuperAgentWatchdogConfig>;
   /** 测试可在临时目录绑定端点；缺省按 serverRoot 推导。 */
   endpoint?: string;
   platform?: NodeJS.Platform;
@@ -264,6 +283,7 @@ export async function startControlPlaneDaemon(
   const lastErrors = new Map<string, string>();
 
   let database: DatabaseSync | undefined;
+  let daemonWatchdog: DaemonWatchdogAssembly | undefined;
   let rpc: Awaited<ReturnType<typeof createControlPlaneRpcServer>> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let manager: DaemonPlaneManager | undefined;
@@ -274,7 +294,11 @@ export async function startControlPlaneDaemon(
   let hadCoreChannel = false;
   let degraded: { reason: string; since: number } | undefined;
 
-  const recordError = (workspaceIdentity: string | undefined, error: unknown, context: string): void => {
+  const recordError = (
+    workspaceIdentity: string | undefined,
+    error: unknown,
+    context: string,
+  ): void => {
     const message = error instanceof Error ? error.message : String(error);
     onError(error, context);
     if (!workspaceIdentity) return;
@@ -310,6 +334,11 @@ export async function startControlPlaneDaemon(
       await adjudication?.dispose();
     } catch (error) {
       recordError(undefined, error, "daemon.adjudication.dispose");
+    }
+    try {
+      await daemonWatchdog?.stop();
+    } catch (error) {
+      recordError(undefined, error, "daemon.watchdog.stop");
     }
     try {
       database?.close();
@@ -351,6 +380,79 @@ export async function startControlPlaneDaemon(
     const paths = assertControlPlaneStorageRoot(options.config.dataBaseDir);
     database = await openSuperAgentDatabase({ databasePath: paths.superAgentDatabasePath });
 
+    // S3 daemon watchdog：共享生产 registry 只 hydrate 本进程有命令面的 kind。
+    // workflow/automation 经 Core RPC（host.watchdogCommand）转既有
+    // cancelBackgroundWork / automationService.pause；notify-user 经同一 RPC 转
+    // V4 notifyUser，由 owner session 的 runtime task-notification 队列投递。cheng-job
+    // 不在此列：daemon 的 stdio cheng host 看不到前台 app 的 job.json，跨进程 cancel 恒
+    // jobNotFound，由拥有该 job 的会话 app watchdog 处理。
+    daemonWatchdog = createDaemonWatchdog({
+      database,
+      workflowCancel: {
+        cancel: async (
+          runId: string,
+          context?: { workspaceKey?: string; ownerSession?: string },
+        ) => {
+          if (!context?.workspaceKey || !context.ownerSession) {
+            throw new Error(
+              `workflow cancel 缺少 ownerSession/workspaceKey: run=${runId} workspace=${context?.workspaceKey ?? "<missing>"} session=${context?.ownerSession ?? "<missing>"}`,
+            );
+          }
+          const planeManager = manager;
+          if (!planeManager) throw new Error("daemon plane manager not ready");
+          const result = hostWatchdogCommandResultSchema.parse(
+            await planeManager.requestHost(
+              context.workspaceKey,
+              "host.watchdogCommand",
+              {
+                action: "cancel-workflow",
+                workspaceIdentity: context.workspaceKey,
+                runId,
+                sessionId: context.ownerSession,
+              },
+              CONTROL_PLANE_RPC_TIMEOUTS_MS["host.watchdogCommand"],
+            ),
+          );
+          if (!result.ok) throw new Error(result.error ?? "workflow cancel failed");
+          return true;
+        },
+      },
+      automationPause: {
+        pause: async (input: { id: string }, context?: { workspaceKey?: string }) => {
+          if (!context?.workspaceKey) {
+            throw new Error(`pause-automation 缺少 workspaceKey: automation=${input.id}`);
+          }
+          const planeManager = manager;
+          if (!planeManager) throw new Error("daemon plane manager not ready");
+          const result = hostWatchdogCommandResultSchema.parse(
+            await planeManager.requestHost(
+              context.workspaceKey,
+              "host.watchdogCommand",
+              {
+                action: "pause-automation",
+                workspaceIdentity: context.workspaceKey,
+                automationId: input.id,
+              },
+              CONTROL_PLANE_RPC_TIMEOUTS_MS["host.watchdogCommand"],
+            ),
+          );
+          if (!result.ok) throw new Error(result.error ?? "automation pause failed");
+          return true;
+        },
+      },
+      taskNotification: createCoreTaskNotificationPort(
+        (workspaceKey, method, params, timeoutMs) => {
+          const planeManager = manager;
+          if (!planeManager) throw new Error("daemon plane manager not ready");
+          return planeManager.requestHost(workspaceKey, method, params, timeoutMs);
+        },
+      ),
+      notify: (message: string) => {
+        onError(new Error(message), "daemon.watchdog.notify");
+      },
+      ...(options.watchdogConfig === undefined ? {} : { config: options.watchdogConfig }),
+    });
+
     // 裁决会话惰性装配：首个裁决批才启动 provider Registry（Core 物化 Built-in
     // Config 存在启动顺序竞态，spec §8-7）；不可用即 typed 失败端口，候选留 pending。
     adjudication = createLazyAdjudicationSession({
@@ -390,6 +492,9 @@ export async function startControlPlaneDaemon(
       },
     });
     manager.enumerateKnownWorkspaces();
+    // watchdog 的 workflow/automation 端口依赖 manager 的 Core channel；等 manager
+    // 就绪后再启动，避免启动早期 tick 以“manager not ready”误报 repair 失败。
+    daemonWatchdog?.start();
 
     const endpoint =
       options.endpoint ??
@@ -415,9 +520,7 @@ export async function startControlPlaneDaemon(
     // §3.8 两种认证模式必须由显式开关选择，不能靠「凭据文件恰好缺席」隐式进入：
     // peerMode 由 launcher/env 投影，开启时禁止同时提供凭据文件，避免两套语义静默混用。
     if (options.config.peerMode && options.authTokenFile) {
-      throw new Error(
-        "control-plane peer mode must not be combined with an auth token file",
-      );
+      throw new Error("control-plane peer mode must not be combined with an auth token file");
     }
     let peerGuard = options.peerGuard;
     if (!peerGuard && options.config.peerMode) {
@@ -425,9 +528,7 @@ export async function startControlPlaneDaemon(
       // （Supervisor）+ launcher 投影的 Core PID。addon 缺失/加载失败即启动 fatal，
       // 绝不回退到 /proc 启发式或未认证端点。生产默认不开此模式，仍走 authToken。
       if (!options.nativeAddonPath) {
-        throw new Error(
-          "control-plane peer mode requires a native peer credentials addon path",
-        );
+        throw new Error("control-plane peer mode requires a native peer credentials addon path");
       }
       const native = loadNativePeerCredentials({ addonPath: options.nativeAddonPath });
       if (!native) {
@@ -608,8 +709,7 @@ export async function runSuperAgentControlPlaneCommand(
     ? undefined
     : (options.authTokenFile ?? resolveControlPlaneAuthTokenPath(config.serverRoot));
   const nativeAddonPath = config.peerMode
-    ? options.nativeAddonPath?.trim() ||
-      options.env[PEER_CREDENTIALS_NATIVE_PATH_ENV]?.trim()
+    ? options.nativeAddonPath?.trim() || options.env[PEER_CREDENTIALS_NATIVE_PATH_ENV]?.trim()
     : undefined;
 
   const daemon = await startControlPlaneDaemon({

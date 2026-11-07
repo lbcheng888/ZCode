@@ -30,6 +30,7 @@ import type {
   SessionRef,
 } from "@zcode/dynamic-workflow";
 import type { ActorTranscriptStore } from "./workflow-actor-transcript.js";
+import type { ChengHostPort } from "./workflow-cheng-world-read.js";
 import type { WorkflowConcurrencyPort } from "./workflow-concurrency-governor.js";
 import type { ActorModelActivity, WorkflowClock } from "./workflow-driver-concurrency.js";
 import type { ActorSessionQuiescence } from "./workflow-driver-quiescence.js";
@@ -114,6 +115,18 @@ export interface AgentRuntimeWorkflowDriverDeps {
   escalationRegistry: WorkflowEscalationRegistry;
   /** world-read 与产物发布共用的路径解析基准目录（workspace 根）。 */
   cwd: string;
+  /**
+   * Cheng 数据面端口（`cheng.generate` / `verify` / `graph`）。**可选**：不带端口的装配
+   * （snippet、纯 replay、fake driver、尚未接线的宿主）里 cheng.* 以命名的
+   * `ChengHostUnavailable` 拒绝该节点——脚本可 catch、节点以 failed 落 journal，不是静默
+   * 跳过，也不是退回 `world.run` 模板。
+   */
+  chengHostPort?: ChengHostPort;
+  /**
+   * run 结算后的资源释放钩子（driver.dispose 同步调用，fire-and-forget）。
+   * Cheng 用它取消本 run 的 host job；异常吞在此边界，不阻断其余释放。
+   */
+  onDispose?: () => void;
   /**
    * 用户面产物（`artifact.file` / `artifact.markdown`）的
    * 字节落点。⚠ 这里的 artifact 是**交付给用户看的产出**，不是引擎内部那个 artifact

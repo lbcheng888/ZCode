@@ -52,11 +52,11 @@ function contextWith(sessionStore?: unknown): ZCodeProtocolAgentServerContext {
 }
 
 function projectDir() {
-  return join(cwd, ".zcode", "workflows");
+  return join(cwd, ".chengcode", "workflows");
 }
 
 function globalDir() {
-  return join(home, ".zcode", "workflows");
+  return join(home, ".chengcode", "workflows");
 }
 
 async function seedWorkflow(name: string, meta: Parameters<typeof serializeSavedWorkflow>[0]) {
@@ -107,9 +107,13 @@ describe("workflows/* protocol methods", () => {
       whenToUse: "要发版时",
       args: { target: { type: "string", required: true } },
     });
-    await writeFile(join(cwd, ".zcode", "workflows", "broken.dwf.ts"), "const x = 1;\n", "utf8");
     await writeFile(
-      join(cwd, ".zcode", "workflows", "legacy.workflow.js"),
+      join(cwd, ".chengcode", "workflows", "broken.dwf.ts"),
+      "const x = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      join(cwd, ".chengcode", "workflows", "legacy.workflow.js"),
       "export const meta = {};\n",
     );
 
@@ -124,18 +128,18 @@ describe("workflows/* protocol methods", () => {
       description: "发布前检查",
       whenToUse: "要发版时",
       scope: "project",
-      path: join(cwd, ".zcode", "workflows", "release-check.dwf.ts"),
+      path: join(cwd, ".chengcode", "workflows", "release-check.dwf.ts"),
     });
     expect(JSON.stringify(result)).not.toContain("reviewer.ask");
     expect(result.invalid).toHaveLength(1);
-    expect(result.invalid[0]?.path).toBe(join(cwd, ".zcode", "workflows", "broken.dwf.ts"));
+    expect(result.invalid[0]?.path).toBe(join(cwd, ".chengcode", "workflows", "broken.dwf.ts"));
     expect(result.invalid[0]?.reason).toContain("missing_frontmatter");
   });
 
   it("get：命中回 meta + 脚本本体；invalid_name / not_found / parse_error 各自可分辨", async () => {
     await seedWorkflow("release-check", { description: "发布前检查" });
     await writeFile(
-      join(cwd, ".zcode", "workflows", "broken.dwf.ts"),
+      join(cwd, ".chengcode", "workflows", "broken.dwf.ts"),
       "/* zcode-workflow\nx: [\n*/\n",
     );
 
@@ -216,12 +220,12 @@ describe("workflows/* protocol methods", () => {
         meta: { description: "x" },
       }),
     ).toEqual({ ok: false, reason: "not_found" });
-    await expect(readFile(join(cwd, ".zcode", "workflows", "ghost.dwf.ts"))).rejects.toThrow();
+    await expect(readFile(join(cwd, ".chengcode", "workflows", "ghost.dwf.ts"))).rejects.toThrow();
   });
 
   it("delete：删后 list 不再列出；not_found；非法名字在触盘前拒绝；不删同名 .workflow.js", async () => {
     const path = await seedWorkflow("release-check", { description: "发布前检查" });
-    const legacyPath = join(cwd, ".zcode", "workflows", "release-check.workflow.js");
+    const legacyPath = join(cwd, ".chengcode", "workflows", "release-check.workflow.js");
     await writeFile(legacyPath, "export const meta = {};\n");
 
     const deleted = await deleteSavedWorkflowOp(contextWith(), {

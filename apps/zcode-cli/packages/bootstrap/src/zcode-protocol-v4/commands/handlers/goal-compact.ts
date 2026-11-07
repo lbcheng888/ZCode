@@ -38,7 +38,10 @@ export class V4GoalCompactRejectedError extends Error {
       | "restoreWarning"
       | "guard.planGoalMutuallyExclusive"
       | "guard.attachmentGoalControlDenied"
-      | "emptyObjective",
+      | "emptyObjective"
+      // S4 用户直改（updateGoalAcceptance / bindGoalChengRef）：CAS 过期与 cheng 端口缺席。
+      | "staleTarget"
+      | "chengUnavailable",
     message: string,
   ) {
     super(message);
@@ -52,7 +55,7 @@ export class V4GoalCompactRejectedError extends Error {
 const manualCompactControllers = new WeakSet<AbortController>();
 
 /**
- * compact：手动上下文压缩（v4 payload 为空对象，无 instructions 变体）。
+ * compact：手动上下文压缩，模型选择固定在命令接收边界，无 instructions 变体。
  *
  * barrier 语义：
  * 1. running/goal verifier/goal continuation/tool work → typed compact intent 入 FIFO。
@@ -86,12 +89,19 @@ async function compact(
     throw new V4GoalCompactRejectedError("restoreWarning", record.restoreWarning.message);
   }
 
+  // 旧 compact 没有携带选择，导致菜单 B 被忽略；旧客户端也在此固定会话选择，
+  // 不能等模型就绪或排队结束后再读可变 Session。只取模型，不消费草稿模式/Plan。
+  const payload = envelope.payload as CommandPayloadMap["compact"];
+  const modelSelection = structuredClone(
+    resolveSubmittedExecutionState(record, payload).modelSelection,
+  );
   const routingMode = host.getInputRoutingMode?.(record.app.sessionId) ?? null;
   const busy = Boolean(record.activeAbortController) || Boolean(activeTurn);
   if (busy || routingMode === "enqueue" || routingMode === "guide" || routingMode === "choice") {
     const intent = inputIntentMetadata(envelope, {
       requestedDelivery: "queue",
       text: "/compact",
+      modelSelection,
     });
     const queueOptions = {
       commandKind: "compact" as const,
@@ -119,7 +129,14 @@ async function compact(
     return undefined;
   }
 
-  await startManualCompact(host, record, envelope.commandId);
+  await startManualCompact(host, record, {
+    inputId: envelope.commandId,
+    intent: inputIntentMetadata(envelope, {
+      requestedDelivery: "startNow",
+      text: "/compact",
+      modelSelection,
+    }),
+  });
   return undefined;
 }
 
@@ -127,8 +144,11 @@ async function compact(
 export async function startManualCompact(
   host: V4CommandCoreHost,
   record: V4SessionRecordView,
-  inputId: string,
-  foregroundPromotionLeaseId?: string,
+  params: {
+    inputId: string;
+    intent: NonNullable<SubmitPromptOptions["intent"]>;
+    foregroundPromotionLeaseId?: string;
+  },
 ): Promise<void> {
   if (record.restoreWarning) {
     throw new V4GoalCompactRejectedError("restoreWarning", record.restoreWarning.message);
@@ -143,9 +163,8 @@ export async function startManualCompact(
   manualCompactControllers.add(abortController);
   void runWithSessionResidencyFinalization(record, () =>
     runCompactTurnInBackground(host, record, {
+      ...params,
       abortController,
-      foregroundPromotionLeaseId,
-      inputId,
     }),
   ).catch(() => {
     // 后台 compact 的错误经事件流（CompactStarted/终态 marker）降级上报；兜底防 unhandled rejection。
@@ -159,6 +178,7 @@ async function runCompactTurnInBackground(
     abortController: AbortController;
     foregroundPromotionLeaseId?: string;
     inputId: string;
+    intent: NonNullable<SubmitPromptOptions["intent"]>;
   },
 ): Promise<void> {
   const startedAt = Date.now();
@@ -173,6 +193,7 @@ async function runCompactTurnInBackground(
     await record.app.submitPrompt("/compact", {
       abortSignal: params.abortController.signal,
       inputId: params.inputId,
+      intent: params.intent,
     });
   } catch (error) {
     lifecycleStatus = params.abortController.signal.aborted ? "cancelled" : "failed";
@@ -568,4 +589,72 @@ async function runGoalContinuationInBackground(
   await host.afterLegacyStateMutation?.(record, mutationReason);
 }
 
-export const goalCompactHandlers = { compact, clearGoal, pauseGoal, resumeGoal, sendGoalCommand };
+/**
+ * updateGoalAcceptance（S4 UI 设置面）：只改验收等级。CAS 键 = 快照 goal 的
+ * targetId+revision；过期/无目标按 staleTarget 拒绝（UI 取新 revision 重试），
+ * 不部分写入。等级落库后 TargetChanged(source="command") 由 app 侧广播。
+ */
+async function updateGoalAcceptance(
+  host: V4CommandCoreHost,
+  envelope: CommandEnvelope,
+): Promise<CommandResult | undefined> {
+  const record = requireRecord(host, envelope.sessionId);
+  const payload = envelope.payload as CommandPayloadMap["updateGoalAcceptance"];
+  const updated = await record.app.updateGoalAcceptance({
+    targetID: payload.targetID,
+    revision: payload.revision,
+    acceptanceLevel: payload.acceptanceLevel,
+  });
+  if (!updated) {
+    throw new V4GoalCompactRejectedError(
+      "staleTarget",
+      `Goal revision ${payload.revision} (target ${payload.targetID}) is stale; refresh the goal state and retry`,
+    );
+  }
+  await host.afterLegacyStateMutation?.(record, "goal_acceptance_edited");
+  return undefined;
+}
+
+/**
+ * bindGoalChengRef（S4 UI 设置面）：绑定/清除显式 Cheng plan/run 引用。绑定在 app 侧
+ * 经真实 host inspect 复核（job 不存在/端口缺席按 chengUnavailable 拒绝，runId 取
+ * 回执而非 UI 自由文本）；清除传 chengRef=null。CAS 过期按 staleTarget 拒绝。
+ */
+async function bindGoalChengRef(
+  host: V4CommandCoreHost,
+  envelope: CommandEnvelope,
+): Promise<CommandResult | undefined> {
+  const record = requireRecord(host, envelope.sessionId);
+  const payload = envelope.payload as CommandPayloadMap["bindGoalChengRef"];
+  let updated;
+  try {
+    updated = await record.app.bindGoalChengRef({
+      targetID: payload.targetID,
+      revision: payload.revision,
+      chengRef: payload.chengRef,
+    });
+  } catch (error) {
+    throw new V4GoalCompactRejectedError(
+      "chengUnavailable",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (!updated) {
+    throw new V4GoalCompactRejectedError(
+      "staleTarget",
+      `Goal revision ${payload.revision} (target ${payload.targetID}) is stale; refresh the goal state and retry`,
+    );
+  }
+  await host.afterLegacyStateMutation?.(record, "goal_cheng_ref_edited");
+  return undefined;
+}
+
+export const goalCompactHandlers = {
+  compact,
+  clearGoal,
+  pauseGoal,
+  resumeGoal,
+  sendGoalCommand,
+  updateGoalAcceptance,
+  bindGoalChengRef,
+};

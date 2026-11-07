@@ -21,6 +21,7 @@ import {
   type SharedContextImportCommitBundle,
   type ModelId,
   type ModelProviderId,
+  type SessionId,
   type WorkspaceId,
 } from "@zcode/contracts";
 import { OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME } from "@zcode/shared";
@@ -193,6 +194,74 @@ describe("virtual project CLI session facts", () => {
     expect(store.debugCounts(bundle.session.id)).toEqual(before);
     await store.createSession(bundle.session);
     expect(await store.listSessions()).toEqual([]);
+    store.close();
+  });
+
+  it("purges a session with its owned children but never a fork or an unrelated session", async () => {
+    const store = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const parent = createSharedContextImportBundle({ sessionSlug: "purge-parent", shareId: "s1" });
+    await store.commitSharedContextImportBundle?.(parent);
+    const child = createSessionId("purge-child");
+    const grandchild = createSessionId("purge-grandchild");
+    const fork = createSessionId("purge-fork");
+    const unrelated = createSessionId("purge-unrelated");
+    const base = { ...parent.session, title: "x", time: { created: 1, updated: 1 } };
+    await store.createSession({ ...base, id: child, slug: "c", parentID: parent.session.id, taskType: "subagent_child" });
+    await store.createSession({ ...base, id: grandchild, slug: "g", parentID: child, taskType: "workflow_child" });
+    await store.createSession({ ...base, id: fork, slug: "f", parentID: parent.session.id, taskType: "fork" });
+    await store.createSession({ ...base, id: unrelated, slug: "u" });
+
+    const trees = await store.listOwnedSessionTrees?.([parent.session.id, unrelated]);
+    expect(trees?.get(parent.session.id)?.sort()).toEqual([child, parent.session.id, grandchild].sort());
+    expect(trees?.get(unrelated)).toEqual([unrelated]);
+
+    await store.purgeSessions?.([parent.session.id]);
+    expect(await store.getSession(parent.session.id)).toBeNull();
+    expect(await store.getSession(child)).toBeNull();
+    expect(await store.getSession(grandchild)).toBeNull();
+    expect(await store.messages({ sessionID: parent.session.id })).toEqual([]);
+    expect(store.debugCounts(parent.session.id)).toMatchObject({ messages: 0, parts: 0 });
+    // fork 是独立的用户任务（可能属于别的项目），源会话删除后仍保留。
+    expect(await store.getSession(fork)).not.toBeNull();
+    expect(await store.getSession(unrelated)).not.toBeNull();
+    // 已不存在的会话再次删除是空操作。
+    await store.purgeSessions?.([parent.session.id]);
+    expect((await store.listOwnedSessionTrees?.([parent.session.id]))?.get(parent.session.id)).toEqual([]);
+    store.close();
+  });
+
+  it("lists the live sessions whose parts still point at another session's artifacts", async () => {
+    const store = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const source = createSharedContextImportBundle({ sessionSlug: "artifact-source", shareId: "s2" });
+    await store.commitSharedContextImportBundle?.(source);
+    const base = { ...source.session, title: "x", time: { created: 1, updated: 1 } };
+    const fork = createSessionId("artifact-fork");
+    const deletedFork = createSessionId("artifact-deleted-fork");
+    const other = createSessionId("artifact-other");
+    const refer = async (sessionID: SessionId, text: string) => {
+      const messageID = createMessageId(`${sessionID}-m`);
+      await store.saveMessage({
+        id: messageID,
+        sessionID,
+        role: "user",
+        time: { created: 1 },
+        agent: "zcode-agent",
+        model: { providerID: "p" as ModelProviderId, modelID: "m" as ModelId },
+      });
+      await store.savePart({ id: createPartId(`${sessionID}-p`), sessionID, messageID, type: "text", text, time: { start: 1, end: 1 } });
+    };
+    for (const id of [fork, deletedFork, other])
+      await store.createSession({ ...base, id, slug: id, parentID: source.session.id, taskType: "fork" });
+    const uri = `zcode-artifact://${source.session.id}/art_1`;
+    await refer(fork, `image ${uri} and again ${uri}`);
+    await refer(deletedFork, uri);
+    await store.softDeleteSession(deletedFork);
+    // 引用自身附件不算外部引用；没有引用的会话不出现在结果里。
+    await refer(other, `zcode-artifact://${other}/own`);
+
+    const referrers = await store.listArtifactReferrers?.([source.session.id, other]);
+    expect(referrers?.get(source.session.id)).toEqual([fork]);
+    expect(referrers?.has(other)).toBe(false);
     store.close();
   });
 
@@ -643,6 +712,8 @@ describe("SQLite session store", () => {
       "0024_session_database_identity",
       "0025_session_target_budget_and_events",
       "0026_session_target_revision",
+      "0027_session_target_acceptance_level",
+      "0028_session_target_cheng_ref",
     ];
 
     try {
@@ -683,6 +754,8 @@ describe("SQLite session store", () => {
         "0.16.9",
         "0.16.9",
         "0.16.9",
+        "0.17.0",
+        "0.17.1",
       ]);
 
       db.close();
@@ -720,7 +793,11 @@ describe("SQLite session store", () => {
         ]),
       );
       expect(attempts.flat().filter((result) => !result.ok)).toEqual([]);
-      expect(attempts.flat().every((result) => result.migrationIds?.length === 26)).toBe(true);
+      expect(
+        attempts
+          .flat()
+          .every((result) => result.migrationIds?.length === SQLITE_MIGRATIONS.length),
+      ).toBe(true);
     },
     CONCURRENT_STARTUP_TEST_TIMEOUT_MS,
   );
@@ -949,6 +1026,8 @@ describe("SQLite session store", () => {
         "0024_session_database_identity",
         "0025_session_target_budget_and_events",
         "0026_session_target_revision",
+        "0027_session_target_acceptance_level",
+        "0028_session_target_cheng_ref",
       ]);
       store.close();
     } finally {
@@ -2406,10 +2485,12 @@ describe("SQLite session store", () => {
 
       const first = await store.createTarget({
         objective: "Ship target MVP",
+        acceptanceLevel: "diagnostic",
         sessionID,
       });
       expect(first).toMatchObject({
         objective: "Ship target MVP",
+        acceptanceLevel: "diagnostic",
         sessionID,
         status: "active",
         summaryTitle: null,
@@ -2436,6 +2517,8 @@ describe("SQLite session store", () => {
         sessionID,
         tokenBudget: 50,
       });
+      // 替换目标未显式声明验收等级 ⇒ 缺省 production（旧行/旧调用同语义）。
+      expect(budgeted.acceptanceLevel).toBe("production");
       const budgetLimited = await store.accountTargetUsage({
         sessionID,
         targetID: budgeted.targetID,
@@ -2620,6 +2703,282 @@ describe("SQLite session store", () => {
       expect(await store.clearTarget({ sessionID })).toBe(true);
       expect(await store.readTarget({ sessionID })).toBeNull();
       expect(await store.clearTarget({ sessionID })).toBe(false);
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("updates acceptanceLevel on the goal row under revision CAS and survives reopen", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-acceptance-"));
+    const dbPath = join(tempRoot, "session.sqlite");
+    let store = await createSqliteSessionStore({ dbPath });
+    const sessionID = createSessionId("target-acceptance-update");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-acceptance-update"),
+        slug: "target-acceptance-update",
+        directory: tempRoot,
+        title: "target acceptance update",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      const created = await store.createTarget({
+        acceptanceLevel: "diagnostic",
+        objective: "Ship diagnostic evidence",
+        sessionID,
+      });
+      expect(created).toMatchObject({
+        acceptanceLevel: "diagnostic",
+        objective: "Ship diagnostic evidence",
+        revision: 1,
+      });
+
+      // 只改 acceptanceLevel：objective 不被重写，但 revision 递增。
+      const levelOnly = await store.updateTargetObjective({
+        acceptanceLevel: "production",
+        revision: created!.revision,
+        sessionID,
+        targetID: created!.targetID,
+      });
+      expect(levelOnly).toMatchObject({
+        acceptanceLevel: "production",
+        objective: "Ship diagnostic evidence",
+        revision: 2,
+      });
+
+      // 同一 CAS 原子改 objective + acceptanceLevel。
+      const both = await store.updateTargetObjective({
+        acceptanceLevel: "diagnostic",
+        objective: "Ship diagnostic evidence v2",
+        revision: levelOnly!.revision,
+        sessionID,
+        targetID: created!.targetID,
+      });
+      expect(both).toMatchObject({
+        acceptanceLevel: "diagnostic",
+        objective: "Ship diagnostic evidence v2",
+        revision: 3,
+      });
+
+      // 旧 revision 对 acceptanceLevel 同样拒绝，且不写坏当前行。
+      await expect(
+        store.updateTargetObjective({
+          acceptanceLevel: "production",
+          revision: levelOnly!.revision,
+          sessionID,
+          targetID: created!.targetID,
+        }),
+      ).resolves.toBeNull();
+
+      const events = await store.readTargetEvents({ sessionID });
+      expect(events.slice(-2)).toMatchObject([
+        { kind: "edited", reason: "acceptance-level-updated" },
+        { kind: "edited", reason: "objective-and-acceptance-updated" },
+      ]);
+
+      store.close();
+      store = await createSqliteSessionStore({ dbPath });
+      expect(await store.readTarget({ sessionID })).toMatchObject({
+        acceptanceLevel: "diagnostic",
+        objective: "Ship diagnostic evidence v2",
+        revision: 3,
+      });
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("persists an explicit Cheng plan/run reference under CAS and clears it on replacement", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-cheng-ref-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-cheng-ref");
+    const jobId = "a".repeat(64);
+    const chengRef = {
+      jobId,
+      task: "p02_min2",
+      runId: "m5-run-1",
+      planId: `cheng-plan://${jobId}`,
+    };
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-cheng-ref"),
+        slug: "target-cheng-ref",
+        directory: tempRoot,
+        title: "target cheng ref",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      const created = await store.createTarget({
+        objective: "Ship Cheng evidence",
+        sessionID,
+      });
+      expect(created?.chengRef).toBeUndefined();
+
+      const bound = await store.updateTargetChengRef({
+        chengRef,
+        revision: created!.revision,
+        sessionID,
+        targetID: created!.targetID,
+      });
+      expect(bound).toMatchObject({ chengRef, revision: 2 });
+      expect(await store.readTarget({ sessionID })).toMatchObject({ chengRef, revision: 2 });
+
+      // 旧 revision 不能改引用；目标行保持绑定后的值。
+      await expect(
+        store.updateTargetChengRef({
+          chengRef: null,
+          revision: created!.revision,
+          sessionID,
+          targetID: created!.targetID,
+        }),
+      ).resolves.toBeNull();
+      expect(await store.readTarget({ sessionID })).toMatchObject({ chengRef, revision: 2 });
+
+      // 用户替换目标 = 新目标，不继承旧目标的 Cheng 引用。
+      const replaced = await store.setTarget({ objective: "Replacement", sessionID });
+      expect(replaced.chengRef).toBeUndefined();
+      expect(replaced.targetID).not.toBe(created!.targetID);
+
+      const rebound = await store.updateTargetChengRef({
+        chengRef,
+        revision: replaced.revision,
+        sessionID,
+        targetID: replaced.targetID,
+      });
+      expect(rebound).toMatchObject({ chengRef, revision: replaced.revision + 1 });
+
+      // fork 复制目标状态，但不继承父会话的 Cheng job/run 绑定。
+      const forkSessionID = createSessionId("target-cheng-ref-fork");
+      await store.createSession({
+        id: forkSessionID,
+        parentID: sessionID,
+        projectID: createProjectId("target-cheng-ref"),
+        slug: "target-cheng-ref-fork",
+        directory: tempRoot,
+        title: "target cheng ref fork",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      const forked = await store.cloneTargetForFork({
+        sessionID: forkSessionID,
+        source: rebound!,
+        status: "active",
+      });
+      expect(forked.chengRef).toBeUndefined();
+
+      const cleared = await store.updateTargetChengRef({
+        chengRef: null,
+        revision: rebound!.revision,
+        sessionID,
+        targetID: replaced.targetID,
+      });
+      expect(cleared).toMatchObject({ revision: rebound!.revision + 1 });
+      expect(cleared?.chengRef).toBeUndefined();
+
+      const events = await store.readTargetEvents({ sessionID });
+      expect(
+        events.filter((event) => event.reason?.startsWith("cheng-ref")),
+      ).toMatchObject([
+        { kind: "edited", reason: "cheng-ref-updated" },
+        { kind: "edited", reason: "cheng-ref-updated" },
+        { kind: "edited", reason: "cheng-ref-cleared" },
+      ]);
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("writes a target status only when the expected target identity still matches", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-target-status-cas-"));
+    const store = await createSqliteSessionStore({
+      dbPath: join(tempRoot, "session.sqlite"),
+    });
+    const sessionID = createSessionId("target-status-cas");
+
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("target-status-cas"),
+        slug: "target-status-cas",
+        directory: tempRoot,
+        title: "target status cas",
+        version: "0.1.0",
+        time: { created: 1_700_000_000_000, updated: 1_700_000_000_000 },
+      });
+      const created = await store.createTarget({
+        objective: "Ship CAS",
+        sessionID,
+      });
+
+      // 旧 revision：验证结论不得落到已经改写的目标行上。
+      await expect(
+        store.updateTargetStatus({
+          expectedRevision: created!.revision + 1,
+          expectedTargetID: created!.targetID,
+          sessionID,
+          status: "complete",
+        }),
+      ).resolves.toBeNull();
+      expect(await store.readTarget({ sessionID })).toMatchObject({
+        revision: created!.revision,
+        status: "active",
+      });
+
+      // 旧 targetID：目标在验证期间被替换。
+      await expect(
+        store.updateTargetStatus({
+          expectedTargetID: "stale-target",
+          sessionID,
+          status: "complete",
+        }),
+      ).resolves.toBeNull();
+      expect(await store.readTarget({ sessionID })).toMatchObject({
+        status: "active",
+        targetID: created!.targetID,
+      });
+
+      // 状态迁移不递增 revision：仅靠 targetID/revision 会把 paused 覆盖成 complete。
+      await store.updateTargetStatus({ sessionID, status: "paused" });
+      await expect(
+        store.updateTargetStatus({
+          expectedRevision: created!.revision,
+          expectedStatus: "active",
+          expectedTargetID: created!.targetID,
+          sessionID,
+          status: "complete",
+        }),
+      ).resolves.toBeNull();
+      expect(await store.readTarget({ sessionID })).toMatchObject({
+        status: "paused",
+        targetID: created!.targetID,
+      });
+      await store.updateTargetStatus({ sessionID, status: "active" });
+
+      const completed = await store.updateTargetStatus({
+        expectedRevision: created!.revision,
+        expectedStatus: "active",
+        expectedTargetID: created!.targetID,
+        sessionID,
+        status: "complete",
+      });
+      expect(completed).toMatchObject({
+        status: "complete",
+        targetID: created!.targetID,
+      });
+      const events = await store.readTargetEvents({ sessionID });
+      expect(events.at(-1)).toMatchObject({
+        kind: "completed",
+        snapshot: { status: "complete", targetID: created!.targetID },
+      });
     } finally {
       store.close();
       await rm(tempRoot, { force: true, recursive: true });

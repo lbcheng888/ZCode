@@ -70,6 +70,8 @@ interface BackgroundRunRow {
 | `core/src/tool/executor/background-task-registry.ts` | `local_dynamic_workflow`→`dynamic-workflow`；其余 taskType→`runtime-background-task` | register（含重臂）、running touch、终态 settle、注册失败 drop |
 | `core/src/runtime/methods/dynamic-workflow-run-track.ts` | `dynamic-workflow` | resume 追踪后 register/upsert，补 `stallClockRef = "dwf-run:" + runId` |
 | `packages/services/src/session/automationService.ts` | `automation` | `runNow` 建 run ⇒ register；`deleteRun` ⇒ settle `dropped` |
+| `packages/desktop/src/scheduler/index.ts` | `automation` | 定时/manual claim 落库后 ⇒ register running 行（manual 带 ownerSession） |
+| `packages/desktop/src/host/cronRunLifecycle.ts` | `automation` | `automation_runs` 终态落库成功后 ⇒ settle（succeeded/failed/stopped → completed/failed/cancelled）；运行期每 60s ⇒ `markRunOutcome(running)` + registry touch（stale reconciler 的存活信号） |
 | `packages/services/src/session/offPeakTaskService.ts` | `offpeak` | 创建成功 ⇒ register；`markRunning` ⇒ touch；`cancelTask` ⇒ settle `cancelled` |
 
 钩子与 watchdog 之间只隔一个组合根接缝（`watchdog/composition.ts` 导出的绑定函数 + core `setBackgroundRunProjection` / services 侧 setter 或 deps 字段）；接线文件不在本 lane，见 §7-2。接缝缺席时钩子为 no-op（投影未挂载），不报错、不阻塞业务路径——这是注册缺席不是状态兜底。
@@ -108,8 +110,11 @@ function validateRepairAction(x: unknown): RepairAction | null;
 ```ts
 interface WatchdogRepairCommandSurface {
   cancelStalledRun(runId: string): Promise<CommandResult>;   // 仅 stall 钟 run
-  pauseWorkspaceAutomation(workspaceKey: string): Promise<CommandResult>;
-  notifyUser(message: string): Promise<CommandResult>;
+  pauseWorkspaceAutomation(workspaceKey: string, automationRunId?: string): Promise<CommandResult>;
+  notifyUser(message: string, context?: {
+    ownerSession?: string;   // daemon 投递路由：缺席时真实端口不出站
+    workspaceKey?: string;
+  }): Promise<CommandResult>;
   pauseGoal(goalId: string): Promise<CommandResult>;         // 升级用 goal 命令面
 }
 type CommandResult = { ok: boolean; error?: string };
@@ -139,7 +144,7 @@ type CommandResult = { ok: boolean; error?: string };
   - `llmNoProgressAdjudication === false`（缺省）：**裁决器不被调用**，仅记录 streak（dormant，可经 `status()` 观测）。
   - true：调用短命只读裁决器端口（输入 = 提示 + 近况 + streak；输出 = `{ proposal, targetId? }`），两级程序校验后才执行：
     1. 枚举：`validateRepairAction(proposal)` 过关；
-    2. 目标：需要目标的动作必须指向真实可执行的 registry 行——`cancel-stalled` ⇒ `targetId` 行在场 ∧ 命中探针同款 stall 资格；`pause-automation` ⇒ `targetId` 行在场 ∧ `workspaceKey` 在场；`notify-user` ⇒ 无需目标。
+    2. 目标：需要目标的动作必须指向真实可执行的 registry 行——`cancel-stalled` ⇒ `targetId` 行在场 ∧ 命中探针同款 stall 资格；`pause-automation` ⇒ `targetId` 行在场 ∧ `workspaceKey` 在场 ∧ 行 id 可解析为 automation runId；`notify-user` ⇒ 无需目标。
     任一不过 ⇒ 记 `invalidProposal`，不执行、不计熔断。执行时 dispatch 按 `targetId` 取真实行（`progress:<streak>` 只是无目标动作的记录键，不得充当 cancel/pause 目标）。
   - 每个 streak 峰只裁决一次（streak 清零后可再裁）。
 - 模块无任何 prompt/策略写路径；裁决器端口由组合根绑到短命只读会话（接缝 §7-2）。
@@ -153,8 +158,8 @@ type CommandResult = { ok: boolean; error?: string };
 ## 7. 接缝登记（本 lane 之外）
 
 1. **持久化**：registry 里程碑 A 为进程内投影；daemon 批再落「随各 owner 库 + 聚合视图」（设计 §2.3）。行形状即届时的表形状。
-2. **组合根接线**：`watchdog/composition.ts` 提供绑定函数；实际调用点（create-app / zcodeAgentService / node.ts 构造处）不在本 lane。含：core `setBackgroundRunProjection`、services 侧投影 setter/deps 字段、command surface 绑既有命令、goalState/triggerBacklog/goalHint 端口、LLM 裁决器（flag ON 时）。
-3. **数据源未落地的探针**：dispatch pending / daemon 心跳 / permission pending / 连续重启计数（恒 skipped）；workflow 引擎 run-stalled 事件 → `touch(stalledSince)` 投影；automation 定时 run 的 claim/settle（在 automationRepo/scheduler，不在 automationService）→ 投影；offpeak host/scheduler 侧终态回写 → 投影；goal 行注册（target 层）→ 投影；**owner 心跳接线**——background-task/dwf 轮询路径（`background-tasks.ts`，running 快照与 UI 事件去重解耦的周期 touch）、automation 执行期回写、offpeak sync 周期 touch，接线时在 register 声明 `heartbeat`；未接线前 registry-stall 对未声明行 skipped（里程碑 A 现状）。
+2. **组合根接线**：create-app 已绑 core `setBackgroundRunProjection`、workflow/automation/notify/goal pause command、goalState async 读面（sessionStore）与 workflow cancel 端口；services 已把 manual automation run projection 写共享 super-agent registry，app watchdog tick 增量 refresh；desktop scheduler 在定时/manual claim 时把 running 行写入同一库，desktop host 在 `automation_runs` 终态落库成功后 settle，因此 pause-automation 也覆盖定时 run；scheduler 启动/每 5 分钟对超过 10min 无心跳且无终态的台账行置 `failed_to_dispatch/failed(stale_run_reconciled)` 并 settle registry failed，host 运行期每 60s 用 `markRunOutcome(running)` + registry touch 续租（长任务不误杀）；daemon watchdog 已有：仅 hydrate 有命令面的 kind，cheng-job 走 host.cancel，workflow/automation 经 Core RPC `host.watchdogCommand`（V4 `cancelBackgroundWork` / `automationService.pause`）；daemon notify-user 真实通道：生产端口 `createCoreTaskNotificationPort` 携路由事实（ownerSession/workspaceKey，随 repair 行进入升级通知）经 Core `host.watchdogCommand notify-user` 合成 V4 `notifyUser` 投 owner session runtime task-notification 队列（`commandId=daemon-notify:<uuid>` 幂等键透传），缺路由键不出站；无 `taskNotification` 端口时返回 `daemon_task_notification_unavailable`（`notified=false`，onError 只作诊断）。triggerBacklog/goalHint/LLM 裁决器端口仍按宿主注入。
+3. **数据源未落地的探针**：dispatch pending / daemon 心跳 / permission pending / 连续重启计数（恒 skipped）；workflow 引擎 run-stalled 事件 → `touch(stalledSince)` 投影；offpeak host/scheduler 侧终态回写 → 投影；goal 行注册（target 层）→ 投影；**owner 心跳接线**——background-task/dwf 轮询路径（`background-tasks.ts`，running 快照与 UI 事件去重解耦的周期 touch）、offpeak sync 周期 touch，接线时在 register 声明 `heartbeat`；automation 执行期的台账/registry `updated_at` 续租已接（供 stale reconciler），但 automation register 仍未声明 `heartbeat`，registry-stall 不判 automation 行；未接线前 registry-stall 对其它未声明行 skipped（里程碑 A 现状）。
 4. **contracts config**：本模块配置不进 `contracts/src/config`；唯一对外配置面 = 模块 config + 组合根接线。
 
 ## 8. 测试锚

@@ -106,18 +106,35 @@ export const workflowBlockedMetaSchema = z.object({
 });
 export type WorkflowBlockedMeta = z.infer<typeof workflowBlockedMetaSchema>;
 
+// 后台 Agent 的终态与失败原文（contracts 的 SubagentResultMeta）；产品状态读它，不解析通知文本。
+export const subagentResultMetaSchema = z.object({
+  status: z.enum(["completed", "failed", "killed"]),
+  error: z.string().optional(),
+});
+
+// Cheng job 终态通知的载荷；只在 backgroundSource === "cheng-job" 的单条通知轮上在场。
+export const chengJobNotificationMetaSchema = z.object({
+  jobId: z.string().min(1),
+  runId: z.string().min(1).optional(),
+  gateLevel: z.enum(["DIAGNOSTIC_NOT_ACCEPTANCE", "PRODUCTION"]).optional(),
+});
+
 export const backgroundResultOriginMetaSchema = z.object({
-  // 三个取值与 contracts 的 BackgroundResultOriginMeta 保持同步。
-  // "workflow" 是 dynamic-workflow run（workId ≡ runId），复用整条后台通知管线。
-  backgroundSource: z.enum(["bash", "subagent", "workflow"]),
+  // 四个取值与 contracts 的 BackgroundResultOriginMeta 保持同步。
+  // "workflow" 是 dynamic-workflow run（workId ≡ runId），"cheng-job" 是 Cheng host job。
+  backgroundSource: z.enum(["bash", "subagent", "workflow", "cheng-job"]),
   workId: z.string().min(1),
   title: z.string().min(1),
   // 只在 backgroundSource === "workflow" 的单条通知轮上在场；zod 剥离未知键，
   // 这里不加即整条链路静默丢——本字段是 manifest 渲染的唯一数据源。
   workflowNotification: workflowNotificationMetaSchema.optional(),
+  // Cheng job 的窄结果载荷；形状不认识时当作缺席，界面退回通知文本。
+  chengJob: chengJobNotificationMetaSchema.optional().catch(undefined),
   // 提醒载荷，与 workflowNotification 至多在场一个。`.catch(undefined)`：将来它的形状变了，认识这个
   // 键的客户端把它当作缺席（裸标题行），而不是丢掉整帧。
   workflowBlocked: workflowBlockedMetaSchema.optional().catch(undefined),
+  // 只在 subagent 的单条通知轮上在场；形状不认识时当作缺席，界面退回通知文本。
+  subagentResult: subagentResultMetaSchema.optional().catch(undefined),
 });
 export type BackgroundResultOriginMeta = z.infer<typeof backgroundResultOriginMetaSchema>;
 

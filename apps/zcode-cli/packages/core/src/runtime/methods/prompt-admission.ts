@@ -143,6 +143,7 @@ export async function admitPrompt(
     // Bootstrap 的 busy 快照决定是否排队，状态在跨层 await 期间转为空闲会误用普通模型启动。
     return await this.enqueueDeferredInput({
       attachments,
+      automationId: options.automationId,
       commandKind: options.commandKind,
       delivery: "queue",
       input,
@@ -230,6 +231,7 @@ export async function admitPrompt(
           ? ("guide" as const)
           : undefined;
       return await this.steerTurn({
+        automationId: options?.automationId,
         commandKind: options?.commandKind,
         delivery,
         expectedTurnId: options?.expectedTurnId,
@@ -251,6 +253,7 @@ export async function admitPrompt(
         : ("queue" as const);
     return await this.enqueueDeferredInput({
       attachments,
+      automationId: options?.automationId,
       commandKind: options?.commandKind,
       delivery,
       input,

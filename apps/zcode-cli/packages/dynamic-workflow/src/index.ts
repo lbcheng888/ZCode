@@ -46,6 +46,8 @@ export {
 export { collectSites, type SiteTable } from "./analysis/sites.js";
 export {
   collectWorldRunCommands,
+  CHENG_RUNNER_BASENAMES,
+  WORLD_RUN_DENIED_CODE,
   WORLD_RUN_LITERAL_CODE,
   type WorldRunCommands,
 } from "./analysis/world-run.js";

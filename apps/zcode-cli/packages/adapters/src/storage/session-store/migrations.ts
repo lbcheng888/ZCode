@@ -1079,4 +1079,51 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
     },
     sql: `alter table session_target add column revision integer not null default 1;`,
   },
+  {
+    appVersion: "0.17.0",
+    id: "0027_session_target_acceptance_level",
+    touchedTables: ["session_target"],
+    // S4：goal 完成门的 ChengGate acceptance 要求。缺省 production，旧行自动获得生产要求；
+    // schema 仍把字段设为 optional 以兼容旧 wire 快照。pragma 守卫与 0025/0026 同款。
+    apply: (db) => {
+      const targetColumns = new Set(
+        db
+          .prepare("pragma table_info(session_target)")
+          .all()
+          .map((row) => row.name),
+      );
+      if (!targetColumns.has("acceptance_level")) {
+        db.exec(
+          "alter table session_target add column acceptance_level text not null default 'production'",
+        );
+      }
+    },
+    sql: `alter table session_target add column acceptance_level text not null default 'production';`,
+  },
+  {
+    appVersion: "0.17.1",
+    id: "0028_session_target_cheng_ref",
+    touchedTables: ["session_target"],
+    // S4：goal 的显式 Cheng plan/run 引用。jobId 是锚点，runId/task 由 host inspect/planner
+    // 事实写入；三列全空 = 未绑定。pragma 守卫与 0025/0026/0027 同款。
+    apply: (db) => {
+      const targetColumns = new Set(
+        db
+          .prepare("pragma table_info(session_target)")
+          .all()
+          .map((row) => row.name),
+      );
+      if (!targetColumns.has("cheng_job_id"))
+        db.exec("alter table session_target add column cheng_job_id text");
+      if (!targetColumns.has("cheng_run_id"))
+        db.exec("alter table session_target add column cheng_run_id text");
+      if (!targetColumns.has("cheng_task"))
+        db.exec("alter table session_target add column cheng_task text");
+    },
+    sql: `
+      alter table session_target add column cheng_job_id text;
+      alter table session_target add column cheng_run_id text;
+      alter table session_target add column cheng_task text;
+    `,
+  },
 ];

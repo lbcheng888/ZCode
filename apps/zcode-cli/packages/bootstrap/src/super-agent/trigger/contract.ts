@@ -144,6 +144,13 @@ export interface TriggerMandatePort {
   ): { tier: TriggerMandateTier; source?: "implicit" | "explicit"; mandateId?: string };
 }
 
+/** 真实 ChengGate 结果的最小结构（= cheng-contract ChengGateResult，结构对称避免跨模块依赖）。 */
+export interface TriggerChengGateVerdict {
+  ok: boolean;
+  level: "PRODUCTION" | "DIAGNOSTIC_NOT_ACCEPTANCE" | "BLOCKED";
+  reasons: readonly string[];
+}
+
 /** 投机/自动档执行载荷（M5 spec lane：无凭据受限 profile 的静默复现-修复）。 */
 export interface TriggerSpecRunInput {
   triggerId: string;
@@ -155,6 +162,10 @@ export interface TriggerSpecRunInput {
   evidence?: readonly string[];
   /** M6 方案卡内容（auto/speculative 档没有卡可展示时也必须携带完整方案）。 */
   card?: TriggerSchemeCard;
+  /** trigger payload 携带的 Cheng job 引用；分发前用真实 host verify 求 gate。 */
+  chengJobId?: string;
+  /** 程序求得的 gate 结果；红 gate 在 dispatch 阶段静默丢弃，不进 spec run。 */
+  chengGate?: TriggerChengGateVerdict;
 }
 
 /** M5 spec run 启动端口：Phase 3 唯一合法形态=subagent（workflow child runtime 不接受受限档案）。 */
@@ -174,6 +185,8 @@ export interface TriggerDecisionLogEntryInput {
   evidence?: readonly string[];
   /** M6 方案卡（落 decision_log.card_payload）；缺席 = 旧行/非方案类。 */
   card?: TriggerSchemeCard;
+  /** ChengPlan 引用（落 decision_log.cheng_plan_id）；缺席 = 无 plan。 */
+  chengPlanId?: string | null;
   createdAt?: number;
 }
 
@@ -181,6 +194,8 @@ export type RouteOwnedOutcome =
   | { kind: "routed"; triggerId: string; deliveries: TriggerDeliveryReceipt[] }
   /** 部分/全部投递被拒：final_disposition 保持未决（NULL），供启动重放与告警覆盖。 */
   | { kind: "delivery_failed"; triggerId: string; deliveries: TriggerDeliveryReceipt[] }
+  /** Cheng gate 红：静默丢弃回复，final_disposition=record_only。 */
+  | { kind: "gate_blocked"; triggerId: string; reason: string }
   | { kind: "orphaned"; triggerId: string }
   | { kind: "not_found"; triggerId: string };
 
@@ -206,6 +221,8 @@ export interface TriggerVerdictDecision {
   evidence?: readonly string[];
   /** M6 方案卡（accept 必需，出口门校验）；reject/record-only 不需要。 */
   scheme?: TriggerSchemeCard;
+  /** 可选 ChengPlan 稳定引用（S2）；同事务落 trigger_events 与 decision_log 的 cheng_plan_id。 */
+  chengPlanId?: string;
 }
 
 export interface LeaderClaimInput {
@@ -282,7 +299,7 @@ export interface SuperAgentTriggerContract {
    * 同步返回；校验 + 写入整段包在 BEGIN IMMEDIATE 事务内，任一步失败整体 ROLLBACK
    * 后上浮——「零部分执行」对写路径同样成立（decisionLog 端口须与仓储同库句柄）。
    */
-  applyVerdicts(batchId: string, decisions: readonly TriggerVerdictDecision[]): void;
+  applyVerdicts(batchId: string, decisions: readonly TriggerVerdictDecision[]): Promise<void>;
   /**
    * leader 租约竞争（§3.3）：BEGIN IMMEDIATE + upsert 带 WHERE 守卫 + changes()>0 断言。
    * 断言不过 = follower（本事务回滚，不启动任何控制面循环）；断言过 = leader。

@@ -1,17 +1,10 @@
-/* eslint-disable max-lines -- skill 同步服务集中维护候选扫描、远端判重和导入流程，避免拆分时扩大远端同步回归面。 */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type {
-  SkillSyncArchiveExportResult,
-  SkillSyncCandidate,
-  SkillSyncCandidateListResult,
-  SkillSyncImportResult,
-  SkillSyncRemoteStatusResult,
-} from "@zcode/shared";
+import { SKILL_DATA_SYNC_MAX_ITEM_BYTES, type SkillSyncImportResult } from "@zcode/shared";
 import type { ISkillSyncService } from "./skillSync.js";
 import { createSkillSyncArchive, extractSkillSyncArchive } from "./skillSyncArchive.js";
 import { normalizeSkillSyncRelativePath, resolveSkillSyncPathWithin } from "./skillSyncPath.js";
@@ -22,116 +15,31 @@ import {
   shouldWalkSkillDirectoryEntry,
   walkSkillMarkdownPaths,
 } from "../skills/skillDiscoveryWalk.js";
+import { createSkillDataSyncMethods } from "../data-sync/node.js";
 import { checkRemoteSyncDirectoryWriteAccess } from "../remote-sync/remoteSyncWriteAccess.js";
 
 const SKILL_FILE_NAME = "SKILL.md";
-const DEFAULT_MAX_ARCHIVE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAX_ARCHIVE_BYTES = SKILL_DATA_SYNC_MAX_ITEM_BYTES;
+
+/** 用户级技能候选：path 指向技能目录下的 SKILL.md。 */
+export interface UserSkillCandidate {
+  name: string;
+  directoryName: string;
+  description: string;
+  path: string;
+}
 
 export function createSkillSyncService(options?: { maxArchiveBytes?: number }): ISkillSyncService {
   const maxArchiveBytes = options?.maxArchiveBytes ?? DEFAULT_MAX_ARCHIVE_BYTES;
-  return {
-    async listLocalUserSkillCandidates(): Promise<SkillSyncCandidateListResult> {
-      return {
-        candidates: await collectUserSkillCandidates(),
-        maxArchiveBytes,
-      };
-    },
-    async listRemoteUserSkillStatuses(params): Promise<SkillSyncRemoteStatusResult> {
-      const root = getUserZcodeSkillRoot();
-      const existingSkillPathByName = await collectUserSkillDirectoryPathByName();
-      // skill sync service 会通过 RPC 暴露给 renderer / remote 客户端；
-      // directoryName 不能只信 UI 候选，必须在服务端限制为 skills 根内的安全相对路径。
-      const directoryNames = params.directoryNames.map((directoryName) =>
-        normalizeSkillSyncRelativePath(directoryName),
-      );
-      const requestedSkillNameByDirectory = new Map(
-        (params.skills ?? []).map((skill) => [
-          normalizeSkillSyncRelativePath(skill.directoryName),
-          skill.name,
-        ]),
-      );
-      return {
-        statuses: directoryNames.map((directoryName) => {
-          const path = resolveSkillSyncPathWithin(root, directoryName);
-          if (existsSync(path)) {
-            return { directoryName, exists: true, path };
-          }
-          const requestedName = requestedSkillNameByDirectory.get(directoryName);
-          const existingPath = requestedName
-            ? existingSkillPathByName.get(normalizeSkillNameKey(requestedName))
-            : undefined;
-          return existingPath
-            ? { directoryName, exists: true, path: existingPath }
-            : { directoryName, exists: false };
-        }),
-      };
-    },
-    async exportSkillsArchive(params): Promise<SkillSyncArchiveExportResult> {
-      const candidates = await collectUserSkillCandidates();
-      const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-      const selected = params.skillIds.map((id) => {
-        const candidate = candidateById.get(id);
-        if (!candidate) {
-          throw new Error(`skill sync candidate not found: ${id}`);
-        }
-        return candidate;
-      });
-      const archiveEntries = await Promise.all(
-        selected.map(async (candidate) => ({
-          sourcePath: await realpath(dirname(candidate.path)),
-          archivePath: candidate.directoryName,
-        })),
-      );
-      const selectedBytes = selected.reduce((total, candidate) => total + candidate.sizeBytes, 0);
-      if (selectedBytes > maxArchiveBytes) {
-        throw createSkillSyncSizeLimitError({
-          actualBytes: selectedBytes,
-          maxBytes: maxArchiveBytes,
-          phase: "selected-content",
-        });
-      }
-      const archive = await createSkillSyncArchive(archiveEntries);
-      if (archive.byteLength > maxArchiveBytes) {
-        throw createSkillSyncSizeLimitError({
-          actualBytes: archive.byteLength,
-          maxBytes: maxArchiveBytes,
-          phase: "archive",
-        });
-      }
-      return {
-        archive,
-        archiveBytes: archive.byteLength,
-        skills: selected.map(({ id, name, directoryName }) => ({
-          id,
-          name,
-          directoryName,
-        })),
-      };
-    },
-    async checkRemoteUserSkillWriteAccess() {
-      return checkRemoteSyncDirectoryWriteAccess(getUserZcodeSkillRoot());
-    },
-    async importSkillsArchive(params): Promise<SkillSyncImportResult> {
-      if (params.overwrite) {
-        throw new Error("skill sync overwrite is not supported");
-      }
-      if (params.archive.byteLength > maxArchiveBytes) {
-        throw createSkillSyncSizeLimitError({
-          actualBytes: params.archive.byteLength,
-          maxBytes: maxArchiveBytes,
-          phase: "archive",
-        });
-      }
-      return await importArchive(params.archive, maxArchiveBytes);
-    },
-  };
+  // 数据同步：单个技能目录的大小上限，默认 20MB。
+  return createSkillDataSyncMethods({ maxItemBytes: maxArchiveBytes });
 }
 
-function resolveUserHomeDir(): string {
+export function resolveUserHomeDir(): string {
   return process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
 }
 
-function getUserZcodeSkillRoot(): string {
+export function getUserZcodeSkillRoot(): string {
   return join(resolveUserHomeDir(), GLOBAL_DATA_DIR_NAME, "skills");
 }
 
@@ -139,7 +47,11 @@ function getUserAgentsSkillRoot(): string {
   return join(resolveUserHomeDir(), ".agents", "skills");
 }
 
-async function collectUserSkillCandidates(): Promise<SkillSyncCandidate[]> {
+/**
+ * 用户级技能候选：`~/.zcode/skills` 优先，`~/.agents/skills` 中同目录名或同 name 的项剔除，再按 realpath 去重。
+ * 文件数与字节签名由数据同步的 list 自己计算。
+ */
+export async function collectUserSkillCandidates(): Promise<UserSkillCandidate[]> {
   const seenSkillRealpaths = new Set<string>();
   const userZcodeSkillRoot = getUserZcodeSkillRoot();
   const rawZcodeCandidates = await collectUserSkillCandidatesInRoot(userZcodeSkillRoot);
@@ -166,10 +78,10 @@ async function collectUserSkillCandidates(): Promise<SkillSyncCandidate[]> {
 }
 
 async function dedupeCandidatesByCanonicalSkillPath(
-  candidates: SkillSyncCandidate[],
+  candidates: UserSkillCandidate[],
   seenSkillRealpaths: Set<string>,
-): Promise<SkillSyncCandidate[]> {
-  const result: SkillSyncCandidate[] = [];
+): Promise<UserSkillCandidate[]> {
+  const result: UserSkillCandidate[] = [];
   for (const candidate of candidates) {
     const canonicalPath = await realpath(candidate.path).catch(() => candidate.path);
     if (seenSkillRealpaths.has(canonicalPath)) {
@@ -181,11 +93,11 @@ async function dedupeCandidatesByCanonicalSkillPath(
   return result;
 }
 
-async function collectUserSkillCandidatesInRoot(root: string): Promise<SkillSyncCandidate[]> {
+async function collectUserSkillCandidatesInRoot(root: string): Promise<UserSkillCandidate[]> {
   if (!existsSync(root)) {
     return [];
   }
-  const candidates: SkillSyncCandidate[] = [];
+  const candidates: UserSkillCandidate[] = [];
   for await (const skillPath of walkSkillMarkdownPaths(root)) {
     const directoryPath = dirname(skillPath);
     const relativePath = normalizeSkillDirectoryRelativePath(root, directoryPath);
@@ -196,12 +108,10 @@ async function collectUserSkillCandidatesInRoot(root: string): Promise<SkillSync
     if (content !== null) {
       const metadata = parseSkillMetadata(content, basename(relativePath));
       candidates.push({
-        id: createCandidateId(directoryPath),
         name: metadata.name,
         directoryName: relativePath,
         description: metadata.description,
         path: skillPath,
-        sizeBytes: await computeRecursiveSize(directoryPath),
       });
     }
   }
@@ -267,7 +177,7 @@ function normalizeSkillDirectoryRelativePath(root: string, directoryPath: string
   return relative(root, directoryPath).replaceAll("\\", "/");
 }
 
-function normalizeSkillNameKey(name: string): string {
+export function normalizeSkillNameKey(name: string): string {
   return name.trim().toLowerCase();
 }
 
@@ -275,7 +185,7 @@ function joinSkillRelativePath(parent: string, child: string): string {
   return parent ? `${parent}/${child}` : child;
 }
 
-async function readSkillFileOrNull(skillPath: string): Promise<string | null> {
+export async function readSkillFileOrNull(skillPath: string): Promise<string | null> {
   try {
     return await readFile(skillPath, "utf-8");
   } catch (error) {
@@ -286,7 +196,7 @@ async function readSkillFileOrNull(skillPath: string): Promise<string | null> {
   }
 }
 
-function parseSkillMetadata(
+export function parseSkillMetadata(
   content: string,
   fallbackName: string,
 ): {

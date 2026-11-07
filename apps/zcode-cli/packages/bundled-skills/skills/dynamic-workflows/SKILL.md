@@ -230,7 +230,9 @@ if (check.exitCode !== 0) feedback = check.stderr;
 
 A nonzero exit code is a **value**, not an exception: read `exitCode` and carry `stderr`
 forward as the next round's feedback, with no `catch`; rejections are for the world failing
-to answer (spawn failure, timeout, output over the cap). The command name must be a
+to answer (spawn failure, timeout, output over the cap). A test suite can print more than the
+16 MiB cap: a gate that reads only `exitCode` passes `{ output: "discard" }`, and a gate that
+hands the failure on passes `{ output: { tail: 16_384 } }`. The command name must be a
 compile-time string literal, because the user approves the script's command set at
 confirmation: interpolate paths, flags and round numbers into the **args array**, never into
 the command. Open-ended editing belongs to a subagent; `world.run` is for checks your
@@ -549,6 +551,12 @@ completion notification **even when the run fails**, which is how a run that die
 twelfth task keeps eleven tasks' worth of work. Report each finding the moment it lands —
 after its confirmation, with its status — rather than accumulating an array to return at the
 end: the array is what you lose. Items are recorded, so a resumed run never shows one twice.
+
+**Stamp what outlives the run with `run.id`.** A ledger line, a file the script writes for a
+later run, a report item someone will trace back: put `run.id` in it, so the record names the
+run that produced it (`run.resumedFrom` names the run an amendment revised). Keep both out of
+ask text, personas and `files`/`world` arguments. Those are cache keys, and an amendment mints
+a new id, so an ask that quotes it misses the cache and runs again.
 
 **Deliver a report.** The script's final `return` is the handoff the main agent presents,
 in the order below; what the user themselves keep is the artifact of the next section.
@@ -1163,6 +1171,12 @@ declare function agent(name?: string, persona?: string | AgentPersona): Agent;
  */
 declare const args: Readonly<Record<string, unknown>>;
 
+/**
+ * This run's id, and the run it amends. ResumeWorkflowRun keeps both; AmendWorkflow mints a
+ * new id. Keep them out of ask text, personas and world arguments: those are cache keys.
+ */
+declare const run: { readonly id: string; readonly resumedFrom?: string };
+
 /** Emit a progress message to the user. */
 declare function log(message: string): void;
 
@@ -1359,9 +1373,8 @@ declare const git: {
 declare interface WorldRunResult {
   /** The process exit code. Nonzero is a normal, returned outcome — branch on it. */
   exitCode: number;
-  /** Captured stdout (UTF-8). Capped at 256KB; over the cap the call rejects. */
+  /** Captured output (UTF-8), shaped by opts.output. */
   stdout: string;
-  /** Captured stderr (UTF-8). Same cap and rejection semantics as stdout. */
   stderr: string;
 }
 
@@ -1373,9 +1386,73 @@ declare interface WorldRunResult {
  * literal, shown to the user at confirmation. Fixed argv, never a shell: no pipes,
  * redirection or expansion. cwd is the workspace. Node builtins are reachable as
  * world.run("node", ["-e", code]).
+ * opts.output (both streams): "full" (default) rejects over 16 MiB; "discard" is "";
+ * { tail: n } keeps the last n bytes, n <= 16777216 (16 MiB). Neither bounds what the process prints.
  */
 declare const world: {
-  run(cmd: string, args?: string[], opts?: { timeoutMs?: number }): Promise<WorldRunResult>;
+  run(cmd: string, args?: string[], opts?: { timeoutMs?: number; output?: "full" | "discard" | { tail: number } }): Promise<WorldRunResult>;
+};
+
+/** One Cheng job request. Generation is an effect; P2 accepts diagnostic mode only. */
+declare interface ChengGenerateInput {
+  /** Absolute spec path inside the Cheng runtime's allowlisted roots. */
+  specPath: string;
+  /** Task name from the spec index. */
+  task: string;
+  /** M5 expansion budget; omitted = the host's diagnostic default. */
+  budget?: number;
+  /**
+   * Rerun nonce. The same inputs replay the terminal job (no rerun); a new attempt
+   * mints a new job, which is the only way to retry a cancelled or failed job.
+   */
+  attempt?: string;
+}
+
+/** Terminal outcome of one diagnostic Cheng job. */
+declare interface ChengJobResult {
+  jobId: string;
+  runId: string | null;
+  state: "succeeded" | "failed" | "cancelled";
+  exitCode: number | null;
+  /** The run verdict ("DIAGNOSTIC_NOT_ACCEPTANCE", "FAILED", ...). Never a production claim. */
+  verdict: string;
+}
+
+/** Read-only projection of a finished run. A diagnostic run is never production acceptance. */
+declare interface ChengVerifySummary {
+  level: "PRODUCTION" | "DIAGNOSTIC_NOT_ACCEPTANCE" | "UNKNOWN";
+  productionAcceptance: boolean | null;
+  verdict: string;
+  semanticPass: boolean;
+  settlePassed: number;
+  settleTotal: number;
+  /** null when the run has no modules ledger (single-module run); never invented. */
+  structureGateOk: boolean | null;
+  artifactRef: string;
+}
+
+/** Bounded graph summary; the full graph stays on disk behind artifactRef. */
+declare interface ChengGraphSummary {
+  available: boolean;
+  reason: string | null;
+  nodes: number;
+  edges: number;
+  roots: number;
+  gateOk: boolean | null;
+  artifactRef: string;
+  digest: string;
+}
+
+/**
+ * The pinned Cheng host. generate runs the M5/driver pipeline as one journaled effect and
+ * resolves with the terminal job; verify and graph are read-only projections of its run
+ * volume. Each call is recorded once and replayed on resume; a missing host makes the node
+ * fail loudly, never silently skipped.
+ */
+declare const cheng: {
+  generate(input: ChengGenerateInput): Promise<ChengJobResult>;
+  verify(jobId: string): Promise<ChengVerifySummary>;
+  graph(jobId: string, task: string, view?: "structure" | "decision"): Promise<ChengGraphSummary>;
 };
 
 /**
@@ -1406,6 +1483,15 @@ declare function channel<T>(name?: string): Channel<T>;
 declare function future<T>(body: () => Promise<T>): Promise<T>;
 ```
 <!-- facade-dts:end -->
+
+**Cheng data plane.** `cheng.generate({ specPath, task })` runs one diagnostic job
+through the pinned host and records it as an effect (`world-run`); it resolves with
+`{ jobId, runId, state, exitCode, verdict }`. `cheng.verify(jobId)` and
+`cheng.graph(jobId, task, view?)` are read-only projections (`world-read`). The same inputs
+replay their recorded result on resume; rerun a finished job only by passing a new
+`attempt`. A missing host fails that node loudly (`ChengHostUnavailable`) — branch on it,
+do not retry. P2 is diagnostic-only: a green run is `DIAGNOSTIC_NOT_ACCEPTANCE`, never
+production acceptance.
 
 ### 16.3 Rules the compiler and the analyzer enforce
 
@@ -1572,8 +1658,8 @@ fixed logic of a script or of a hole's body; it is not for orchestration.
   metadata handling.
 - `timeoutMs`: the wall clock for the whole snippet in milliseconds; default 60000, at most
   600000.
-- The snippet facade is the `args`, `log`, `files`/`git`, `world.run`, `channel` and `future`
-  parts of the block in §16.2; `agent()`, `report()`, `artifact.*`, `hole()` and the `phase`
+- The snippet facade is the `args`, `run`, `log`, `files`/`git`, `world.run`, `channel` and
+  `future` parts of the block in §16.2 (a snippet's `run.id` is a throwaway `dwfeval-…` id); `agent()`, `report()`, `artifact.*`, `hole()` and the `phase`
   marker are the only absentees — they do not exist here and
   fail typechecking. The language rules are a script's: plain interfaces, top-level `await`, a
   final `return <value>`. The returned value is serialized into the result, so return a
