@@ -87,7 +87,7 @@ import {
 import { makeGoalChengRef } from "@zcode/contracts";
 import { createGoalChengRefResolvers } from "./goal-cheng-ref.js";
 import { createWatchdogGoalControl } from "./watchdog-goal-control.js";
-import { type ChengGateVerdict } from "./workflow-cheng-world-read.js";
+import { CHENG_DEFAULT_BUDGET, type ChengGateVerdict } from "./workflow-cheng-world-read.js";
 import { SqliteBackgroundRunStore } from "../super-agent/storage/background-run-store.js";
 import { openSuperAgentDatabase } from "../super-agent/storage/database.js";
 import { BackgroundRunRegistry } from "../super-agent/watchdog/registry.js";
@@ -1045,6 +1045,22 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     const chengReadPort =
       chengHostAssembly.kind === "wired" ? createChengReadPort(chengHostAssembly.port) : undefined;
 
+    // ChengGenerate 的生成端口：同一 host，窄化只暴露 generate（inspect/cancel/close 不出）。
+    // budget 缺省按 host 缺省档补齐；回执只保留摘要三字段，只读四件套继续走 chengReadPort。
+    const chengGeneratePort =
+      chengHostAssembly.kind === "wired"
+        ? {
+            generate: async (input: { specPath: string; task: string; budget?: number }) => {
+              const { jobId, runId, state } = await chengHostAssembly.port.generate({
+                specPath: input.specPath,
+                task: input.task,
+                budget: input.budget ?? CHENG_DEFAULT_BUDGET,
+              });
+              return { jobId, runId, state };
+            },
+          }
+        : undefined;
+
     // workflow run service：CreateWorkflow 的确认窗 Allow 之后真启动引擎的那一侧。
     // journal 已在 hydrate 前解析；窄化失败（store 不带 dwf_* 表）时不构造服务，
     // CreateWorkflow 因此回到占位诊断路径。这是一个记了日志的可见降级，而不是一条
@@ -1371,6 +1387,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       dynamicWorkflowRunPort,
       dynamicWorkflowSnippetPort,
       ...(chengReadPort === undefined ? {} : { chengReadPort }),
+      ...(chengGeneratePort === undefined ? {} : { chengGeneratePort }),
       modelCatalogPort,
       automationPort: options.automationPort,
       offPeakPort: options.offPeakPort,

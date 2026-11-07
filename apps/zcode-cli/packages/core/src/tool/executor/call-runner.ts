@@ -543,6 +543,7 @@ async function executeToolCallImpl(
         dynamicWorkflowRunPort: deps.dynamicWorkflowRunPort,
         dynamicWorkflowSnippetPort: deps.dynamicWorkflowSnippetPort,
         chengReadPort: deps.chengReadPort,
+        chengGeneratePort: deps.chengGeneratePort,
         modelCatalogPort: deps.modelCatalogPort,
         runtimeTaskRegistry: deps.runtimeTaskRegistry,
         readFileState: deps.readFileState,

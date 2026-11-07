@@ -109,6 +109,9 @@ export const SPEC_RESTRICTED_OUTBOUND_DISALLOWED_TOOLS = [
   "GoalUpdate",
   "GoalBlock",
   "GoalChengBind",
+  // Cheng 计算作业（ChengGenerate）：verdict 前开真实 run 与嵌套编排同族——花预算、留
+  // 副作用，spec worker 只许复现已知事实，不许开新作业。
+  "ChengGenerate",
   // 动态 MCP 名前缀规则：tools:["*"] 展开路径（resolveSubagentToolAllowlist）只吃
   // disallowedTools 精确规则，精确表覆盖不了 mcp__x__y 这类运行期名字，必须带前缀闸。
   "mcp__*",

@@ -1,5 +1,6 @@
 import {
   AMEND_WORKFLOW_TOOL_NAME,
+  CHENG_GENERATE_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   FILL_WORKFLOW_HOLE_TOOL_NAME,
   GET_WORKFLOW_RUN_TOOL_NAME,
@@ -52,6 +53,10 @@ const WORKFLOW_CHILD_DISALLOWED_TOOLS = [
   // FillWorkflowHole 与 AmendWorkflow 同一个根因（alwaysAsk 在 child 里无窗可弹）加同一条不变式
   // （留白是脚本向**主代理**要代码，子代理不得替它写）：一并进列。
   FILL_WORKFLOW_HOLE_TOOL_NAME,
+  // ChengGenerate 声明了 needsApproval（真实计算 + 落盘），child yolo 里无窗可弹（CreateWorkflow
+  // 同款根因）；加一条结构性理由：child 的效应只走脚本声明的 cheng.* world-read 站点，actor 的
+  // 模型面不得另开 host 作业。
+  CHENG_GENERATE_TOOL_NAME,
 ] as const;
 
 /**

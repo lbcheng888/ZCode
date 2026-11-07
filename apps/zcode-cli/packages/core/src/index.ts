@@ -89,7 +89,7 @@ export {
   resolveBashTimeoutPolicy,
 } from "./tool/bash-timeout-policy.js";
 export type { BashTimeoutPolicy } from "./tool/bash-timeout-policy.js";
-export type { ChengReadPort } from "./tool/cheng-read-port.js";
+export type { ChengReadPort, ChengGeneratePort } from "./tool/cheng-read-port.js";
 export { CHENG_READ_PORT_UNAVAILABLE_REASON } from "./tool/cheng-read-port.js";
 export type {
   ToolMetadata,

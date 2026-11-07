@@ -54,6 +54,8 @@ const DIRECT_BRANCH_EXPECTED_PROVIDER_TOOL_ORDER = [
   "ChengVerify",
   "ChengExplain",
   "ChengPlan",
+  // Cheng 数据面的唯一效应工具：紧随四个只读工具按注册序出现（也不进排序名单）。
+  "ChengGenerate",
   "ReplyToChannel",
   "CreateWorkflow",
   // 修订入口紧随 CreateWorkflow 注册（docs/dynamic-workflow/launch.md「The `AmendWorkflow` tool」）。

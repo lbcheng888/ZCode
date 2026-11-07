@@ -22,3 +22,17 @@ export interface ChengReadPort {
 
 export const CHENG_READ_PORT_UNAVAILABLE_REASON =
   "Cheng host is not wired in this runtime (ZCODE_CHENG_ROOT + cheng host entry are required)";
+
+/**
+ * Cheng 生成端口：ChengGenerate 的效应面。装配层从完整 host 端口**窄化**出这一个方法——
+ * 模型侧拿不到 inspect/cancel/close 等其余面。specPath 由 handler 落盘产生（绝对路径，
+ * 宿主可读）；budget 缺省由装配层按 host 缺省档补齐。缺席时 ChengGenerate 与只读工具
+ * 同款返回 `capability_absent`，不伪造受理。
+ */
+export interface ChengGeneratePort {
+  generate(input: {
+    specPath: string;
+    task: string;
+    budget?: number;
+  }): Promise<{ jobId: string; runId: string | null; state: string }>;
+}

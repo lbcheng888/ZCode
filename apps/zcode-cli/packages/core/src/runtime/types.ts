@@ -39,7 +39,7 @@ import type { ZCodeProviderAccountAccess } from "@zcode/shared";
 import type { EffectiveModelSelectionResult } from "@zcode/shared/model-selection";
 import type { RuntimeMessageEntry } from "../agent/message-history.js";
 import type { ProviderToolRound } from "./provider-tool-rounds/contract.js";
-import type { ChengReadPort } from "../tool/cheng-read-port.js";
+import type { ChengGeneratePort, ChengReadPort } from "../tool/cheng-read-port.js";
 import type {
   CompactPhase,
   CompactReason,
@@ -459,6 +459,8 @@ export interface AgentRuntimeDeps {
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
   /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
   chengReadPort?: ChengReadPort;
+  /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
+  chengGeneratePort?: ChengGeneratePort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;

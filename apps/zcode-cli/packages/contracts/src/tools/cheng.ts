@@ -3,16 +3,21 @@ import { z } from "zod";
 import { toToolJsonSchema } from "./json-schema.js";
 
 /**
- * Cheng 数据面的三个**只读**模型工具：Inspect / Verify / Explain。
+ * Cheng 数据面的四个**只读**模型工具：Inspect / Verify / Explain / Plan。
  *
- * 它们只消费已经存在的 jobId（由工作流里的 `cheng.generate` 或 host 产生），绝不开新作业、
- * 不重试、不改工作区。端口缺席时输出 `capability_absent`——这是命名的能力缺席，不是降级。
+ * 它们只消费已经存在的 jobId（由工作流里的 `cheng.generate`、host 或 ChengGenerate 产生），
+ * 绝不开新作业、不重试、不改工作区。端口缺席时输出 `capability_absent`——这是命名的
+ * 能力缺席，不是降级。
+ *
+ * ChengGenerate 是唯一的效应工具：校验 spec 草案 → 落盘 → 经 host 开作业。草案校验失败
+ * 是 400 型业务失败（不落盘不开作业）；生成端口缺席与只读端口缺席同款 `capability_absent`。
  */
 
 export const CHENG_INSPECT_TOOL_NAME = "ChengInspect";
 export const CHENG_VERIFY_TOOL_NAME = "ChengVerify";
 export const CHENG_EXPLAIN_TOOL_NAME = "ChengExplain";
 export const CHENG_PLAN_TOOL_NAME = "ChengPlan";
+export const CHENG_GENERATE_TOOL_NAME = "ChengGenerate";
 
 /**
  * CLI 隐藏子命令：`cheng-host` 的打包入口。SEA 单文件二进制不解释 Node CLI 旗标，也不能
@@ -32,13 +37,7 @@ const CHENG_JOB_ID_PATTERN = /^[0-9a-f]{64}$/;
 const ChengJobIdSchema = z.string().regex(CHENG_JOB_ID_PATTERN);
 const ChengSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 
-export const CHENG_JOB_STATES = [
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-  "cancelled",
-] as const;
+export const CHENG_JOB_STATES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 export type ChengJobState = (typeof CHENG_JOB_STATES)[number];
 
 const ChengCapabilityAbsentSchema = z
@@ -67,11 +66,7 @@ export const ChengInspectOutputSchema = z.union([
   ChengCapabilityAbsentSchema,
 ]);
 
-export const CHENG_GATE_LEVELS = [
-  "PRODUCTION",
-  "DIAGNOSTIC_NOT_ACCEPTANCE",
-  "BLOCKED",
-] as const;
+export const CHENG_GATE_LEVELS = ["PRODUCTION", "DIAGNOSTIC_NOT_ACCEPTANCE", "BLOCKED"] as const;
 
 export const ChengGateVerdictSchema = z
   .object({
@@ -83,9 +78,7 @@ export const ChengGateVerdictSchema = z
 
 export type ChengGateVerdict = z.infer<typeof ChengGateVerdictSchema>;
 
-export type ChengDeliveryGateResult =
-  | { allowed: true }
-  | { allowed: false; reason: string };
+export type ChengDeliveryGateResult = { allowed: true } | { allowed: false; reason: string };
 
 /**
  * 所有出站面共用的 Cheng 交付门判定：红/blocked 一律拒绝，绿（含 diagnostic）放行。
@@ -121,10 +114,7 @@ export const ChengVerifyOkSchema = z
   })
   .strict();
 
-export const ChengVerifyOutputSchema = z.union([
-  ChengVerifyOkSchema,
-  ChengCapabilityAbsentSchema,
-]);
+export const ChengVerifyOutputSchema = z.union([ChengVerifyOkSchema, ChengCapabilityAbsentSchema]);
 
 export const ChengExplainInputSchema = z
   .object({
@@ -229,8 +219,34 @@ export const ChengPlanOkSchema = z
   })
   .strict();
 
-export const ChengPlanOutputSchema = z.union([
-  ChengPlanOkSchema,
+export const ChengPlanOutputSchema = z.union([ChengPlanOkSchema, ChengCapabilityAbsentSchema]);
+
+/**
+ * ChengGenerate 入参：`spec` 是未加解释的 JSON 对象，形状交给 core 侧的
+ * `validateChengSpecDraft`（以 csg.spec.v2 夹具为事实来源）裁决——schema 只保证它是对象，
+ * 不在两处重复维护字段表。`budget` 缺省由装配层按 host 缺省档补齐。
+ */
+export const ChengGenerateInputSchema = z
+  .object({
+    spec: z.record(z.unknown()),
+    // 与 cheng-host RPC GenerateParamsSchema（.max(900_000)）与 workflow world-read
+    // boundedBudget 同口径：越界拒绝必须发生在草案落盘之前，不留孤儿 spec 文件。
+    budget: z.number().int().min(1).max(900_000).optional(),
+  })
+  .strict();
+
+/** 成功只回作业摘要：后续事实一概走 ChengInspect/Verify/Explain/Plan。 */
+export const ChengGenerateOkSchema = z
+  .object({
+    status: z.literal("ok"),
+    jobId: ChengJobIdSchema,
+    runId: z.string().min(1).nullable(),
+    state: z.enum(CHENG_JOB_STATES),
+  })
+  .strict();
+
+export const ChengGenerateOutputSchema = z.union([
+  ChengGenerateOkSchema,
   ChengCapabilityAbsentSchema,
 ]);
 
@@ -246,6 +262,9 @@ export type ChengExplainOutput = z.infer<typeof ChengExplainOutputSchema>;
 export type ChengPlanInput = z.infer<typeof ChengPlanInputSchema>;
 export type ChengPlanOk = z.infer<typeof ChengPlanOkSchema>;
 export type ChengPlanOutput = z.infer<typeof ChengPlanOutputSchema>;
+export type ChengGenerateInput = z.infer<typeof ChengGenerateInputSchema>;
+export type ChengGenerateOk = z.infer<typeof ChengGenerateOkSchema>;
+export type ChengGenerateOutput = z.infer<typeof ChengGenerateOutputSchema>;
 
 export const ChengInspectInputJsonSchema = toToolJsonSchema(ChengInspectInputSchema);
 export const ChengInspectOutputJsonSchema = toToolJsonSchema(ChengInspectOutputSchema);
@@ -255,3 +274,5 @@ export const ChengExplainInputJsonSchema = toToolJsonSchema(ChengExplainInputSch
 export const ChengExplainOutputJsonSchema = toToolJsonSchema(ChengExplainOutputSchema);
 export const ChengPlanInputJsonSchema = toToolJsonSchema(ChengPlanInputSchema);
 export const ChengPlanOutputJsonSchema = toToolJsonSchema(ChengPlanOutputSchema);
+export const ChengGenerateInputJsonSchema = toToolJsonSchema(ChengGenerateInputSchema);
+export const ChengGenerateOutputJsonSchema = toToolJsonSchema(ChengGenerateOutputSchema);

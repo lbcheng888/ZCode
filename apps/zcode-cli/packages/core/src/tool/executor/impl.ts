@@ -70,6 +70,7 @@ export class ToolExecutorImpl implements ToolExecutor {
       dynamicWorkflowRunPort: options.dynamicWorkflowRunPort,
       dynamicWorkflowSnippetPort: options.dynamicWorkflowSnippetPort,
       chengReadPort: options.chengReadPort,
+      chengGeneratePort: options.chengGeneratePort,
       modelCatalogPort: options.modelCatalogPort,
       runtimeTaskRegistry: options.runtimeTaskRegistry,
       readFileState: options.readFileState ?? new Map(),

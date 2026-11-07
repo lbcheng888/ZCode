@@ -70,7 +70,13 @@ import { taskOutputToolEntry } from "./task-output.js";
 import { taskStopToolEntry } from "./task-stop.js";
 import { readSessionContextToolEntry } from "./read-session-context.js";
 import { recallToolEntry } from "./recall.js";
-import { chengExplainToolEntry, chengInspectToolEntry, chengPlanToolEntry, chengVerifyToolEntry } from "./cheng.js";
+import {
+  chengExplainToolEntry,
+  chengGenerateToolEntry,
+  chengInspectToolEntry,
+  chengPlanToolEntry,
+  chengVerifyToolEntry,
+} from "./cheng.js";
 import { amendWorkflowToolEntry } from "./amend-workflow.js";
 import { createWorkflowToolEntry } from "./create-workflow.js";
 import { saveWorkflowToolEntry } from "./save-workflow.js";
@@ -135,6 +141,9 @@ export const builtInTools: ToolEntry[] = [
   chengVerifyToolEntry,
   chengExplainToolEntry,
   chengPlanToolEntry,
+  // Cheng 数据面的唯一效应工具：校验 spec 草案 → 落盘 .chengcode/cheng-specs → 经 host
+  // 开作业。生成端口只在主 runtime 装配，其余 runtime 端口缺席即 capability_absent。
+  chengGenerateToolEntry,
   replyToChannelToolEntry,
   agentToolEntry,
   taskToolEntry,

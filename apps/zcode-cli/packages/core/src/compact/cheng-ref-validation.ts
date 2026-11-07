@@ -16,6 +16,7 @@ const CHENG_REF_TOOL_NAMES = new Set([
   "ChengVerify",
   "ChengExplain",
   "GoalChengBind",
+  "ChengGenerate",
 ]);
 
 export interface CompactChengRefFacts {
@@ -108,9 +109,12 @@ export function sanitizeCompactRecoveryPointer(
 export async function validateCompactRecoveryPointerForSession(
   pointer: CompactRecoveryPointer,
   entries: readonly RuntimeMessageEntry[],
-  sessionStore: { readTarget(input: { sessionID: SessionId }): Promise<SessionGoal | null> } | undefined,
+  sessionStore:
+    | { readTarget(input: { sessionID: SessionId }): Promise<SessionGoal | null> }
+    | undefined,
   sessionId: SessionId,
 ): Promise<CompactRecoveryPointer> {
-  const target = sessionStore === undefined ? null : await sessionStore.readTarget({ sessionID: sessionId });
+  const target =
+    sessionStore === undefined ? null : await sessionStore.readTarget({ sessionID: sessionId });
   return sanitizeCompactRecoveryPointer(pointer, collectCompactChengRefFacts(entries, target));
 }

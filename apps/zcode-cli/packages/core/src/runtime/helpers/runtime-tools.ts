@@ -199,6 +199,7 @@ function createRuntimeToolExecutor(
     dynamicWorkflowRunPort: deps.dynamicWorkflowRunPort,
     dynamicWorkflowSnippetPort: deps.dynamicWorkflowSnippetPort,
     chengReadPort: deps.chengReadPort,
+    chengGeneratePort: deps.chengGeneratePort,
     modelCatalogPort: deps.modelCatalogPort,
     runtimeTaskRegistry: runtime.runtimeTaskRegistry,
     registerResidencyBlockingWork: (work) => {

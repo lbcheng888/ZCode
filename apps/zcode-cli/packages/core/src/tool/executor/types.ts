@@ -40,7 +40,7 @@ import type { HookRunner } from "../../hooks/index.js";
 import type { PermissionService } from "../../permission/service.js";
 import type { RuntimeTaskRegistry } from "../../runtime-task/registry.js";
 import type { ToolRegistry } from "../registry.js";
-import type { ChengReadPort } from "../cheng-read-port.js";
+import type { ChengGeneratePort, ChengReadPort } from "../cheng-read-port.js";
 import type { ToolSchedule } from "../scheduler.js";
 import type {
   BackgroundTaskControlPort,
@@ -121,6 +121,8 @@ export interface ToolExecutorOptions {
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
   /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
   chengReadPort?: ChengReadPort;
+  /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
+  chengGeneratePort?: ChengGeneratePort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
@@ -254,6 +256,8 @@ export interface ToolExecutorDeps {
   dynamicWorkflowSnippetPort?: DynamicWorkflowSnippetPort;
   /** Cheng 只读端口；缺席则 ChengInspect/Verify/Explain 返回 capability_absent。 */
   chengReadPort?: ChengReadPort;
+  /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
+  chengGeneratePort?: ChengGeneratePort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
