@@ -4817,35 +4817,25 @@ export function SessionPane({
     [dispatchCommand, intl, sessionId, toast],
   );
 
-  const handleBindGoalChengRef = useCallback(
-    (chengRef: { jobId: string; task: string } | null) => {
-      const current = snapshotRef.current;
-      if (!sessionId || current?.goal?.revision === undefined || !current.goal?.targetId) return;
-      void dispatchCommand(
-        "bindGoalChengRef",
-        {
-          targetID: current.goal.targetId,
-          revision: current.goal.revision,
-          chengRef,
-        },
-        sessionId,
-      ).then((ack) => {
-        if (ack.status === "accepted" || ack.status === "noop") return;
-        logger.warn(`[v4-pane] bindGoalChengRef 被拒绝: ${ack.status} ${ack.reasonCode ?? ""}`);
-        toast(
-          ack.reasonCode === "staleTarget"
-            ? intl.formatMessage({ id: "chat.target.editStale" })
-            : ack.reasonCode === "chengUnavailable"
-              ? intl.formatMessage({ id: "chat.target.chengBind.unavailable" })
-              : intl.formatMessage(
-                  { id: "chat.target.editFailed" },
-                  { reason: ack.reasonCode ?? ack.status },
-                ),
-        );
-      });
-    },
-    [dispatchCommand, intl, sessionId, toast],
-  );
+  // S4 内化：绑定由 owner-scoped 自动绑定器完成；UI 命令面只剩清除（chengRef=null）。
+  const handleClearGoalChengRef = useCallback(() => {
+    const current = snapshotRef.current;
+    if (!sessionId || current?.goal?.revision === undefined || !current.goal?.targetId) return;
+    void dispatchCommand(
+      "bindGoalChengRef",
+      { targetID: current.goal.targetId, revision: current.goal.revision, chengRef: null },
+      sessionId,
+    ).then((ack) => {
+      if (ack.status === "accepted" || ack.status === "noop") return;
+      logger.warn(`[v4-pane] 清除 Cheng 绑定被拒: ${ack.status} ${ack.reasonCode ?? ""}`);
+      toast(
+        intl.formatMessage(
+          { id: "chat.target.editFailed" },
+          { reason: ack.reasonCode ?? ack.status },
+        ),
+      );
+    });
+  }, [dispatchCommand, intl, sessionId, toast]);
 
   // S4：路线卡「按推荐接续」——复用 resumeGoal 通道（continueActiveTarget 的 v4 包装；
   // 对 active 目标 updateTargetStatus("active") 幂等后照样续跑）。运行中/verifying 不给入口。
@@ -6230,7 +6220,7 @@ export function SessionPane({
               }
               onBindGoalChengRef={
                 !readOnly && !selectionSideChat && snapshot?.goal?.revision !== undefined
-                  ? handleBindGoalChengRef
+                  ? handleClearGoalChengRef
                   : undefined
               }
               onClearGoal={

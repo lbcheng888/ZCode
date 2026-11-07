@@ -7,7 +7,15 @@ import {
 } from "@zcode/cheng-host";
 import { WorkflowError } from "@zcode/dynamic-workflow";
 
-import { CHENG_DEFAULT_BUDGET, type ChengGenerateInput, type ChengGraphResult, type ChengHostPort, type ChengJobResult, type ChengJobSnapshot, type ChengVerifyResult } from "./workflow-cheng-world-read.js";
+import {
+  CHENG_DEFAULT_BUDGET,
+  type ChengGenerateInput,
+  type ChengGraphResult,
+  type ChengHostPort,
+  type ChengJobResult,
+  type ChengJobSnapshot,
+  type ChengVerifyResult,
+} from "./workflow-cheng-world-read.js";
 import type { ChengJobObserver } from "../super-agent/cheng-job-observer.js";
 
 /**
@@ -45,8 +53,7 @@ export function chengHostSpawnArgs(
   config: Pick<ChengHostPortConfig, "hostEntry" | "cliCommand">,
   extraArgs: readonly string[],
 ): { command: string; args: string[] } {
-  const prefix =
-    config.hostEntry !== undefined ? [config.hostEntry] : config.cliCommand;
+  const prefix = config.hostEntry !== undefined ? [config.hostEntry] : config.cliCommand;
   if (prefix === undefined || prefix.length === 0) {
     throw new WorkflowError(
       "DriverError",
@@ -144,7 +151,11 @@ export function createChengHostPort(config: ChengHostPortConfig): ChengHostPort 
             });
       let status: MethodResult<"job.status">;
       try {
-        config.observer?.started({ jobId: started.jobId });
+        config.observer?.started({
+          jobId: started.jobId,
+          // S4 内化：task 随生命周期透传，终态 succeeded 时供 goal 自动绑定。
+          task: input.task,
+        });
         status = await waitTerminal(host, started.jobId, config);
       } catch (error) {
         // observer 失败不能让 host job 继续裸跑；取消失败与原始错误一起上浮。
@@ -162,7 +173,11 @@ export function createChengHostPort(config: ChengHostPortConfig): ChengHostPort 
         emitLifecycle({ type: "terminal", jobId: started.jobId });
         unsubscribe?.();
       }
-      if (status.state !== "succeeded" && status.state !== "failed" && status.state !== "cancelled") {
+      if (
+        status.state !== "succeeded" &&
+        status.state !== "failed" &&
+        status.state !== "cancelled"
+      ) {
         throw new WorkflowError("DriverError", `Cheng job ${started.jobId} did not settle.`);
       }
       await config.observer?.terminal({
@@ -212,7 +227,11 @@ export function createChengHostPort(config: ChengHostPortConfig): ChengHostPort 
       });
     },
 
-    async graph(jobId: string, task: string, view: "structure" | "decision"): Promise<ChengGraphResult> {
+    async graph(
+      jobId: string,
+      task: string,
+      view: "structure" | "decision",
+    ): Promise<ChengGraphResult> {
       const host = await client();
       const result = await request(host, "graph.query", { jobId, task, view });
       return {
@@ -283,7 +302,10 @@ async function waitTerminal(
     }
     await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
   }
-  throw new WorkflowError("DriverError", `Cheng job ${jobId} did not settle within ${String(timeoutMs)}ms.`);
+  throw new WorkflowError(
+    "DriverError",
+    `Cheng job ${jobId} did not settle within ${String(timeoutMs)}ms.`,
+  );
 }
 
 function verdictOf(state: "succeeded" | "failed" | "cancelled"): string {

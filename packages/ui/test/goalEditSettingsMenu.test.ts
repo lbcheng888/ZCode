@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// S4 goal 用户直改入口（GoalEditSettingsMenu）：等级 radio 即时 dispatch、绑定弹窗
-// payload（jobId/task）、已有绑定的清除路径；ConversationStatusPanel 的入口可见性
+// S4 goal 用户直改入口（GoalEditSettingsMenu）：等级 radio 即时 dispatch、绑定只读显示
+// payload=清除(null)（绑定已内化为 owner-scoped 自动绑定）；ConversationStatusPanel 的入口可见性
 // （goal.revision 缺席 = 旧 CLI 快照无 CAS 键 → 隐藏）。不依赖 @testing-library：
 // createRoot + act + 原生事件（React 19 的 act 自 react 导出）。
 import { createElement, act, type ReactNode } from "react";
@@ -43,16 +43,21 @@ vi.mock("@/components/ui/dropdown-menu.js", () => ({
   },
   DropdownMenuRadioItem: ({ children, value }: { children: ReactNode; value: string }) =>
     createElement("div", { "data-goal-acceptance-option": value }, children),
-  DropdownMenuItem: ({ children, onSelect }: { children: ReactNode; onSelect?: () => void }) => {
+  DropdownMenuSeparator: () => createElement("div", { "data-testid": "mock-menu-separator" }),
+  DropdownMenuItem: ({
+    children,
+    onSelect,
+    ...rest
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+  } & Record<string, unknown>) => {
     menuCapture.items.push({ onSelect });
-    return createElement(
-      "div",
-      {
-        "data-goal-action": "bind-cheng",
-        onClick: () => onSelect?.(),
-      },
-      children,
-    );
+    const props: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(rest)) {
+      if (k.startsWith("data-")) props[k] = v;
+    }
+    return createElement("div", { ...props, onClick: () => onSelect?.() }, children);
   },
 }));
 
@@ -92,13 +97,6 @@ async function renderMenu(goal: GoalState) {
   return { container, onUpdateAcceptance, onBindChengRef };
 }
 
-/** 受控 Input 的原生值设置 + input 事件（React onChange 监听 input 事件）。 */
-function setInputValue(input: HTMLInputElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-  setter?.call(input, value);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     await act(async () => {
@@ -109,8 +107,9 @@ afterEach(async () => {
   menuCapture.items.length = 0;
 });
 
-describe("GoalEditSettingsMenu", () => {
+describe("GoalEditSettingsMenu（S4 内化：自动绑定，UI 只剩等级与清除）", () => {
   it("等级 radio 初值 = 当前等级；切换即 dispatch 新等级", async () => {
+    menuCapture.radioGroups.length = 0;
     const { onUpdateAcceptance } = await renderMenu(goalState({ acceptanceLevel: "diagnostic" }));
     const radio = menuCapture.radioGroups.at(-1);
     expect(radio?.value).toBe("diagnostic");
@@ -121,57 +120,38 @@ describe("GoalEditSettingsMenu", () => {
     expect(onUpdateAcceptance).toHaveBeenCalledWith("production");
   });
 
-  it("绑定弹窗：打开预填当前绑定，改输入后 dispatch 精确 payload（不含 runId）", async () => {
-    const { onBindChengRef } = await renderMenu(
-      goalState({ chengRef: { jobId: "job-9", task: "p06", runId: "run-1" } }),
-    );
-
+  it("已有绑定时显示只读 job/task chip；清除项 dispatch null（唯一命令面）", async () => {
+    const bindSpy = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
     await act(async () => {
-      menuCapture.items.at(-1)?.onSelect?.();
+      root.render(
+        createElement(GoalEditSettingsMenu, {
+          goal: goalState({
+            chengRef: { jobId: "job-9", task: "p06_fib", runId: "run-1" },
+          }),
+          onUpdateAcceptance: vi.fn(),
+          onBindChengRef: bindSpy,
+        }),
+      );
     });
-    const jobIdInput = document.querySelector("[data-goal-cheng-bind-job-id]") as HTMLInputElement;
-    const taskInput = document.querySelector("[data-goal-cheng-bind-task]") as HTMLInputElement;
-    expect(jobIdInput?.value).toBe("job-9");
-    expect(taskInput?.value).toBe("p06");
-
+    const chip = document.querySelector("[data-goal-cheng-bound='job-9']");
+    expect(chip?.textContent).toContain("p06_fib");
+    const clearItem = document.querySelector("[data-goal-action='clear-cheng-bind']");
+    expect(clearItem).not.toBeNull();
     await act(async () => {
-      setInputValue(jobIdInput, "job-10");
-      setInputValue(taskInput, "p14");
+      (clearItem as HTMLElement).click();
     });
-    await act(async () => {
-      (document.querySelector("[data-goal-cheng-bind-submit]") as HTMLButtonElement).click();
-    });
-    expect(onBindChengRef).toHaveBeenCalledWith({ jobId: "job-10", task: "p14" });
+    expect(bindSpy).toHaveBeenCalledWith(null);
+    expect(bindSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("空输入禁用提交；已有绑定可一键清除（dispatch null）", async () => {
-    const { onBindChengRef } = await renderMenu(
-      goalState({ chengRef: { jobId: "job-9", task: "p06", runId: "run-1" } }),
-    );
-    await act(async () => {
-      menuCapture.items.at(-1)?.onSelect?.();
-    });
-
-    const jobIdInput = document.querySelector("[data-goal-cheng-bind-job-id]") as HTMLInputElement;
-    await act(async () => {
-      setInputValue(jobIdInput, " ");
-    });
-    const submit = document.querySelector("[data-goal-cheng-bind-submit]") as HTMLButtonElement;
-    expect(submit.disabled).toBe(true);
-
-    await act(async () => {
-      (document.querySelector("[data-goal-cheng-bind-clear]") as HTMLButtonElement).click();
-    });
-    expect(onBindChengRef).toHaveBeenCalledWith(null);
-    expect(onBindChengRef).toHaveBeenCalledTimes(1);
-  });
-
-  it("无既有绑定时弹窗不提供清除按钮", async () => {
+  it("无绑定时无 chip 也无清除项（等自动绑定器填充）", async () => {
     await renderMenu(goalState());
-    await act(async () => {
-      menuCapture.items.at(-1)?.onSelect?.();
-    });
-    expect(document.querySelector("[data-goal-cheng-bind-clear]")).toBeNull();
+    expect(document.querySelector("[data-goal-cheng-bound]")).toBeNull();
+    expect(document.querySelector("[data-goal-action='clear-cheng-bind']")).toBeNull();
   });
 });
 

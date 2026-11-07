@@ -71,9 +71,20 @@ import {
   resolveEffectiveLocale,
   resolveEffectiveConfigResult,
 } from "./app-config-options.js";
-import { getCliStorageRoot, getModelIoDir, projectIdFromDirectory, resolveDataBaseDir, getSuperAgentDatabasePath } from "./paths.js";
+import {
+  getCliStorageRoot,
+  getModelIoDir,
+  projectIdFromDirectory,
+  resolveDataBaseDir,
+  getSuperAgentDatabasePath,
+} from "./paths.js";
 import { createChengJobNotificationLedger } from "../super-agent/cheng-job-ledger.js";
-import { createChengJobObserver, type ChengJobObserver, type LiveChengJobObserver } from "../super-agent/cheng-job-observer.js";
+import {
+  createChengJobObserver,
+  type ChengJobObserver,
+  type LiveChengJobObserver,
+} from "../super-agent/cheng-job-observer.js";
+import { makeGoalChengRef } from "@zcode/contracts";
 import { createGoalChengRefResolvers } from "./goal-cheng-ref.js";
 import { createWatchdogGoalControl } from "./watchdog-goal-control.js";
 import { type ChengGateVerdict } from "./workflow-cheng-world-read.js";
@@ -232,7 +243,8 @@ export function createWorkspaceWriteLeaseAdmission(options: {
       if (!leases) {
         throw new Error("workspace write lease admission is not initialized");
       }
-      const workspace = options.getWorkspaceIdentity() ?? input.workspaceIdentity ?? input.workspaceRoot;
+      const workspace =
+        options.getWorkspaceIdentity() ?? input.workspaceIdentity ?? input.workspaceRoot;
       if (!workspace.trim()) {
         throw new Error("workspace write lease admission: workspace identity is empty");
       }
@@ -967,6 +979,11 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           });
         },
       });
+      // S4 内化：owner-scoped 结构自动绑定——本会话 job 终态 succeeded 时把 goal.chengRef
+      // 指向该 job。权威规则：绝不覆盖用户显式绑定；只填充空位或本自动绑定器上次写的值
+      //（进程内指纹，重启后既有绑定一律视为用户设置）。非 recency 推断：owner 是 registry
+      // 行的结构事实。
+      const lastAutoBoundRef = { value: undefined as { jobId: string } | undefined };
       liveChengObserver = createChengJobObserver({
         registry: chengRegistry,
         ledger: chengLedger,
@@ -974,9 +991,47 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
         workspaceKey: workingDirectory,
         // 产出后 delivery gate：同一 host 的最新 verify 结果；红 gate 通知在此静默丢弃。
         resolveGate: async ({ jobId }) => (await chengHostAssembly.port.verify(jobId)).gate,
+        autoBind: {
+          onOwnJobSucceeded: async ({ jobId, task, runId }) => {
+            if (sessionStore.updateTargetChengRef === undefined) return;
+            const target = await sessionStore.readTarget({ sessionID: sessionId });
+            if (!target || target.status === "complete") return;
+            const currentJob = target.chengRef?.jobId;
+            if (
+              currentJob !== undefined &&
+              currentJob !== null &&
+              currentJob !== lastAutoBoundRef.value?.jobId
+            ) {
+              // 用户显式设置过（或来源不明）：自动绑定永不覆盖。
+              return;
+            }
+            const resolved = makeGoalChengRef({
+              jobId,
+              task,
+              ...(runId === undefined || runId === null ? {} : { runId }),
+            });
+            const updated = await sessionStore.updateTargetChengRef({
+              chengRef: resolved,
+              revision: target.revision,
+              sessionID: sessionId,
+              targetID: target.targetID,
+            });
+            if (!updated) return; // CAS 竞态：本轮放弃，下一成功 job 再试。
+            lastAutoBoundRef.value = { jobId };
+            await getRuntime().recordTargetChanged({
+              action: "cheng_ref_edited",
+              previousTarget: target,
+              reason: "auto_bound_own_job",
+              source: "runtime",
+              target: updated,
+              traceContext,
+            });
+          },
+        },
       });
-      // S4：完成门/路线卡只读目标行上的显式 Cheng 引用（GoalChengBind 经 host inspect 写入）。
-      // 没有引用 = 没有 Cheng 证据；不再按“目标创建后最近 completed job”做时间推断。
+      // S4：完成门/路线卡只读目标行上的显式 Cheng 引用（自动绑定填充；GoalChengBind 与
+      // UI 清除仍走 host inspect 显式路径）。没有引用 = 没有 Cheng 证据；不按“最近
+      // completed job”做时间推断——owner-scoped 结构绑定不在禁止之列（结构性事实）。
       const goalChengResolvers = createGoalChengRefResolvers({
         ownerSession: sessionId,
         registry: chengRegistry,
@@ -988,9 +1043,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     }
     // 模型只读工具端口：同一 host，但只暴露 inspect/verify/graph（不转发 generate）。
     const chengReadPort =
-      chengHostAssembly.kind === "wired"
-        ? createChengReadPort(chengHostAssembly.port)
-        : undefined;
+      chengHostAssembly.kind === "wired" ? createChengReadPort(chengHostAssembly.port) : undefined;
 
     // workflow run service：CreateWorkflow 的确认窗 Allow 之后真启动引擎的那一侧。
     // journal 已在 hydrate 前解析；窄化失败（store 不带 dwf_* 表）时不构造服务，
@@ -1181,18 +1234,12 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           ? {}
           : {
               refreshRuns: () =>
-                backgroundRunRegistry.refreshFromPersistence(
-                  (row) => row.kind === "automation",
-                ),
+                backgroundRunRegistry.refreshFromPersistence((row) => row.kind === "automation"),
             }),
         commands: createStallRepairCommands({
           registry: backgroundRunRegistry,
-          ...(options.automationPort === undefined
-            ? {}
-            : { automation: options.automationPort }),
-          ...(chengHostAssembly.kind === "wired"
-            ? { chengHost: chengHostAssembly.port }
-            : {}),
+          ...(options.automationPort === undefined ? {} : { automation: options.automationPort }),
+          ...(chengHostAssembly.kind === "wired" ? { chengHost: chengHostAssembly.port } : {}),
           ...(eventRouterEnabled && dynamicWorkflowRunPort !== undefined
             ? {
                 workflowRun: {

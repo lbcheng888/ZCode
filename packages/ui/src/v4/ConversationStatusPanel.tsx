@@ -69,19 +69,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.js";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog.js";
-import { Input } from "@/components/ui/input.js";
 import { ControlHintTooltip } from "@/ControlHintTooltip.js";
 import { formatBackgroundTaskElapsedLabel } from "@/BackgroundTaskElapsedLabel.js";
 import { GitActionMenu } from "@/GitActionMenu.js";
@@ -496,113 +488,64 @@ export function GoalEditSettingsMenu({
 }: {
   goal: GoalState;
   onUpdateAcceptance: (level: "production" | "diagnostic") => void;
-  onBindChengRef: (chengRef: { jobId: string; task: string } | null) => void;
+  /** S4 内化：绑定由系统自动完成；UI 只保留清除（chengRef=null）。 */
+  onBindChengRef: (chengRef: null) => void;
 }) {
   const { intl } = useZCodeIntl();
-  const [bindOpen, setBindOpen] = useState(false);
-  const [jobId, setJobId] = useState("");
-  const [task, setTask] = useState("");
   const currentLevel = goal.acceptanceLevel ?? "production";
   return (
-    <>
-      <ControlHintTooltip
-        title={intl.formatMessage({ id: "chat.target.editSettings" })}
-        side="left"
-      >
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="size-6 shrink-0"
-              data-goal-action="settings"
-              aria-label={intl.formatMessage({ id: "chat.target.editSettings" })}
-            >
-              <SettingsIcon className="size-3.5" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" data-goal-settings-menu>
-            <DropdownMenuRadioGroup
-              value={currentLevel}
-              onValueChange={(value) => {
-                if (value === "production" || value === "diagnostic") {
-                  onUpdateAcceptance(value);
-                }
-              }}
-            >
-              <DropdownMenuRadioItem value="production" data-goal-acceptance-option="production">
-                {intl.formatMessage({ id: "chat.target.acceptance.production" })}
-              </DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="diagnostic" data-goal-acceptance-option="diagnostic">
-                {intl.formatMessage({ id: "chat.target.acceptance.diagnostic" })}
-              </DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-            <DropdownMenuItem
-              data-goal-action="bind-cheng"
-              onSelect={() => {
-                setJobId(goal.chengRef?.jobId ?? "");
-                setTask(goal.chengRef?.task ?? "");
-                setBindOpen(true);
-              }}
-            >
-              <LinkIcon className="size-3.5" />
-              {intl.formatMessage({ id: "chat.target.chengBind.open" })}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </ControlHintTooltip>
-      <Dialog open={bindOpen} onOpenChange={setBindOpen}>
-        <DialogContent data-goal-cheng-bind-dialog>
-          <DialogHeader>
-            <DialogTitle>{intl.formatMessage({ id: "chat.target.chengBind.title" })}</DialogTitle>
-            <DialogDescription>
-              {intl.formatMessage({ id: "chat.target.chengBind.description" })}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-2">
-            <Input
-              data-goal-cheng-bind-job-id
-              placeholder={intl.formatMessage({ id: "chat.target.chengBind.jobId" })}
-              value={jobId}
-              onChange={(event) => setJobId(event.target.value)}
-            />
-            <Input
-              data-goal-cheng-bind-task
-              placeholder={intl.formatMessage({ id: "chat.target.chengBind.task" })}
-              value={task}
-              onChange={(event) => setTask(event.target.value)}
-            />
-          </div>
-          <DialogFooter>
-            {goal.chengRef ? (
-              <Button
-                type="button"
-                variant="ghost"
-                data-goal-cheng-bind-clear
-                onClick={() => {
-                  setBindOpen(false);
-                  onBindChengRef(null);
-                }}
+    <ControlHintTooltip title={intl.formatMessage({ id: "chat.target.editSettings" })} side="left">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="size-6 shrink-0"
+            data-goal-action="settings"
+            aria-label={intl.formatMessage({ id: "chat.target.editSettings" })}
+          >
+            <SettingsIcon className="size-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" data-goal-settings-menu>
+          <DropdownMenuRadioGroup
+            value={currentLevel}
+            onValueChange={(value) => {
+              if (value === "production" || value === "diagnostic") {
+                onUpdateAcceptance(value);
+              }
+            }}
+          >
+            <DropdownMenuRadioItem value="production" data-goal-acceptance-option="production">
+              {intl.formatMessage({ id: "chat.target.acceptance.production" })}
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="diagnostic" data-goal-acceptance-option="diagnostic">
+              {intl.formatMessage({ id: "chat.target.acceptance.diagnostic" })}
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+          {goal.chengRef ? (
+            <>
+              <DropdownMenuSeparator />
+              <div
+                className="flex min-w-0 flex-col gap-0.5 px-2 py-1 text-ui-xs text-foreground-subtle"
+                data-goal-cheng-bound={goal.chengRef.jobId}
               >
+                <span className="truncate font-mono">{goal.chengRef.jobId}</span>
+                <span className="truncate">{goal.chengRef.task}</span>
+              </div>
+              <DropdownMenuItem
+                data-goal-action="clear-cheng-bind"
+                onSelect={() => onBindChengRef(null)}
+              >
+                <LinkIcon className="size-3.5" />
                 {intl.formatMessage({ id: "chat.target.chengBind.clear" })}
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              data-goal-cheng-bind-submit
-              disabled={jobId.trim().length === 0 || task.trim().length === 0}
-              onClick={() => {
-                setBindOpen(false);
-                onBindChengRef({ jobId: jobId.trim(), task: task.trim() });
-              }}
-            >
-              {intl.formatMessage({ id: "chat.target.chengBind.submit" })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+              </DropdownMenuItem>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </ControlHintTooltip>
   );
 }
 
