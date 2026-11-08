@@ -202,6 +202,15 @@ export interface ToolExecutionContext {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /**
+   * GoalCreate 成功后的续跑请求（与 /goal set 同语义：arm idle 驱动器并预约首轮）。
+   * 由 runtime 注入；缺席的测试桩不产生自动续跑。abortSignal 是工具调用的取消信号：
+   * GoalCreate 执行窗口内用户 Stop/抢占时，runtime 不得 arm 或预约续跑。
+   */
+  requestGoalContinuation?: (options: {
+    abortSignal?: AbortSignal;
+    traceContext?: TraceContext;
+  }) => void;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 提交端口；缺席则 CreateWorkflow 回占位诊断而不启动。 */

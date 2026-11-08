@@ -19,7 +19,7 @@ it("keeps a SQLite goal active when the no-tool verifier rejects completion afte
   const baseFactory = createTestModelFactory({
     async generateText(request) {
       requests.push(request);
-      // 使用真实 Adapter 投影；协议不配套时会抛错并触发 verifier 的既有 fail-open。
+      // 使用真实 Adapter 投影；协议不配套时会抛错并触发 verifier 的 fail-closed。
       toAiSdkMessages(request.messages, {
         providerKind: "anthropic",
         toolSearchEnabled: request.toolSearchEnabled,

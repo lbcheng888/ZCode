@@ -194,6 +194,33 @@ function createRuntimeToolExecutor(
     offPeakPort: deps.offPeakPort,
     topicResourcePort: deps.topicResourcePort,
     sessionStore: deps.sessionStore,
+    // GoalCreate 成功后与 /goal set 同语义：arm idle 驱动器并预约首轮续跑。handler
+    // 在当前 turn 内调用，不能等待回合完成（会与命令队列 drain 互相阻塞），所以只
+    // 发起请求；续跑失败只告警，创建结果本身已经落盘并返回给模型。
+    // 取消窗口：GoalCreate 执行期间用户 Stop/抢占会 abort 工具上下文信号。此时创建
+    // 结果照常返回，但绝不能 arm 驱动器或预约续跑，否则停止的目标会在空闲沿重新起跑。
+    requestGoalContinuation: ({ abortSignal, traceContext }) => {
+      // 抢占（send-now 等，preserve=true）不是停止目标：照常创建+arm，由续跑命令自身
+      // 的既有抢占处理接管；只有真 Stop（aborted 且非 preserve）才跳过 arm。
+      const preempted = runtime.activeForegroundExecution?.preserveQueueAutoDrainOnCancel === true;
+      if (abortSignal?.aborted && !preempted) return;
+      void runtime
+        .continueActiveTargetLoop({
+          ...(preempted || abortSignal === undefined ? {} : { abortSignal }),
+          traceContext: traceContext ?? runtime.rootTraceContext,
+          trigger: "manual",
+          // 与 /goal set 相同：首轮续跑不先验证，后续 idle 驱动器轮次再验证。
+          verifyBeforeFirstContinue: false,
+        })
+        .catch((error: unknown) => {
+          runtime.logger?.warn("GoalCreate continuation request failed", {
+            errorMessage: error instanceof Error ? error.message : String(error),
+            event: "target.create.continuation_failed",
+            module: "core.runtime",
+            status: "failed",
+          });
+        });
+    },
     sessionModePort: createRuntimeSessionModePort(runtime),
     workflowPort: deps.workflowPort,
     dynamicWorkflowRunPort: deps.dynamicWorkflowRunPort,

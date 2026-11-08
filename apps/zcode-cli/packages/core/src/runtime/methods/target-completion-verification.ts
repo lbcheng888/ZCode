@@ -2,10 +2,9 @@ import {
   SessionEventType,
   GOAL_COMPLETION_VERIFICATION_QUERY_SOURCE,
   createChildTraceContext,
-  failOpenGoalCompletionVerification,
   failedGoalCompletionVerification,
   formatGoalCompletionVerificationPrompt,
-  parseGoalCompletionVerificationText,
+  parseGoalCompletionVerificationResult,
   runWithModelInvocationContext,
   traceContextToLogContext,
 } from "../deps.js";
@@ -308,7 +307,7 @@ async function verifyTargetCompletion(
     model,
   });
   // verifier 直接消费完整历史但曾绕过正常请求的媒体策略；只补 capability
-  // 仍会让聚合超限失败进入 fail-open。请求前统一执行能力和预算投影。
+  // 仍会让聚合超限失败进入 verifier 请求失败路径。请求前统一执行能力和预算投影。
   const messages = projectMessagesForModelMediaPolicy(
     prepared.request.messages,
     model.properties.inputFormat,
@@ -347,6 +346,9 @@ async function verifyTargetCompletion(
         stopReason: result.finishReason,
         toolCallCount: toolCalls.length,
         usage: result.usage,
+        // 冷恢复按事件写入时的策略重放：本事件是新 fail-closed 裁决下产生的，
+        // 历史事件缺席该标记，保持旧 fail-open 解析。
+        verificationPolicy: "fail_closed" as const,
       },
       modelTraceContext,
     );
@@ -363,21 +365,30 @@ async function verifyTargetCompletion(
       toolCallCount: toolCalls.length,
       traceContext: modelTraceContext,
     });
-    let verification =
-      toolCalls.length > 0
-        ? failOpenGoalCompletionVerification(
-            "The completion verifier attempted to call tools instead of returning a verification result.",
-          )
-        : parseGoalCompletionVerificationText(result.text);
+    // 三类裁判链路失败（坏 JSON / 错误调用工具 / 请求异常）统一收口 failed_closed：
+    // 它们都不是 verifier 的有效结论，投影 outcome=failed（有效结论才是 notSatisfied，
+    // 见 packages/shared/src/zcode-protocol-v4/snapshot.ts 的 status 语义）。
+    let verificationFailedClosed = false;
+    let verification: GoalCompletionVerificationOutput;
+    if (toolCalls.length > 0) {
+      verificationFailedClosed = true;
+      verification = failedGoalCompletionVerification(
+        "The completion verifier attempted to call tools instead of returning a verification result.",
+      );
+    } else {
+      const parsed = parseGoalCompletionVerificationResult(result.text);
+      verificationFailedClosed = parsed.outcome === "protocol_failure";
+      verification = parsed.verification;
+    }
     // 目标身份必须在写完成之前校验；否则旧目标的 passed 事件会被投影到替换后的新目标。
     // 这里先读一次，命中变化就把结论降级为非通过（无 nextAction），调用方不会完成/续跑。
     const currentTarget = await this.readSessionTargetForContext(modelTraceContext);
-    if (
-      !currentTarget ||
-      currentTarget.targetID !== input.target.targetID ||
-      currentTarget.revision !== input.target.revision ||
-      currentTarget.status !== "active"
-    ) {
+    const targetUnchanged =
+      currentTarget !== null &&
+      currentTarget.targetID === input.target.targetID &&
+      currentTarget.revision === input.target.revision &&
+      currentTarget.status === "active";
+    if (!targetUnchanged) {
       verification = failedGoalCompletionVerification(
         "Completion verification was superseded by a target change.",
       );
@@ -389,7 +400,7 @@ async function verifyTargetCompletion(
           ...anchor,
           ...(foregroundExecutionId ? { foregroundExecutionId } : {}),
           goalIteration,
-          status: "completed",
+          status: verificationFailedClosed ? "failed_closed" : "completed",
           targetId: input.target.targetID,
           verification,
           verificationId,
@@ -398,6 +409,15 @@ async function verifyTargetCompletion(
       ),
       modelTraceContext,
     );
+    // 坏 JSON / 错误调用工具与请求异常同属裁判链路故障：都不是「模型确认未完成」的
+    // 可续跑结论。显式暂停目标（reason 上浮），消灭 active 上的静默停摆——否则空闲
+    // 驱动器每个外部边缘都会重新预约，把内部协议错误变成无限目标迭代。
+    if (verificationFailedClosed && targetUnchanged) {
+      await pauseTargetAfterFailedClosedVerification.call(this, {
+        target: input.target,
+        traceContext: modelTraceContext,
+      });
+    }
     return verification;
   } catch (error) {
     await recordModelUsageFact(this, {
@@ -440,15 +460,19 @@ async function verifyTargetCompletion(
       }
       throw error;
     }
-    this.logger?.warn("Goal completion verification failed open", {
+    // verifier 请求失败（含超上下文窗口）＝裁判链路故障＝未判定，fail-closed：
+    // 绝不等于完成，也不能静默返回让目标悬在 active 上无人再验。参照
+    // cheng_gate_unavailable 先例（本文件 :69-74/:87-92）显式暂停目标并把 reason
+    // 上浮会话：用户可见地停在 paused，等 host/模型恢复后由用户 resume 或显式边缘重验。
+    this.logger?.warn("Goal completion verification failed closed", {
       ...traceContextToLogContext(modelTraceContext),
       errorMessage: error instanceof Error ? error.message : String(error),
-      event: "target.completion_verification.failed_open",
+      event: "target.completion_verification.failed_closed",
       module: "core.runtime",
       status: "failed",
       targetId: input.target.targetID,
     });
-    const verification = failOpenGoalCompletionVerification(
+    const verification = failedGoalCompletionVerification(
       error instanceof Error
         ? `Completion verifier request failed: ${error.message}`
         : "The completion verifier could not confirm that every goal requirement is complete.",
@@ -469,7 +493,60 @@ async function verifyTargetCompletion(
       ),
       modelTraceContext,
     );
+    // 生命周期事实先落盘，暂停写失败也不能丢掉 failed_closed 的 reason：
+    // helper 吞掉 pause 的写失败/CAS 未命中并告警，函数仍返回 failed_closed 结论。
+    await pauseTargetAfterFailedClosedVerification.call(this, {
+      target: input.target,
+      traceContext: modelTraceContext,
+    });
     return verification;
+  }
+}
+
+/**
+ * 裁判链路失败（请求异常 / 坏 JSON / 工具误用）后的显式暂停收口。
+ * 生命周期事件已落盘时，暂停只是把状态上浮给用户；store 抛错或 CAS 未命中
+ * 都不得改变函数返回值（否则 failed_closed 事实会随异常一起丢失）。失败记
+ * warn 暴露，目标保持原状，等待用户显式 resume 或下一次外部边缘重验。
+ */
+async function pauseTargetAfterFailedClosedVerification(
+  this: AgentRuntimeInternal,
+  input: { target: SessionGoal; traceContext: TraceContext },
+): Promise<void> {
+  // 裁判链路故障即不再自动续跑：disarm 必须在暂停写入之前独立落定，不能依赖
+  // pause 成功。pause 写失败时目标仍 active，若驱动器保持 armed，下一个外部
+  // 空闲沿会重新预约、再次发起 verifier 请求，把一次内部协议错误变成无限目标
+  // 迭代。失败只记 warn，目标状态与 failed_closed 结论原样上浮，等用户显式
+  // resume 或显式边缘重验。
+  this.goalRoundDriverArmed = false;
+  try {
+    const pausedTarget = await pauseActiveTargetWithReason.call(this, {
+      expectedRevision: input.target.revision,
+      expectedStatus: "active",
+      expectedTargetID: input.target.targetID,
+      reason: "goal_verifier_unavailable",
+      traceContext: input.traceContext,
+    });
+    if (pausedTarget) return;
+    // 目标已不是 active（并发暂停/完成）或身份已变：不是静默成功，留下可定位事实。
+    this.logger?.warn("Goal verification failed closed but the target was not paused", {
+      ...traceContextToLogContext(input.traceContext),
+      event: "target.completion_verification.pause_skipped",
+      module: "core.runtime",
+      reason: "goal_verifier_unavailable",
+      status: "failed",
+      targetId: input.target.targetID,
+    });
+  } catch (error) {
+    this.logger?.warn("Failed to pause goal after failed-closed verification", {
+      ...traceContextToLogContext(input.traceContext),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      event: "target.completion_verification.pause_failed",
+      module: "core.runtime",
+      reason: "goal_verifier_unavailable",
+      status: "failed",
+      targetId: input.target.targetID,
+    });
   }
 }
 
@@ -530,7 +607,7 @@ async function generateTargetCompletionVerificationText(
       }
 
       // 目标完成验证发生在用户已看到 assistant 迭代之后；Start Plan busy
-      // 是 admission 瞬时并发。先短暂重试，避免直接走 fail-open 把可恢复并发误当完成。
+      // 是 admission 瞬时并发。先短暂重试，避免可恢复并发直接落成「未判定」。
       this.logger?.warn("Goal completion verification retrying after Start Plan busy", {
         ...traceContextToLogContext(input.traceContext),
         attempt,

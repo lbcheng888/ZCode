@@ -39,7 +39,7 @@ import { parseCheckpointCreatedPayload, parseRewindTriggeredPayload } from "../r
 import {
   GOAL_COMPLETION_VERIFICATION_QUERY_SOURCE,
   failedGoalCompletionVerification,
-  parseGoalCompletionVerificationText,
+  parseGoalCompletionVerificationResult,
 } from "../tools/target.js";
 import type {
   ActiveToolCall,
@@ -200,11 +200,32 @@ export class EventReducer {
     [EventTypes.ModelComplete]: (p, e) => {
       const payload = e.payload as ModelCompletePayload;
       if (payload.querySource === GOAL_COMPLETION_VERIFICATION_QUERY_SOURCE) {
+        // 冷恢复（rebuildProjection / EventReducer.reduce）会重放历史 model_complete。
+        // 2026-11-08 起 verifier 基建失败改 fail-closed，新事件在 payload 上带
+        // verificationPolicy="fail_closed"；历史事件没有该标记，必须按旧 fail-open
+        // 解析重放，否则重启会把当时已交付的结论翻成未通过（L6 回归）。
+        const verificationPolicy =
+          payload.verificationPolicy === "fail_closed" ? "fail_closed" : "legacy_fail_open";
+        const parsed = parseGoalCompletionVerificationResult(payload.content, {
+          policy: verificationPolicy,
+        });
+        // 新事件里的裁判链路故障（坏 JSON / 工具误用）由随后的 failed_closed lifecycle
+        // 事件写摘要账本；这里跳过，避免同一次校验被计两遍（历史事件没有标记，
+        // 仍按旧路径入账，保持既有摘要不变）。
+        if (
+          verificationPolicy === "fail_closed" &&
+          (parsed.outcome === "protocol_failure" || (payload.toolCallCount ?? 0) > 0)
+        ) {
+          return {
+            ...p,
+            updatedAt: e.timestamp,
+          };
+        }
         return {
           ...p,
           targetCompletionVerifications: [
             ...p.targetCompletionVerifications,
-            parseGoalCompletionVerificationText(payload.content),
+            parsed.verification,
           ],
           updatedAt: e.timestamp,
         };

@@ -120,6 +120,14 @@ export const goalCreateHandler: ToolHandler = async (input, context) => {
     target: goal,
     previousTarget: null,
   });
+  // 与 /goal set 同语义：创建成功即 arm idle 驱动器并预约首轮续跑，用户不必再发
+  // /goal resume。这里只发起请求、不等待续跑回合——当前 turn 仍在执行，等待会与
+  // runtime 命令队列的 drain 互相阻塞。目标此后被暂停/完成时，候选闸门自然停转。
+  // 取消信号随请求透传：GoalCreate 执行窗口内被 Stop/抢占时，runtime 不得 arm 或预约。
+  context.requestGoalContinuation?.({
+    abortSignal: context.abortSignal,
+    traceContext: context.traceContext,
+  });
   return { goal };
 };
 

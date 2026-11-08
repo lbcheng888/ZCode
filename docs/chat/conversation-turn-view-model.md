@@ -188,8 +188,12 @@ goal verify 是 assistant 输出后的裁判事件，属于 `postTurnEvents`：
 - UI row key 必须是 `goal:${targetId}:iteration:${goalIteration}`。
 - `verificationId` 是 verifier attempt id，只能用于 attempts 明细，不能作为 row key。
 - 同一 `targetId + goalIteration` 的 started / completed / failed / cancelled 必须更新同一条 row。
-- verifier 明确返回 `passed: false` 时显示未通过；verifier JSON 解析失败属于裁判链路故障，
-  默认 fail-open 为 `passed: true`，但 reason 必须保留格式错误原因，便于排查。
+- verifier 明确返回 `passed: false` 时显示未通过（lifecycle `completed`，投影
+  `outcome=notSatisfied`）；verifier JSON 解析失败、错误调用工具或请求异常属于裁判链路
+  故障，一律 fail-closed：`passed: false` 且 lifecycle `failed_closed`（投影
+  `outcome=failed`），reason 必须保留故障原因便于排查；请求异常还会显式暂停目标
+  （reason `goal_verifier_unavailable`）。2026-11-08 用户裁定推翻 2026-07-15 的
+  fail-open 裁决（实证：sess_21a0b4b5 超窗被误标完成）。
 
 ### Fork
 

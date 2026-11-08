@@ -21,7 +21,9 @@ import { validateChengSpecDraft } from "../src/tool/handlers/cheng-spec-draft.js
 const JOB_ID = "1f".repeat(32);
 
 function entry(): ToolEntry {
-  const found = builtInTools.find((candidate) => candidate.metadata.name === CHENG_GENERATE_TOOL_NAME);
+  const found = builtInTools.find(
+    (candidate) => candidate.metadata.name === CHENG_GENERATE_TOOL_NAME,
+  );
   if (found === undefined) {
     throw new Error(`tool not registered: ${CHENG_GENERATE_TOOL_NAME}`);
   }
@@ -73,21 +75,47 @@ function minimalFixtureDraft(): Record<string, unknown> {
       },
     ],
     links: [
-      { id: "lnk.001", from: "req.p06_fib_min.fib", to: "mod.p06_fib_min.fib.fib", type: "implemented_by" },
-      { id: "lnk.002", from: "req.p06_fib_min.fib", to: "ast.p06_fib_min.fib.eval", type: "verified_by" },
-      { id: "lnk.003", from: "ast.p06_fib_min.fib.eval", to: "mod.p06_fib_min.fib.fib", type: "exercises" },
+      {
+        id: "lnk.001",
+        from: "req.p06_fib_min.fib",
+        to: "mod.p06_fib_min.fib.fib",
+        type: "implemented_by",
+      },
+      {
+        id: "lnk.002",
+        from: "req.p06_fib_min.fib",
+        to: "ast.p06_fib_min.fib.eval",
+        type: "verified_by",
+      },
+      {
+        id: "lnk.003",
+        from: "ast.p06_fib_min.fib.eval",
+        to: "mod.p06_fib_min.fib.fib",
+        type: "exercises",
+      },
       // composes 指向带 fn 限定的点名模块：解析不得按点 naive 切分。
-      { id: "lnk.004", from: "mod.p06_fib_min.fib.fib", to: "mod.p06_fib_min.ops.fadd", type: "composes" },
+      {
+        id: "lnk.004",
+        from: "mod.p06_fib_min.fib.fib",
+        to: "mod.p06_fib_min.ops.fadd",
+        type: "composes",
+      },
     ],
   };
 }
 
 /** 端口测试替身：记录调用事实，回执形状与生产 host 的摘要三字段一致。 */
-function fakeGeneratePort(seen: Array<{ specPath: string; task: string; budget?: number }>): ChengGeneratePort {
+function fakeGeneratePort(
+  seen: Array<{ specPath: string; task: string; budget?: number }>,
+): ChengGeneratePort {
   return {
     async generate(input) {
       seen.push(input);
-      return { jobId: JOB_ID, runId: input.task === "p06_fib_min" ? "run-42" : null, state: "succeeded" };
+      return {
+        jobId: JOB_ID,
+        runId: input.task === "p06_fib_min" ? "run-42" : null,
+        state: "succeeded",
+      };
     },
   };
 }
@@ -212,7 +240,12 @@ describe("validateChengSpecDraft", () => {
       ...minimalFixtureDraft(),
       links: [
         ...minimalFixtureDraft().links,
-        { id: "lnk.005", from: "mod.p06_fib_min.ghost", to: "mod.p06_fib_min.ops.fadd", type: "composes" },
+        {
+          id: "lnk.005",
+          from: "mod.p06_fib_min.ghost",
+          to: "mod.p06_fib_min.ops.fadd",
+          type: "composes",
+        },
       ],
     });
     expect(verdict.ok).toBe(false);
@@ -229,7 +262,9 @@ describe("validateChengSpecDraft", () => {
     // 断言清空后，原本指向断言的 link 也一并悬空——两条都要上报，不藏第二条。
     expect(verdict.errors[0]).toBe("assertions 不能为空：没有断言的草案无从验收");
     expect(verdict.errors).toHaveLength(3);
-    expect(verdict.errors.slice(1).every((error) => error.includes("ast.p06_fib_min.fib.eval"))).toBe(true);
+    expect(
+      verdict.errors.slice(1).every((error) => error.includes("ast.p06_fib_min.fib.eval")),
+    ).toBe(true);
   });
 
   it("rejects duplicate module names", () => {
@@ -263,9 +298,11 @@ describe("validateChengSpecDraft", () => {
     });
     expect(verdict.ok).toBe(false);
     if (verdict.ok) return;
-    expect(verdict.errors.some((error) => error.includes("depends_on") && error.includes("implemented_by"))).toBe(
-      true,
-    );
+    expect(
+      verdict.errors.some(
+        (error) => error.includes("depends_on") && error.includes("implemented_by"),
+      ),
+    ).toBe(true);
   });
 
   it("accumulates every error in one verdict", () => {
@@ -273,6 +310,90 @@ describe("validateChengSpecDraft", () => {
     expect(verdict.ok).toBe(false);
     if (verdict.ok) return;
     expect(verdict.errors.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("accepts an explicit settle oracle as a no-op", () => {
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: { kind: "settle" },
+    });
+    expect(verdict).toEqual({ ok: true, task: "p06_fib_min" });
+  });
+
+  it("rejects a property oracle as a declared-but-unwired layer with the fixed leading error", () => {
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: { kind: "property" },
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    // 固定文案必须原样独占 errors：草案其余部分全绿时，模型看到的就只有这一条引导。
+    expect(verdict.errors).toEqual([
+      "oracle 层 'property' 已声明未接线（oracle 分层路线 layer-2/3）：当前仅 settle 可执行，请勿提交该层草案",
+    ]);
+  });
+
+  it("rejects a scenario oracle the same way", () => {
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: { kind: "scenario" },
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.errors).toEqual([
+      "oracle 层 'scenario' 已声明未接线（oracle 分层路线 layer-2/3）：当前仅 settle 可执行，请勿提交该层草案",
+    ]);
+  });
+
+  it("rejects an oracle kind outside the enum and lists the legal values", () => {
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: { kind: "fuzz" },
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.errors).toHaveLength(1);
+    expect(verdict.errors[0]).toContain('"fuzz"');
+    expect(verdict.errors[0]).toContain("settle | property | scenario");
+  });
+
+  it("rejects a non-object oracle", () => {
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: "settle",
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.errors).toEqual(["oracle 在场时必须是 JSON 对象，收到 string"]);
+  });
+
+  it("rejects an oracle object missing kind", () => {
+    // 显式声明 oracle 就必须把 kind 写全：缺省 settle 只对"整个 oracle 字段缺席"生效。
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: {},
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.errors).toEqual(["oracle.kind 必须是非空字符串"]);
+  });
+
+  it("keeps the oracle rejection first while still reporting a composes cycle", () => {
+    // 放置契约：oracle 块在形状检查之后、links/composes 之前——不短路，环照报，
+    // 固定文案仍是首条。
+    const verdict = validateChengSpecDraft({
+      ...minimalFixtureDraft(),
+      oracle: { kind: "scenario" },
+      links: [
+        { from: "mod.p06_fib_min.fib.fib", to: "mod.p06_fib_min.ops.fadd", type: "composes" },
+        { from: "mod.p06_fib_min.ops.fadd", to: "mod.p06_fib_min.fib.fib", type: "composes" },
+      ],
+    });
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.errors).toHaveLength(2);
+    expect(verdict.errors[0]).toContain("oracle 层 'scenario' 已声明未接线");
+    expect(verdict.errors[1]).toContain("composes 边构成环");
   });
 });
 
@@ -283,7 +404,9 @@ describe("ChengGenerate tool", () => {
       { spec: minimalFixtureDraft() },
       context({ workspaceRoot }),
     );
-    const parsed = ChengGenerateOutputSchema.parse(output) as ChengGenerateOk | { status: "capability_absent" };
+    const parsed = ChengGenerateOutputSchema.parse(output) as
+      | ChengGenerateOk
+      | { status: "capability_absent" };
     expect(parsed).toMatchObject({ status: "capability_absent" });
     await expect(readdir(workspaceRoot)).resolves.toEqual([]);
   });
@@ -303,6 +426,22 @@ describe("ChengGenerate tool", () => {
     await expect(readdir(workspaceRoot)).resolves.toEqual([]);
   });
 
+  it("returns a 400 naming the unwired oracle layer and starts nothing", async () => {
+    const workspaceRoot = await tempWorkspace();
+    const seen: Array<{ specPath: string; task: string; budget?: number }> = [];
+    const output = await entry().handler(
+      { spec: { ...minimalFixtureDraft(), oracle: { kind: "property" } } },
+      context({ workspaceRoot, chengGeneratePort: fakeGeneratePort(seen) }),
+    );
+    expect(output).toMatchObject({ result: false, errorCode: 400 });
+    const failure = output as { result: false; errorCode: number; message: string };
+    expect(failure.message).toContain(
+      "oracle 层 'property' 已声明未接线（oracle 分层路线 layer-2/3）：当前仅 settle 可执行，请勿提交该层草案",
+    );
+    expect(seen).toEqual([]);
+    await expect(readdir(workspaceRoot)).resolves.toEqual([]);
+  });
+
   it("persists the draft and returns the job summary", async () => {
     const workspaceRoot = await tempWorkspace();
     const seen: Array<{ specPath: string; task: string; budget?: number }> = [];
@@ -318,9 +457,7 @@ describe("ChengGenerate tool", () => {
       runId: "run-42",
       state: "succeeded",
     });
-    expect(seen).toEqual([
-      { specPath: expect.any(String), task: "p06_fib_min", budget: 120_000 },
-    ]);
+    expect(seen).toEqual([{ specPath: expect.any(String), task: "p06_fib_min", budget: 120_000 }]);
     const specPath = seen[0].specPath;
     expect(path.isAbsolute(specPath)).toBe(true);
     expect(specPath.startsWith(path.join(workspaceRoot, ".chengcode", "cheng-specs"))).toBe(true);
@@ -337,5 +474,20 @@ describe("ChengGenerate tool", () => {
     );
     expect(seen[0]).toEqual({ specPath: expect.any(String), task: "p06_fib_none" });
     expect("budget" in seen[0]).toBe(false);
+  });
+
+  it("oracle 检查先于形状检查：task 非法 + property 并存时固定文案仍占 errors 首条", () => {
+    const verdict = validateChengSpecDraft({ task: "../evil", oracle: { kind: "property" } });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.errors[0]).toContain("已声明未接线");
+      expect(verdict.errors.some((e) => e.includes("task"))).toBe(true);
+    }
+  });
+
+  it("oracle:null 的文案点名 null（不再误报 object）", () => {
+    const verdict = validateChengSpecDraft({ oracle: null });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.errors[0]).toContain("null");
   });
 });

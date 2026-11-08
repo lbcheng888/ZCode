@@ -10,7 +10,6 @@ import {
   GoalBlockInputJsonSchema,
   GoalChengBindInputJsonSchema,
   GoalUpdateInputJsonSchema,
-  failOpenGoalCompletionVerification,
   failedGoalCompletionVerification,
   parseGoalCompletionVerificationText,
   SessionEventType,
@@ -144,6 +143,21 @@ describe("goal tools", () => {
       objective: "Ship the goal",
       revision: 1,
     });
+  });
+
+  it("requests goal continuation after a successful create but not after a conflict", async () => {
+    const store = createTargetStore();
+    const context = createContext(store);
+    const continuationRequests: Array<{ traceContext?: unknown }> = [];
+    context.requestGoalContinuation = (options) => continuationRequests.push(options);
+
+    await goalCreateHandler({ objective: "Ship the goal" }, context);
+    expect(continuationRequests).toHaveLength(1);
+
+    // 已存在目标时写入被拒，不得 arm/预约续跑。
+    const again = await goalCreateHandler({ objective: "Different goal" }, context);
+    expect(again).toMatchObject({ result: false, errorCode: 409 });
+    expect(continuationRequests).toHaveLength(1);
   });
 
   it("updates the objective only under the current revision and rejects stale writes", async () => {
@@ -612,15 +626,9 @@ describe("goal tools", () => {
     });
   });
 
-  it("defaults verifier infrastructure failures to passed without nextAction", () => {
-    expect(
-      failOpenGoalCompletionVerification("The completion verifier did not return valid JSON."),
-    ).toEqual({
-      passed: true,
-      reason: "The completion verifier did not return valid JSON.",
-    });
+  it("fails invalid verifier JSON closed instead of defaulting to passed", () => {
     expect(parseGoalCompletionVerificationText("not json")).toEqual({
-      passed: true,
+      passed: false,
       reason: "The completion verifier did not return valid JSON.",
     });
   });

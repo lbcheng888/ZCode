@@ -891,6 +891,11 @@ export interface ModelCompletePayload {
   /** 当前模型请求组装出的完整 tool call 数量；旧事件可能缺失。 */
   toolCallCount?: number;
   usage: TokenUsage | ModelUsage;
+  /**
+   * goal 完成验证请求的解析策略版本。2026-11-08 起写入 "fail_closed"；
+   * 缺席 = 该事件写于旧 fail-open 裁决下，冷恢复必须按旧解析重放，不得翻转历史结论。
+   */
+  verificationPolicy?: "fail_closed";
 }
 
 export interface TurnFileChangeSummary {

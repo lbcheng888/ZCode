@@ -44,7 +44,9 @@ import {
   workspaceConfigTopic,
 } from "@zcode/shared/zcode-protocol-v4";
 import {
+  EventReducer,
   SessionEventType,
+  createSessionEvent,
   createTraceId,
   type BackgroundTaskInfo,
   type MessageId,
@@ -7048,6 +7050,74 @@ describe("ZCodeProtocolAgentServer", () => {
         targetId: "goal_paused_cancelled",
       }),
     ]);
+  });
+
+  it("cold replay keeps historical fail-open verifier summaries without a duplicate row", async () => {
+    const app = createFakeApp();
+    const target = {
+      objective: "Keep legacy fail-open verification",
+      sessionID: app.sessionId,
+      status: "active" as const,
+      summaryTitle: null,
+      targetID: "goal_legacy_fail_open" as never,
+      time: { created: 1_000, updated: 4_000 },
+      timeUsedSeconds: 2,
+      tokenBudget: null,
+      tokensUsed: 10,
+    };
+    const verification = {
+      passed: true,
+      reason: "The completion verifier did not return valid JSON.",
+    };
+    // 2026-11-08 之前写入的 verifier model_complete 没有 verificationPolicy 标记：
+    // 冷恢复必须按旧 fail-open 解析，和持久化 lifecycle 的结论一致，摘要账本
+    // 与 timeline 合并后只剩一条（key 含 passed，翻转会各留一条重复行）。
+    const projection = new EventReducer().reduce([
+      createSessionEvent(SessionEventType.SessionCreated, app.sessionId, {
+        mode: "build",
+        contextWindow: 128_000,
+      }),
+      createSessionEvent(SessionEventType.ModelComplete, app.sessionId, {
+        content: "done, all requirements are complete",
+        querySource: "target_completion_verification",
+        stopReason: "stop",
+      }),
+    ]);
+    app.runtime.getProjection = async () => projection;
+
+    const snapshot = zcodeSessionStateSnapshotSchema.parse(
+      await buildSessionSnapshot({
+        app,
+        eventSeq: 1,
+        messages: [],
+        persistedGoalVerificationEvents: [
+          {
+            id: "evt_verify_legacy" as SessionEvent["id"],
+            payload: {
+              goalIteration: 1,
+              status: "completed",
+              targetId: target.targetID,
+              verification,
+              verificationId: "verify_legacy",
+            },
+            sequenceNumber: 10,
+            sessionId: app.sessionId,
+            timestamp: new Date(3_500),
+            traceId: "trace_verify_legacy" as SessionEvent["traceId"],
+            type: SessionEventType.TargetCompletionVerification,
+          },
+        ],
+        stateRevision: 1,
+        target,
+        todos: [],
+        workspace,
+      }),
+    );
+
+    expect(snapshot.runtime.goalVerifications).toEqual([
+      { nextAction: null, passed: true, reason: verification.reason },
+    ]);
+    expect(snapshot.runtime.goalVerificationTimeline).toHaveLength(1);
   });
 
   it("keeps visible user continuation todo updates in the current verifier iteration", async () => {

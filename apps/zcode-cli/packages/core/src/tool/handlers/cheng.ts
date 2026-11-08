@@ -61,8 +61,18 @@ const EXPLAIN_DESCRIPTION =
   "Summarize the decision or structure graph of a finished Cheng job as bounded counts plus an artifact ref. Read-only; the full graph stays on disk.";
 const PLAN_DESCRIPTION =
   "Read the deterministic ChengPlan for a finished Cheng job from structured receipts: frontier, candidate actions with costs/risk, recommended next action and blockedBy. Read-only; never starts, retries or cancels a job.";
-const GENERATE_DESCRIPTION =
-  "Validate a Cheng spec draft (csg.spec.v2 fixture shape), persist it under <workspaceRoot>/.chengcode/cheng-specs/, and start a Cheng generate job through the wired host. The model only provides the spec draft: legality is decided by the validator, and program generation is a deterministic host job. Returns a { jobId, runId, state } summary; follow up with ChengInspect/ChengVerify. An invalid draft writes nothing and starts nothing.";
+// 分诊三分段（何时用/何时不用/不确定时）：判据是「能否用 settle/eval oracle 表达」，
+// 不是任务难易——交互/UI/IO 类程序没有可判定输出，走常规编码；不确定时先拆可判定
+// 纯核心，拆不出就不用本工具。
+const GENERATE_DESCRIPTION = [
+  "Validate a Cheng spec draft (csg.spec.v2 fixture shape), persist it under <workspaceRoot>/.chengcode/cheng-specs/, and start a Cheng generate job through the wired host. The model only provides the spec draft: legality is decided by the validator, and program generation is a deterministic host job. Returns a { jobId, runId, state } summary; follow up with ChengInspect/ChengVerify. An invalid draft writes nothing and starts nothing.",
+  "",
+  "When to use: tasks expressible as pure functions or state transitions checked by a settle/eval oracle — algorithms, data transformations, parsing, pure core logic whose correct output is decidable from its inputs.",
+  "",
+  "When NOT to use: interactive/UI/IO-bound or open-ended framework programs (game rendering, web pages, apps). Build those with the regular coding tools, where structure is constrained by the existing gates — do not route them through this tool.",
+  "",
+  "When unsure: first try to carve the task's decidable core into a pure-function spec draft with settle oracle assertions; if no such core can be carved out, do not use this tool.",
+].join("\n");
 
 const MODEL_INSTRUCTIONS = [
   "Only call with a jobId produced earlier by cheng.generate (inside a workflow) or by the Cheng host; these tools never create work.",

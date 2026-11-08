@@ -1018,6 +1018,9 @@ function mergeGoalVerificationSummaries(
 }
 
 function goalVerificationSummaryKey(verification: GoalCompletionVerificationOutput): string {
+  // key 含 passed：摘要账本与 timeline 两条来源只要对同一次校验解出不同结论，
+  // 就会各留一条重复行。冷恢复因此必须按事件写入时的策略解析（见 event-reducer
+  // 的 verificationPolicy 分支），历史 fail-open 事件不得被新解析翻转。
   return [
     verification.passed ? "1" : "0",
     normalizeTodoContent(verification.reason),

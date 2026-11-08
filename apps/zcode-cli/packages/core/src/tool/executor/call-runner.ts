@@ -538,6 +538,7 @@ async function executeToolCallImpl(
         offPeakPort: deps.offPeakPort,
         topicResourcePort: deps.topicResourcePort,
         sessionStore: deps.sessionStore,
+        requestGoalContinuation: deps.requestGoalContinuation,
         sessionModePort: deps.sessionModePort,
         workflowPort: deps.workflowPort,
         dynamicWorkflowRunPort: deps.dynamicWorkflowRunPort,

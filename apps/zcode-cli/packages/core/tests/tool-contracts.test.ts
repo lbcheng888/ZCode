@@ -1001,6 +1001,35 @@ describe("tool contract declarations", () => {
     expect(askDescription).toContain("Do NOT use this tool to ask");
   });
 
+  // ChengGenerate 分诊三分段（handlers/cheng.ts GENERATE_DESCRIPTION）：判据锚在
+  // 「settle/eval oracle 可表达」，防止后续改丢 ①何时用 ②何时不用 ③不确定时。
+  it("triages ChengGenerate by settle-oracle expressibility in three description segments", () => {
+    const registry = createToolRegistry();
+    registerBuiltInTools(registry);
+
+    const byName = new Map(registry.toContracts().map((tool) => [tool.name, tool]));
+    const generateDescription = byName.get("ChengGenerate")?.description ?? "";
+    expect(generateDescription.length).toBeGreaterThan(0);
+
+    // ① 何时用：settle/eval oracle 可表达的纯函数/状态迁移类任务。
+    expect(generateDescription).toContain("When to use:");
+    expect(generateDescription).toContain("settle/eval oracle");
+    expect(generateDescription).toContain("pure functions or state transitions");
+
+    // ② 何时不用：交互/UI/IO/开放框架程序走常规编码，勿用本工具。
+    expect(generateDescription).toContain("When NOT to use:");
+    expect(generateDescription).toContain("interactive/UI/IO");
+    expect(generateDescription).toContain("game rendering");
+
+    // ③ 不确定时：先拆可判定纯核心成带 settle oracle 的草案，拆不出就不用。
+    expect(generateDescription).toContain("When unsure:");
+    expect(generateDescription).toContain("decidable core");
+    expect(generateDescription).toContain("settle oracle");
+
+    // 判据必须是 oracle 可表达性，不是「简单任务」式模糊措辞。
+    expect(generateDescription).not.toContain("simple task");
+  });
+
   it("projects preview guidance and direct Explore search instructions", () => {
     const registry = createToolRegistry();
     registerBuiltInTools(registry, {

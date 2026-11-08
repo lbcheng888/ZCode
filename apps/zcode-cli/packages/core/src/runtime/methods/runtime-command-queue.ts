@@ -227,9 +227,16 @@ async function runRuntimeCommand(
         }
         command.resolve(result);
       } catch (error) {
-        // send-now/queued-now 抢占会取消正在进行的 goal 续跑；这不是“驱动器预约未兑现”。
-        // 若在这里落 standing-down，用户回合结束后的空闲沿只会清标志而不预约，目标保持
-        // active 却永久停摆。preserve 标记来自取消首因，只有真正的失败/Stop 才站到一边。
+        // send-now/queued-now 等用户输入抢占会取消正在进行的 goal 续跑；这不是
+        // “驱动器预约未兑现”。若在这里落 standing-down，用户回合结束后的空闲沿只会
+        // 清标志而不预约，目标保持 active 却永久停摆。抢占只认
+        // preserveQueueAutoDrainOnCancel 这一个显式标记（v4 preemptActiveTurnAndWait
+        // 仅在 sendQueuedNow / sendText(startNow) 传 true）。不能从
+        // cancellation.cause/keepInbox 反推：
+        // 手动 Stop 缺省正是 cause=user + keepInbox=true，反推会把 Stop 当成抢占，
+        // 目标停不下来。未带标记的取消（Stop、上游域取消、真实失败）一律落
+        // standing-down；Stop 的收口由 turn/verifier 的 pause 链负责，失败时靠这里
+        // 的 standing-down 兜底，不再重约。
         if (
           command.options.idleDriver &&
           foregroundExecution.preserveQueueAutoDrainOnCancel !== true

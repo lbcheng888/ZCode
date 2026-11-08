@@ -114,6 +114,11 @@ export interface ToolExecutorOptions {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /** GoalCreate 成功后的续跑请求；runtime 注入后 handler 才能 arm idle 驱动器。 */
+  requestGoalContinuation?: (options: {
+    abortSignal?: AbortSignal;
+    traceContext?: TraceContext;
+  }) => void;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */
@@ -249,6 +254,11 @@ export interface ToolExecutorDeps {
   offPeakPort?: OffPeakPort;
   topicResourcePort?: TopicResourcePort;
   sessionStore?: SessionStorePort;
+  /** GoalCreate 成功后的续跑请求；runtime 注入后 handler 才能 arm idle 驱动器。 */
+  requestGoalContinuation?: (options: {
+    abortSignal?: AbortSignal;
+    traceContext?: TraceContext;
+  }) => void;
   sessionModePort?: SessionModePort;
   workflowPort?: WorkflowPort;
   /** workflow run 端口；按工具名查表时 CreateWorkflow 的后台生命周期提供者。 */

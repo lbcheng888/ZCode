@@ -683,7 +683,7 @@ type QueueItem = ConversationInputIntent & {
 - eligible guide 可以在 tool call 出现前等待；一次 model step 的全部 sibling tool results（成功或失败）提交后，runtime 按 admission FIFO 一次内联 drain 全部已等待的 guide，再开始同一 product turn 的下一 provider request。单个 parallel sibling 完成不能提前 drain；同一次取出的 guide 成为相邻 guided row，共用首条开启的工作段。
 - 当前 turn text-only complete、stop 或 interrupted，且没有形成可用 tool result batch 时，未 drain guide 必须通过明确的 delivery/fallback fact 原地改投 queue；`sourceCommandId/queueItemId/clientId/admissionSeq/payload` 全部不变，live/cold projection 收敛一致。
 - 普通 queue 自动提升必须同时满足 `autoDrain=true`、session ready/no active controller，以及 `target` 不存在或 `target.status=complete`。该 guard 覆盖 text、goal command、compact 全部 kind；一次 verification marker 不能单独解锁。
-- verifier 显式 pass 与 fail-open 都先写 `passed=true` 并更新 target complete，再正常重新评估 queue；手动 Stop/abort 是 cancelled/failed + target paused + `autoDrain=false`，不算 pass。`sendQueuedNow` 的 reservation + Stop barrier 是显式例外。
+- verifier 显式 pass 先写 `passed=true` 并更新 target complete，再正常重新评估 queue；verifier 基建/协议失败（坏 JSON、错误调用工具、请求异常）一律 fail-closed：`passed=false` + lifecycle `failed_closed`（投影 `outcome=failed`），绝不写 complete；请求异常另显式 pause target 并带 reason `goal_verifier_unavailable`。手动 Stop/abort 是 cancelled/failed + target paused + `autoDrain=false`，不算 pass。`sendQueuedNow` 的 reservation + Stop barrier 是显式例外。2026-11-08 用户裁定推翻 2026-07-15 的 fail-open 裁决（实证：sess_21a0b4b5 超窗被误标完成）；冷恢复按 `model_complete.verificationPolicy` 选择解析策略，历史 fail-open 事件不翻转。
 - empty/oversize/runtime reject 返回明确 `rejected/failed`；UI 保留文本与附件，不能先清空再静默失败。
 - `editQueueItem` 原地更新，保留 ID、位置、附件和来源命令；`reorderQueueItem/deleteQueueItem/drain` 都以 `queueItemId` 操作同一 intent。
 - drain/guided row/message anchor 必须沿用原 `sourceCommandId`，不能改用 promotion 或 send-now commandId。

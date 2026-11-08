@@ -215,8 +215,8 @@ assert:
 | acceptedGuideStartsWorkSegment | accepted guide 不切 product turn，但必须关闭上一 visual work segment，并以 guided user entity 开启独立工时/折叠段；同一边界一起消费的相邻 guide 共用第一条开启的段；最终 action target 不变 |
 | guideFallbackPreservesIntent | 当前 turn 无可用 tool batch 就终态，或 guide 不适用/被拒绝时，同一 intent 原地改投普通 queue；payload、client、IDs、admissionSeq 和 FIFO 不变 |
 | incompleteGoalBlocksQueueDrain | 普通 queue 自动消费必须同时满足 session ready，且 target 不存在或 `target.status=complete`；active/paused/budget_limited target 阻塞 text、goal、compact 全部 kind |
-| verifierFailOpenCompletesTarget | verifier 基础设施、输出格式或工具误用异常采用 `passed=true` fail-open，并通过正常 target complete 路径解锁 queue；禁止添加绕过 target 更新的 drain 分支 |
-| verifierCancelDoesNotPass | 手动 Stop/abort verifier 是 cancelled/failed + target paused，queue 保留且 `autoDrain=false`；不能当作 fail-open 或 pass。非流式 model provider 即使没有及时响应 `AbortSignal`，adapter 也必须以 abort race 立即结束本地 `generateText` 等待，禁止等上游自然返回后才收口 verifier |
+| verifierInfraFailureFailsClosed | verifier 基建/协议失败（坏 JSON、错误调用工具、请求异常）一律 `passed=false` + lifecycle `failed_closed`，投影 `outcome=failed`（与「有效结论 notSatisfied」分离）；绝不等于完成，也不得通过 target complete 解锁 queue。请求异常（超上下文窗口/异常）另显式 pause 目标并带 reason `goal_verifier_unavailable` 上浮会话。2026-11-08 用户裁定推翻 2026-07-15 的 `verifierFailOpenCompletesTarget`；实证：sess_21a0b4b5 超窗被 fail-open 误标完成 |
+| verifierCancelDoesNotPass | 手动 Stop/abort verifier 是 cancelled/failed + target paused，queue 保留且 `autoDrain=false`；不能当作 pass，也不能当作 `verifierInfraFailureFailsClosed` 的验证结论。非流式 model provider 即使没有及时响应 `AbortSignal`，adapter 也必须以 abort race 立即结束本地 `generateText` 等待，禁止等上游自然返回后才收口 verifier |
 | restartDiscardRespectsDeliveryLifetime | CLI restart 后未进入终态的 admitted input 标记 discarded；`queue/guide` 属于旧 runtime 周期，按持久 delivery 静默结算且不保留 renderer 重发副本；`unknown` 保留待确认线索且不显示 UI 错误；只有未进入 transcript 的 `startNow` 提示用户确认，禁止自动重放 |
 | runningCompactQueues | running 时 `/compact` 作为 `kind=compact` 的维护意图追加到 CLI FIFO；不打断当前 active work，也不能当普通消息 |
 | stopEndsAsInterruptedCompleted | 停止生成后没有“暂停态”；当前轮结束为 `completed(interrupted)` |
@@ -439,8 +439,10 @@ head.dispatch=queued
   AND (target is absent OR target.status=complete)
 ```
 
-一次 `goal_verification completed` marker 或 `passed=false` 都不足以解除 guard。显式 pass 与 fail-open
-都先写 `passed=true`，再把 target 更新为 `complete`，之后才允许正常 queue promotion。手动终止
+一次 `goal_verification completed` marker 或 `passed=false` 都不足以解除 guard。显式 pass
+先写 `passed=true`，再把 target 更新为 `complete`，之后才允许正常 queue promotion；
+verifier 基建/协议失败（坏 JSON、错误调用工具、请求异常）是 fail-closed：`passed=false` +
+`failed_closed`，不会把 target 更新为 `complete`，因此同样解不开 guard。手动终止
 verifier 则进入 cancelled/failed + target paused，并保持 queue 不自动消费。`sendQueuedNow` 是显式
 reservation + Stop barrier 路径，不属于自动 promotion guard。
 

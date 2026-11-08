@@ -17,6 +17,9 @@ const CHENG_SPEC_LINK_TYPES: ReadonlySet<string> = new Set([
   "composes",
 ]);
 
+/** oracle 分层路线的合法 kind 全集；当前仅 settle 已接线可执行，layer-2/3 是声明位不是能力。 */
+const CHENG_SPEC_ORACLE_KINDS: ReadonlySet<string> = new Set(["settle", "property", "scenario"]);
+
 /**
  * task 名同时是落盘文件名段（`<task>-<uuid>.json`），只放行字母/数字/下划线/连字符。
  * `/`、`\`、`..`、空白与控制字符全被排除——路径穿越在字符面上就不可能，而不是靠
@@ -24,9 +27,7 @@ const CHENG_SPEC_LINK_TYPES: ReadonlySet<string> = new Set([
  */
 const CHENG_SPEC_TASK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-export type ChengSpecDraftVerdict =
-  | { ok: true; task: string }
-  | { ok: false; errors: string[] };
+export type ChengSpecDraftVerdict = { ok: true; task: string } | { ok: false; errors: string[] };
 
 interface DeclaredModule {
   id: string;
@@ -78,12 +79,8 @@ function resolveLinkEndpoint(
   if (assertionIds.has(ref)) return { kind: "assertion" };
   const byId = modules.find((module) => module.id === ref);
   if (byId !== undefined) return { kind: "module", moduleId: byId.id };
-  const byFixtureIdiom = modules.find(
-    (module) => ref === `mod.${task}.${module.name}`,
-  );
-  return byFixtureIdiom === undefined
-    ? undefined
-    : { kind: "module", moduleId: byFixtureIdiom.id };
+  const byFixtureIdiom = modules.find((module) => ref === `mod.${task}.${module.name}`);
+  return byFixtureIdiom === undefined ? undefined : { kind: "module", moduleId: byFixtureIdiom.id };
 }
 
 /**
@@ -132,6 +129,33 @@ export function validateChengSpecDraft(draft: unknown): ChengSpecDraftVerdict {
       ok: false,
       errors: [`spec 草案必须是 JSON 对象，收到 ${typeof draft}`],
     };
+  }
+
+  // ---- oracle：顶层可选声明，缺省按 settle 走（向后兼容）；layer-2/3 已声明未接线 ----
+  // property/scenario 是分层路线上的声明位，当前接线只有 settle——提前提交只会换来
+  // 必然失败的作业，所以校验面直接拒绝，固定文案占 errors 首条（oracle 检查置于全部形状检查之前；ChengGenerate 按序拼
+  // 进 400，模型第一眼读到的就是"这一层别提交"）。照旧聚合不短路：草案还带其他问题时
+  // 一并上报。
+  const oracleRaw = draft.oracle;
+  if (oracleRaw !== undefined) {
+    if (!isPlainObject(oracleRaw)) {
+      errors.push(
+        `oracle 在场时必须是 JSON 对象，收到 ${oracleRaw === null ? "null" : typeof oracleRaw}`,
+      );
+    } else {
+      const oracleKind = requireNonEmptyString(oracleRaw.kind, "oracle.kind", errors);
+      if (oracleKind !== undefined) {
+        if (!CHENG_SPEC_ORACLE_KINDS.has(oracleKind)) {
+          errors.push(
+            `oracle.kind "${oracleKind}" 不在合法枚举内（合法值: ${[...CHENG_SPEC_ORACLE_KINDS].join(" | ")}；当前仅 settle 可提交）`,
+          );
+        } else if (oracleKind !== "settle") {
+          errors.push(
+            `oracle 层 '${oracleKind}' 已声明未接线（oracle 分层路线 layer-2/3）：当前仅 settle 可执行，请勿提交该层草案`,
+          );
+        }
+      }
+    }
   }
 
   // ---- task：非空 + 字符安全（它要进文件名）----

@@ -550,6 +550,68 @@ describe("EventReducer", () => {
       });
     });
 
+    it("replays historical fail-open verifier events with the legacy parse instead of flipping them", () => {
+      const events: SessionEvent[] = [
+        createSessionEvent(SessionEventType.SessionCreated, sessionId, {
+          mode: "build",
+          contextWindow: 200000,
+        }),
+        // 2026-11-08 之前写入的事件没有 verificationPolicy 标记：当时的坏 JSON 已被
+        // fail-open 成 passed=true 并据此完成过目标，冷恢复不得翻成未通过。
+        createSessionEvent(SessionEventType.ModelComplete, sessionId, {
+          content: "done, all requirements are complete",
+          querySource: "target_completion_verification",
+          stopReason: "stop",
+        }),
+      ];
+
+      const projection = reducer.reduce(events);
+
+      expect(projection.targetCompletionVerifications).toEqual([
+        {
+          passed: true,
+          reason: "The completion verifier did not return valid JSON.",
+        },
+      ]);
+    });
+
+    it("counts a fail-closed protocol failure once, from the lifecycle event", () => {
+      const target = buildTarget(sessionId, "fail-closed 协议失败", "active");
+      const verification = {
+        passed: false,
+        reason: "The completion verifier did not return valid JSON.",
+      };
+      const events: SessionEvent[] = [
+        createSessionEvent(SessionEventType.SessionCreated, sessionId, {
+          mode: "build",
+          contextWindow: 200000,
+        }),
+        createSessionEvent(SessionEventType.ModelComplete, sessionId, {
+          content: "done, all requirements are complete",
+          querySource: "target_completion_verification",
+          stopReason: "stop",
+          verificationPolicy: "fail_closed",
+        }),
+        createSessionEvent(SessionEventType.TargetCompletionVerification, sessionId, {
+          status: "started",
+          targetId: target.targetID,
+          verificationId: "verify_protocol_failure",
+        }),
+        createSessionEvent(SessionEventType.TargetCompletionVerification, sessionId, {
+          status: "failed_closed",
+          targetId: target.targetID,
+          verification,
+          verificationId: "verify_protocol_failure",
+        }),
+      ];
+
+      const projection = reducer.reduce(events);
+
+      // 新事件的协议失败由 failed_closed lifecycle 入账；model_complete 不再重复入账。
+      expect(projection.targetCompletionVerifications).toEqual([verification]);
+      expect(projection.targetCompletionVerificationTimeline).toHaveLength(1);
+    });
+
     it("should clear target completion verification timeline when a new target is set", () => {
       const target = buildTarget(sessionId, "旧目标", "active");
       const nextTarget = {

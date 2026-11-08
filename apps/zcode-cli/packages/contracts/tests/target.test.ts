@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseGoalCompletionVerificationResult,
   parseGoalCompletionVerificationText,
   evaluateTargetBudgetPressure,
   findExhaustedTargetBudgetDimension,
@@ -126,22 +127,100 @@ describe("goal target contracts", () => {
     });
   });
 
-  it("treats malformed verifier json as passed fail-open", () => {
+  it("treats malformed verifier json as not passed (fail-closed)", () => {
     expect(
       parseGoalCompletionVerificationText(
         '```json\n{"passed": true, "reason": "目标"继续修环境和做完所有开发"已全部完成。", "nextAction": ""}\n```',
       ),
     ).toEqual({
-      passed: true,
+      passed: false,
       reason: "The completion verifier did not return valid JSON.",
     });
   });
 
-  it("treats non-json verifier text as passed fail-open", () => {
+  it("treats non-json verifier text as not passed (fail-closed)", () => {
     expect(parseGoalCompletionVerificationText("done")).toEqual({
+      passed: false,
+      reason: "The completion verifier did not return valid JSON.",
+    });
+  });
+
+  it("distinguishes malformed output as a protocol failure from a verifier conclusion", () => {
+    expect(parseGoalCompletionVerificationResult("done")).toEqual({
+      outcome: "protocol_failure",
+      verification: {
+        passed: false,
+        reason: "The completion verifier did not return valid JSON.",
+      },
+    });
+    expect(
+      parseGoalCompletionVerificationResult(
+        '{"passed":false,"reason":"Missing evidence","nextAction":"Run pnpm test"}',
+      ),
+    ).toEqual({
+      outcome: "conclusion",
+      verification: {
+        nextAction: "Run pnpm test",
+        passed: false,
+        reason: "Missing evidence",
+      },
+    });
+  });
+
+  it("treats a non-boolean passed field as a protocol failure", () => {
+    const expected = {
+      outcome: "protocol_failure",
+      verification: {
+        passed: false,
+        reason: "The completion verifier did not return a boolean passed field.",
+      },
+    };
+    // 缺失 passed：旧实现会把它静默解析成 passed=false 的有效结论。
+    expect(
+      parseGoalCompletionVerificationResult('{"reason":"Missing evidence"}'),
+    ).toEqual(expected);
+    // 字符串 "true" 不是布尔结论；不能被 === true 静默吞成 false 结论。
+    expect(
+      parseGoalCompletionVerificationResult(
+        '{"passed":"true","reason":"Missing evidence","nextAction":"Run pnpm test"}',
+      ),
+    ).toEqual(expected);
+    // 历史 fail-open 事件保持旧解析（passed=false + 原始 reason），不因策略标记翻转。
+    expect(
+      parseGoalCompletionVerificationText('{"passed":"true","reason":"Missing evidence"}', {
+        policy: "legacy_fail_open",
+      }),
+    ).toEqual({
+      passed: false,
+      reason: "Missing evidence",
+    });
+  });
+
+  it("replays historical events with the legacy fail-open policy so cold recovery never flips them", () => {
+    // 2026-11-08 之前写入的 model_complete 没有 verificationPolicy 标记：冷恢复必须
+    // 保持旧 fail-open 解析，否则当时已交付的历史结论会在重启后翻成未通过。
+    expect(
+      parseGoalCompletionVerificationText("done", { policy: "legacy_fail_open" }),
+    ).toEqual({
       passed: true,
       reason: "The completion verifier did not return valid JSON.",
     });
+    expect(
+      parseGoalCompletionVerificationResult("done", { policy: "legacy_fail_open" }),
+    ).toEqual({
+      outcome: "protocol_failure",
+      verification: {
+        passed: true,
+        reason: "The completion verifier did not return valid JSON.",
+      },
+    });
+    // 有效 JSON 两种策略解析一致，历史有效结论不受影响。
+    expect(
+      parseGoalCompletionVerificationText(
+        '{"passed":true,"reason":"All requirements are complete."}',
+        { policy: "legacy_fail_open" },
+      ),
+    ).toEqual({ passed: true, reason: "All requirements are complete." });
   });
 });
 

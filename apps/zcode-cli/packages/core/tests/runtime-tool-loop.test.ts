@@ -3789,6 +3789,205 @@ describe("AgentRuntime tool loop", () => {
     expect(requestOrder).toEqual(["continuation", "verifier-pass"]);
   });
 
+  it("arms the idle driver and runs the first continuation round after GoalCreate", async () => {
+    const sessionId = createSessionId("runtime-goal-create-continuation");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-create",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("Create the session goal")) {
+              requestOrder.push("user-goal-create");
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [
+                  {
+                    id: "goal-create-1",
+                    input: { objective: "Ship through the goal loop" },
+                    name: "GoalCreate",
+                  },
+                ],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Continue working toward the active session goal.")) {
+              requestOrder.push("goal-continuation");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: "continued after create",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            if (latestText.includes("Verify whether the active session goal")) {
+              requestOrder.push("verifier-pass");
+              return {
+                finishReason: "stop",
+                providerMetadata: undefined,
+                text: JSON.stringify({
+                  nextAction: "",
+                  passed: true,
+                  reason: "The goal is complete.",
+                }),
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            // 工具结果之后，同一用户回合收尾。
+            requestOrder.push("user-after-tool");
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "goal created",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+
+    await runtime.ensureSessionPersistedForExternalActivity("Create the session goal");
+    const admission = await runtime.admitPrompt("Create the session goal");
+    await admission.completion;
+
+    // GoalCreate 与 /goal set 同语义：创建成功即 arm idle 驱动器并预约首轮续跑，
+    // 用户无需再发 /goal resume。
+    expect(await sessionStore.readTarget({ sessionID: sessionId })).toMatchObject({
+      objective: "Ship through the goal loop",
+      status: "active",
+    });
+    await waitForCondition(() => requestOrder.includes("verifier-pass"));
+    expect(requestOrder).toEqual([
+      "user-goal-create",
+      "user-after-tool",
+      "goal-continuation",
+      "verifier-pass",
+    ]);
+    expect((await sessionStore.readTarget({ sessionID: sessionId }))?.status).toBe("complete");
+  });
+
+  it("does not arm or continue when the GoalCreate execution window is aborted", async () => {
+    const sessionId = createSessionId("runtime-goal-create-aborted");
+    const eventStore = createTestSessionEventStore();
+    const sessionStore = new RecordingSessionStore();
+    const requestOrder: string[] = [];
+    const originalUpdateTargetStatus = sessionStore.updateTargetStatus.bind(sessionStore);
+    // Stop 的 pause 写入失败：目标仍 active，只有「不 arm/不入队」才能挡住续跑；
+    // 若 pause 成功，候选闸门会掩盖取消窗口漏洞。
+    sessionStore.updateTargetStatus = async (input) => {
+      if (input.status === "paused") throw new Error("simulated pause write failure");
+      return originalUpdateTargetStatus(input);
+    };
+    const createEntered = deferred();
+    const createGate = deferred();
+    const originalCreateTarget = sessionStore.createTarget.bind(sessionStore);
+    sessionStore.createTarget = async (input) => {
+      createEntered.resolve();
+      await createGate.promise;
+      return originalCreateTarget(input);
+    };
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        goalLayerEnabled: true,
+        mode: "build",
+        workingDirectory: "/tmp/zcode-runtime-goal-create-aborted",
+      },
+      {
+        eventStore,
+        modelFactory: createTestModelFactory({
+          async generateText(request: any) {
+            const latestText = providerContentToText(
+              latestTurnInputMessages(request).at(-1)?.content,
+            );
+            if (latestText.includes("Create the session goal")) {
+              requestOrder.push("user-goal-create");
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [
+                  {
+                    id: "goal-create-aborted-1",
+                    input: { objective: "Ship through the aborted goal loop" },
+                    name: "GoalCreate",
+                  },
+                ],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            requestOrder.push("unexpected-after-abort");
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "unexpected continuation",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        } as never),
+        sessionStore,
+      },
+    );
+    const internal = runtime as unknown as AgentRuntimeInternal;
+
+    await runtime.ensureSessionPersistedForExternalActivity("Create the session goal");
+    const admission = await runtime.admitPrompt("Create the session goal");
+    const completionOutcome = admission.completion.then(
+      () => "completed" as const,
+      () => "rejected" as const,
+    );
+    await createEntered.promise;
+
+    // GoalCreate 执行窗口中停止：工具上下文信号在 handler 续跑前已 abort。
+    expect(
+      runtime.stopActiveForegroundExecution({ reason: "user stops during GoalCreate" }),
+    ).toMatchObject({ kind: "stopped" });
+    createGate.resolve();
+
+    expect(await completionOutcome).toBe("rejected");
+    // 等 handler 续跑完成（TargetChanged(set) 落盘）再断言：续跑请求已被取消信号挡住。
+    await waitForCondition(async () =>
+      (await eventStore.getEvents(sessionId)).some(
+        (event) =>
+          event.type === SessionEventType.TargetChanged &&
+          (event.payload as any).action === "set",
+      ),
+    );
+    await waitForCondition(
+      () =>
+        !internal.runtimeCommandDrainActive &&
+        !internal.runtimeCommandQueue.hasPending() &&
+        internal.activeForegroundExecution === undefined,
+    );
+
+    // 目标确实已创建（GoalCreate 写盘完成），但用户 Stop 之后不得 arm/预约续跑。
+    expect(sessionStore.targets.get(sessionId)).toMatchObject({
+      objective: "Ship through the aborted goal loop",
+      status: "active",
+    });
+    expect(internal.goalRoundDriverArmed).toBeFalsy();
+
+    // 下一个外部空闲沿：不得出现续跑回合或 verifier 请求。
+    internal.scheduleIdleGoalRound();
+    await delay(300);
+    expect(requestOrder).toEqual(["user-goal-create"]);
+  });
+
   it("consumes deferred inject inputs at the next turn's first model step", async () => {
     const sessionId = createSessionId("runtime-inject-turn-start-hydration");
     const eventStore = createTestSessionEventStore();
@@ -6815,7 +7014,7 @@ describe("AgentRuntime tool loop", () => {
     }
   });
 
-  it("completes the goal when post-turn completion verification fails open", async () => {
+  it("pauses the goal when post-turn completion verification fails closed", async () => {
     const sessionId = createSessionId("runtime-target-verify-error-fail-open");
     const eventStore = createTestSessionEventStore();
     const sessionStore = new RecordingSessionStore();
@@ -6872,12 +7071,14 @@ describe("AgentRuntime tool loop", () => {
 
     expect(result).toBeNull();
     expect(modelCallCount).toBe(2);
-    expect(stored?.status).toBe("complete");
+    // 基建失败＝未判定，绝不等于完成：不写 complete；也不能静默留在 active 让驱动器空转，
+    // 目标显式暂停并把 reason 上浮（与 cheng_gate_unavailable 同例）。
+    expect(stored?.status).toBe("paused");
     expect(failedVerification?.payload).toMatchObject({
       goalIteration: 1,
       status: "failed_closed",
       verification: {
-        passed: true,
+        passed: false,
         reason: "Completion verifier request failed: model admission concurrency limit exceeded",
       },
     });

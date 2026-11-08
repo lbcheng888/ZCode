@@ -884,28 +884,83 @@ export function escapeGoalPromptText(input: string): string {
     .replaceAll(">", "&gt;");
 }
 
-export function parseGoalCompletionVerificationText(
+/**
+ * verifier 输出解析策略版本。2026-11-08 用户裁定推翻 2026-07-15 的 fail-open 裁决：
+ * verifier 基建失败（坏 JSON / 请求异常 / 错误调用工具）一律视为未判定，绝不等于完成。
+ */
+export type GoalCompletionVerificationParsePolicy = "fail_closed" | "legacy_fail_open";
+
+export interface GoalCompletionVerificationParseOptions {
+  /**
+   * - "fail_closed"（默认，所有新写入路径）：坏 JSON 返回 passed=false 且标记
+   *   protocol_failure，由调用方收口为 failed_closed。
+   * - "legacy_fail_open"：仅供冷恢复重放 2026-11-08 之前写入、未携带
+   *   `verificationPolicy=fail_closed` 的历史 model_complete 事件，按旧 fail-open
+   *   解析坏 JSON，历史结论不翻转（实证：sess_21a0b4b5 超窗曾被 fail-open 误标完成）。
+   */
+  policy?: GoalCompletionVerificationParsePolicy;
+}
+
+export interface GoalCompletionVerificationParseResult {
+  /** conclusion = verifier 给出结构化结论；protocol_failure = 输出不可解析（裁判链路故障）。 */
+  outcome: "conclusion" | "protocol_failure";
+  verification: GoalCompletionVerificationOutput;
+}
+
+export function parseGoalCompletionVerificationResult(
   text: string,
-): GoalCompletionVerificationOutput {
+  options: GoalCompletionVerificationParseOptions = {},
+): GoalCompletionVerificationParseResult {
   const parsed = parseJsonObject(text);
   if (!parsed) {
-    // verifier 是 goal 完成闸门，但 provider 偶发坏 JSON 属于裁判链路故障；
-    // 按产品语义 fail-open，避免已经交付的 goal 被格式错误卡在继续迭代。
-    return failOpenGoalCompletionVerification(
-      "The completion verifier did not return valid JSON.",
-    );
+    const reason = "The completion verifier did not return valid JSON.";
+    return {
+      outcome: "protocol_failure",
+      verification:
+        options.policy === "legacy_fail_open"
+          ? { passed: true, reason }
+          : failedGoalCompletionVerification(reason),
+    };
   }
 
-  const passed = parsed.passed === true;
+  // 非 boolean 的 passed（缺失/字符串等）不是 verifier 的有效结论：按裁判链路故障
+  // 收口 protocol_failure，调用方走 failed_closed，且不产生可续跑的 nextAction。
+  // 历史事件（legacy_fail_open）保持旧解析的 passed=false 与原始 reason，冷恢复不翻转。
+  if (typeof parsed.passed !== "boolean") {
+    return {
+      outcome: "protocol_failure",
+      verification:
+        options.policy === "legacy_fail_open"
+          ? {
+              passed: false,
+              reason:
+                readString(parsed.reason) ?? GOAL_COMPLETION_VERIFICATION_FALLBACK_REASON,
+            }
+          : failedGoalCompletionVerification(
+              "The completion verifier did not return a boolean passed field.",
+            ),
+    };
+  }
+
   const reason =
     readString(parsed.reason) ?? GOAL_COMPLETION_VERIFICATION_FALLBACK_REASON;
   const nextAction = readString(parsed.nextAction);
 
   return {
-    ...(nextAction ? { nextAction } : {}),
-    passed,
-    reason,
+    outcome: "conclusion",
+    verification: {
+      ...(nextAction ? { nextAction } : {}),
+      passed: parsed.passed,
+      reason,
+    },
   };
+}
+
+export function parseGoalCompletionVerificationText(
+  text: string,
+  options?: GoalCompletionVerificationParseOptions,
+): GoalCompletionVerificationOutput {
+  return parseGoalCompletionVerificationResult(text, options).verification;
 }
 
 export function failedGoalCompletionVerification(
@@ -915,17 +970,6 @@ export function failedGoalCompletionVerification(
   // 若写入 nextAction，UI 会把内部控制文案当成下一轮迭代标题展示。
   return {
     passed: false,
-    reason,
-  };
-}
-
-export function failOpenGoalCompletionVerification(
-  reason: string,
-): GoalCompletionVerificationOutput {
-  // 这里表示 verifier 基础设施/格式失败，不是 verifier 明确判定目标未完成。
-  // 默认通过能避免 goal 因裁判链路偶发失败被无限卡住，同时保留 reason 供日志和 UI 排查。
-  return {
-    passed: true,
     reason,
   };
 }
@@ -1028,8 +1072,8 @@ export const formatTargetCompletionVerificationPassedContent =
   formatGoalCompletionVerificationPassedContent;
 export const parseTargetCompletionVerificationText =
   parseGoalCompletionVerificationText;
+export const parseTargetCompletionVerificationResult =
+  parseGoalCompletionVerificationResult;
 export const failedTargetCompletionVerification =
   failedGoalCompletionVerification;
-export const failOpenTargetCompletionVerification =
-  failOpenGoalCompletionVerification;
 export const escapeTargetPromptText = escapeGoalPromptText;

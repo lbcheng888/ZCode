@@ -129,6 +129,9 @@ export async function continueActiveTargetLoop(
       status: "failed",
     });
   }
+  // 取消窗口的第二个检查点：workflow 激活写入是 await 边界；若 Stop/抢占在
+  // 「调用前检查」与 arm 之间落下，arm 前复查信号，不能把驱动器拉起。
+  if (options.abortSignal?.aborted) return null;
   this.goalRoundDriverArmed = true;
   this.goalRoundDriverStandingDown = false;
   return await this.continueActiveTargetIfIdle({
@@ -198,6 +201,10 @@ export function scheduleIdleGoalRound(this: AgentRuntimeInternal): void {
  */
 async function reserveIdleGoalRoundAfterQueueCheck(this: AgentRuntimeInternal): Promise<void> {
   const projection = await this.rebuildProjection();
+  // 判定窗口内 Stop 可能已 disarm（pauseActiveTargetForCancellation 先 disarm 再写
+  // pause，写失败时目标仍 active）。入队前必须按此刻的 arm 状态复查，否则旧快照
+  // 会让被 Stop 的目标在空闲沿重新预约续跑。
+  if (!this.goalRoundDriverArmed) return;
   if (nextTurnPendingInputs(projection).length > 0) return;
   // 判定期间机器可能已不再空闲(新命令入队/别的回合起跑);预约入队前复查,
   // 让那一轮自己排空时制造的空闲沿再走本函数。
@@ -705,6 +712,8 @@ export async function pauseActiveTargetWithReason(
     /** 结论所针对的目标身份；给出时暂停走 CAS，避免误暂停替换后的新目标。 */
     expectedTargetID?: string;
     expectedRevision?: number;
+    /** 可选状态 CAS：暂停只允许从 active 迁移，避免覆盖并发的 paused/complete。 */
+    expectedStatus?: SessionGoal["status"];
   },
 ): Promise<SessionGoal | null> {
   if (!this.sessionStore) return null;
@@ -723,6 +732,9 @@ export async function pauseActiveTargetWithReason(
       ...(input.expectedRevision === undefined
         ? {}
         : { expectedRevision: input.expectedRevision }),
+      ...(input.expectedStatus === undefined
+        ? {}
+        : { expectedStatus: input.expectedStatus }),
     });
     if (pausedTarget) {
       await this.recordTargetChanged({
@@ -732,6 +744,18 @@ export async function pauseActiveTargetWithReason(
         source: "runtime",
         target: pausedTarget,
         traceContext: input.traceContext,
+      });
+    } else {
+      // CAS 未命中：目标在判定与暂停之间被替换/改写。不能静默当成已暂停。
+      this.logger?.warn("Goal pause CAS missed after concurrent target change", {
+        ...traceContextToLogContext(input.traceContext),
+        event: "target.pause.cas_missed",
+        expectedRevision: input.expectedRevision,
+        expectedTargetID: input.expectedTargetID,
+        module: "core.runtime",
+        reason: input.reason,
+        status: "failed",
+        targetId: target.targetID,
       });
     }
     return pausedTarget;
@@ -753,6 +777,12 @@ export async function pauseActiveTargetForCancellation(
   traceContext: TraceContext,
 ): Promise<void> {
   if (!this.sessionStore) return;
+
+  // Stop 语义即 disarm：取消是用户停止目标循环的显式意图，必须在暂停写入之前
+  // 落定。若等 pause 成功才 disarm，写失败（目标仍 active）时驱动器保持 armed，
+  // 用户下一条消息排空后的空闲沿会重新预约——Stop 停不住目标。命令失败边缘的
+  // standing-down 只消费一个边缘，不能作为唯一兜底。
+  this.goalRoundDriverArmed = false;
 
   const target = await this.readSessionTargetForContext(traceContext);
   if (!target || target.status !== "active") return;

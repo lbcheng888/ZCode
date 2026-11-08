@@ -5959,6 +5959,40 @@ describe("goal 状态机", () => {
     expect(snapshot.inputRouting.mode).toBe("startNow");
   });
 
+  it("verify failed_closed —— 裁判链路故障投影为 failed 而不是 notSatisfied（goalVerificationOutcomeSeparation）", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });
+    log.push(SessionEventType.TargetChanged, {
+      action: "set",
+      source: "command",
+      target: goalTarget("active"),
+    });
+    log.push(SessionEventType.TargetCompletionVerification, {
+      targetId: "target-1",
+      status: "started",
+      verificationId: "verify-failed-closed",
+      goalIteration: 1,
+    });
+    // 坏 JSON / 工具误用 / 请求异常统一 failed_closed：不是 verifier 的有效结论，
+    // 投影 outcome=failed（对齐 packages/shared 的 status 语义：failed=验证过程失败）。
+    log.push(SessionEventType.TargetCompletionVerification, {
+      targetId: "target-1",
+      status: "failed_closed",
+      verificationId: "verify-failed-closed",
+      goalIteration: 1,
+      verification: {
+        passed: false,
+        reason: "The completion verifier did not return valid JSON.",
+      },
+    });
+    const { projection } = runAll(log.events);
+    expect(projection.getSnapshot().goal).toMatchObject({ status: "failed" });
+    expect(projection.getSnapshot().goal?.verifications[0]).toMatchObject({
+      outcome: "failed",
+      reason: "The completion verifier did not return valid JSON.",
+    });
+  });
+
   it("verify notSatisfied —— 有效结论与过程失败分离（goalVerificationOutcomeSeparation）", () => {
     const log = new EventLog();
     log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 1000 });

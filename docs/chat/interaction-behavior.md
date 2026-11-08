@@ -28,14 +28,19 @@ conversation queue。桌面通过 `desktop-continuous` 直接接收事实，手�
 
 Goal mode 下还需要额外满足“整个 goal 已达标”：`goal_verification completed` 只是一次
 verifier attempt 的终态。verifier 明确返回 `passed: false` 时会继续进入下一轮
-goal continuation；verifier 自身格式错误、请求异常或错误调用工具时采用 fail-open，
-写入 `passed: true`，避免裁判链路偶发失败把已经交付的目标卡住。`passed: true`
-之后也必须等 session target 被更新为 `status: "complete"` 才能消费普通 queue。
+goal continuation；verifier 自身格式错误、请求异常或错误调用工具属于裁判链路故障，
+一律 fail-closed：写 `passed: false` 且 lifecycle 为 `failed_closed`（投影
+`outcome=failed`），绝不写 `passed: true`、绝不据此把目标标成 complete。请求异常
+（如超上下文窗口）还会显式 pause 目标并带 reason `goal_verifier_unavailable` 上浮会话，
+等用户 resume 或下一个显式边缘重验。只有 `passed: true` 且 session target 被更新为
+`status: "complete"` 后才能消费普通 queue。
+（2026-11-08 用户裁定推翻 2026-07-15 的 fail-open 裁决，实证：sess_21a0b4b5 超窗被
+fail-open 误标完成。）
 只要 task meta / projection 里仍有非 `complete` 的 target，队列消息就继续等待；target 为空
 表示当前没有 goal，不受该 guard 限制。用户在未达标 goal 期间继续输入时，也应先进入
 普通 queue，而不是绕过 goal loop 立即发送。这个 guard 同时覆盖 `sendText`、queued `/goal`
-和 queued `/compact`，并保持原 admission FIFO。手动停止 verifier 不属于 fail-open：它会把
-verification 收口为 cancelled/failed、target 置为 paused，并使 queue 保留且默认不自动消费。
+和 queued `/compact`，并保持原 admission FIFO。手动停止 verifier 不属于上述 fail-closed
+路径：它会把 verification 收口为 cancelled/failed、target 置为 paused，并使 queue 保留且默认不自动消费。
 
 普通 queue 的自动消费顺序固定为：
 
