@@ -1,4 +1,5 @@
 [
+  "apps/zcode-cli/packages/core/tests/agent-swarm-tool.test.ts",
   "packages/desktop/scripts/gen-ui-runtime-assets.test.ts",
   "packages/desktop/test/app-asar-repack.test.ts",
   "packages/desktop/test/build-native-search-tools.test.ts",
@@ -156,8 +157,10 @@
   "packages/server/test/tsupConfig.test.ts",
   "packages/services/test/automationRunProjection.test.ts",
   "packages/services/test/automationRunReconciler.test.ts",
+  "packages/ui/test/composerUsageStats.test.ts",
   "packages/ui/test/goalChengPlanCardConsumption.test.ts",
   "packages/ui/test/goalEditSettingsMenu.test.ts",
+  "packages/ui/test/swarmActivityPanel.test.ts",
   "packages/web/test/viteConfigLoad.test.ts",
   "packages/zcode-server-cli/test/packaging.test.ts",
   "packages/zcode-server-cli/test/stageRemoteAssetsCli.test.ts",
