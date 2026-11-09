@@ -43,9 +43,14 @@ export class GitWorktreeSwarmWorkspaceFactory implements SwarmWorkspaceFactory {
       ),
     );
     const worktreePath = join(tempRoot, "worktree");
+    let gitDir: string;
     try {
       await writeFile(join(tempRoot, SWARM_OWNER_FILE), `${process.pid}\n`, "utf8");
       await git(["worktree", "add", "--detach", worktreePath, baseHead], repoRoot);
+      // 登记本工作树的 admin gitdir：merge 只认它，不信任工作树根上可被 worker 改写的 .git 指针。
+      gitDir = await realpath(
+        await git(["rev-parse", "--absolute-git-dir"], worktreePath),
+      );
     } catch (error) {
       // 建树失败要清掉已创建的临时根；清理失败不覆盖原始 git 错误。
       await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -55,6 +60,7 @@ export class GitWorktreeSwarmWorkspaceFactory implements SwarmWorkspaceFactory {
       repoRoot,
       tempRoot,
       worktreePath,
+      gitDir,
       roundId: request.roundId,
       taskId: request.taskId,
       workingDirectory: join(worktreePath, workingRelative),
@@ -194,6 +200,8 @@ interface GitWorktreeSwarmWorkspaceOptions {
   repoRoot: string;
   tempRoot: string;
   worktreePath: string;
+  /** 建树时登记的 admin gitdir（`git rev-parse --absolute-git-dir`）；merge 的权威目标。 */
+  gitDir: string;
   roundId: string;
   taskId: string;
   workingDirectory: string;
@@ -203,9 +211,12 @@ interface GitWorktreeSwarmWorkspaceOptions {
 class GitWorktreeSwarmWorkspace implements SwarmWorkspace {
   readonly workingDirectory: string;
   readonly workspaceRoot: string;
+  /** 边界是整棵工作树：worker 只能写自己这棵树，merge 的 `git add -A` 不会带出别处改动。 */
+  readonly boundary: string;
   private readonly repoRoot: string;
   private readonly tempRoot: string;
   private readonly worktreePath: string;
+  private readonly gitDir: string;
   private readonly roundId: string;
   private readonly taskId: string;
 
@@ -213,31 +224,34 @@ class GitWorktreeSwarmWorkspace implements SwarmWorkspace {
     this.repoRoot = options.repoRoot;
     this.tempRoot = options.tempRoot;
     this.worktreePath = options.worktreePath;
+    this.gitDir = options.gitDir;
     this.roundId = options.roundId;
     this.taskId = options.taskId;
     this.workingDirectory = options.workingDirectory;
     this.workspaceRoot = options.workspaceRoot;
+    this.boundary = options.worktreePath;
   }
 
   async merge(): Promise<void> {
-    await git(["add", "-A", "--", "."], this.worktreePath);
-    const staged = await runGit(["diff", "--cached", "--quiet", "--exit-code"], this.worktreePath);
+    // 工作树根的 .git 指针也在 worker 可写边界内；它若被改写成基准仓库的 .git，
+    // 普通 `git -C worktree add/commit` 会把提交直接落到基准当前分支，绕过 merge gate
+    // 与 target CAS。先校验指针仍指向登记的 admin gitdir，再用显式 gitdir 执行写操作。
+    await assertWorktreeGitDir(this.worktreePath, this.gitDir);
+    await this.worktreeGit(["add", "-A", "--", "."]);
+    const staged = await this.runWorktreeGit(["diff", "--cached", "--quiet", "--exit-code"]);
     if (staged.exitCode === 1) {
-      await git(
-        [
-          "-c",
-          "user.name=ZCode Swarm",
-          "-c",
-          "user.email=swarm@zcode.local",
-          "-c",
-          "commit.gpgsign=false",
-          "commit",
-          "--no-verify",
-          "-m",
-          `swarm(${this.roundId}): ${this.taskId}`,
-        ],
-        this.worktreePath,
-      );
+      await this.worktreeGit([
+        "-c",
+        "user.name=ZCode Swarm",
+        "-c",
+        "user.email=swarm@zcode.local",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-m",
+        `swarm(${this.roundId}): ${this.taskId}`,
+      ]);
     } else if (staged.exitCode !== 0) {
       throw new Error(
         `git diff --cached failed in swarm worktree ${this.taskId} (exit ${staged.exitCode}): ${
@@ -246,7 +260,7 @@ class GitWorktreeSwarmWorkspace implements SwarmWorkspace {
       );
     }
 
-    const workerHead = await git(["rev-parse", "HEAD"], this.worktreePath);
+    const workerHead = await this.worktreeGit(["rev-parse", "HEAD"]);
     const baseHead = await git(["rev-parse", "HEAD"], this.repoRoot);
     if (workerHead === baseHead) return;
 
@@ -299,6 +313,56 @@ class GitWorktreeSwarmWorkspace implements SwarmWorkspace {
   async dispose(): Promise<void> {
     await git(["worktree", "remove", "--force", this.worktreePath], this.repoRoot);
     await rm(this.tempRoot, { recursive: true, force: true });
+  }
+
+  /** 工作树内的写操作锚定登记的 admin gitdir，不重新读取可被 worker 改写的 .git 指针。 */
+  private runWorktreeGit(args: readonly string[]): Promise<GitCommandResult> {
+    return runGit(
+      ["--git-dir", this.gitDir, "--work-tree", this.worktreePath, ...args],
+      this.worktreePath,
+    );
+  }
+
+  private worktreeGit(args: readonly string[]): Promise<string> {
+    return git(
+      ["--git-dir", this.gitDir, "--work-tree", this.worktreePath, ...args],
+      this.worktreePath,
+    );
+  }
+}
+
+/**
+ * `.git` 是工作树里唯一指向外部 admin 目录的指针，也是 worker 能改写的路径。merge 前必须
+ * 确认它仍指回建树时登记的 gitdir：否则 `git add/commit` 会落到基准仓库当前分支。
+ * 指针缺失、格式非法或目标无法 realpath 同样 fail-closed，不猜目标。
+ */
+async function assertWorktreeGitDir(worktreePath: string, expectedGitDir: string): Promise<void> {
+  let pointer: string;
+  try {
+    pointer = await readFile(join(worktreePath, ".git"), "utf8");
+  } catch (error) {
+    throw new Error(
+      `Swarm worktree ${worktreePath} lost its .git pointer before merge: ${errorMessage(error)}`,
+    );
+  }
+  const target = /^gitdir:\s*(.+)$/.exec(pointer.trim())?.[1]?.trim();
+  if (target === undefined || target.length === 0) {
+    throw new Error(
+      `Swarm worktree ${worktreePath} has an invalid .git pointer: ${pointer.trim()}`,
+    );
+  }
+  let canonicalTarget: string;
+  try {
+    canonicalTarget = await realpath(resolve(worktreePath, target));
+  } catch (error) {
+    throw new Error(
+      `Swarm worktree ${worktreePath} .git pointer target cannot be resolved: ${errorMessage(error)}`,
+    );
+  }
+  if (canonicalTarget !== expectedGitDir) {
+    throw new Error(
+      `Swarm worktree ${worktreePath} .git pointer does not point at its registered git dir: expected=${expectedGitDir}, actual=${canonicalTarget}`,
+    );
   }
 }
 

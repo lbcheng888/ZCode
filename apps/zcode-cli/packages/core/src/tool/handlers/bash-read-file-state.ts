@@ -109,11 +109,14 @@ async function backfillReadFileStateFromBash(input: BashReadFileStateEffectsInpu
   const trace = createBashReadFileStateTrace(input.context);
   await Promise.all(
     sources.map(async (source) => {
+      // 边界在场时（swarm worker）执行后回填同样 fail-closed：路径必须仍在边界内。
+      // 越界说明命令已经把文件写到边界外，ToolExecutionFailed 原样上浮，不静默丢结果。
       const resolvedPath = resolveWorkspacePath({
         inputPath: source.filePath,
         operation: "read",
         workingDirectory: input.context.workingDirectory,
         workspaceRoot: input.context.workspaceRoot,
+        workspaceBoundary: input.context.workspaceBoundary,
       });
       if (findLatestReadFileState(readFileState, resolvedPath)) return;
 

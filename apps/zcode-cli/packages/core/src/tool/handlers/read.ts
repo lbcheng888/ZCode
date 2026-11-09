@@ -179,6 +179,7 @@ export const readHandler: ToolHandler = async (input, context) => {
     operation: "read",
     workingDirectory: context.workingDirectory,
     workspaceRoot: context.workspaceRoot,
+    workspaceBoundary: context.workspaceBoundary,
   });
 
   try {

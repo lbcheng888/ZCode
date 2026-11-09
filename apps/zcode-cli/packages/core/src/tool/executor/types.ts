@@ -151,6 +151,8 @@ export interface ToolExecutorOptions {
   getWorkingDirectory?: () => string;
   setWorkingDirectory?: (cwd: string) => Promise<void> | void;
   getWorkspaceRoot?: () => string;
+  /** swarm worker 的强制工作区边界；缺席 = 普通会话。 */
+  getWorkspaceBoundary?: () => string | undefined;
   getMemoryRoot?: () => string | undefined;
   traceContext?: TraceContext;
   mode?: CollaborationMode;
@@ -281,6 +283,8 @@ export interface ToolExecutorDeps {
   getWorkingDirectory: () => string;
   setWorkingDirectory?: (cwd: string) => Promise<void> | void;
   getWorkspaceRoot: () => string;
+  /** swarm worker 的强制工作区边界；缺席 = 普通会话。 */
+  getWorkspaceBoundary?: () => string | undefined;
   workspaceIdentity?: string;
   /** workspace 写工具 admission；缺省 = 未启用（feature flag 关）。 */
   workspaceWriteLeaseAdmission?: WorkspaceWriteLeaseAdmissionPort;

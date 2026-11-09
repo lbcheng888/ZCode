@@ -97,6 +97,19 @@ function completedSnapshot(): SubagentTaskSnapshot {
   };
 }
 
+function failedSnapshot(overrides: Partial<SubagentTaskSnapshot> = {}): SubagentTaskSnapshot {
+  return {
+    taskId: "bg-task-1",
+    agentId: "agent-bg",
+    agentType: AgentType.GeneralPurpose,
+    description: "summarize module",
+    status: "failed",
+    startedAt: new Date(),
+    error: "child boom",
+    ...overrides,
+  };
+}
+
 describe("SwarmWorker", () => {
   it("executes the task through SubagentPort.run and returns the completed result", async () => {
     const port = createPort(async () => completedOutput());
@@ -126,9 +139,24 @@ describe("SwarmWorker", () => {
       prompt: "summarize packages/core runtime",
       workingDirectory: "/repo/packages/core",
       workspaceRoot: "/repo",
+      // 边界只由编排层显式写入；普通共享 workspace 的 task 不携带 workspaceBoundary。
       trace: task.trace,
     });
     expect(port.runCalls[0]?.options).toBeUndefined();
+  });
+
+  it("prefers the isolated worktree boundary over the mapped workspaceRoot", async () => {
+    const port = createPort(async () => completedOutput());
+
+    await new SwarmWorker(port).execute(
+      createTask({
+        workspaceRoot: "/isolated/worktree/project",
+        workspaceBoundary: "/isolated/worktree",
+      }),
+    );
+
+    expect(port.runCalls[0]?.request.workspaceBoundary).toBe("/isolated/worktree");
+    expect(port.runCalls[0]?.request.workspaceRoot).toBe("/isolated/worktree/project");
   });
 
   it("forwards the round signal to SubagentPort.run", async () => {
@@ -261,6 +289,64 @@ describe("SwarmWorker", () => {
       content: [{ type: "text", text: "done" }],
       totalToolUseCount: 3,
     });
+  });
+
+  it("carries model usage from a failed background snapshot into the failed result", async () => {
+    const waitForTask = vi.fn(async () =>
+      failedSnapshot({
+        usage: {
+          durationMs: 5,
+          modelUsage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+          totalTokens: 10,
+        },
+      }),
+    );
+    const port = createPort(async () => backgroundedOutput(), { waitForTask, stopTask: vi.fn() });
+
+    const result = await new SwarmWorker(port).execute(createTask());
+
+    expect(result).toMatchObject({
+      status: "failed",
+      taskId: "subtask-1",
+      error: "child boom",
+      usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+      totalTokens: 10,
+    });
+  });
+
+  it("carries model usage from a cancelled background snapshot into the cancelled result", async () => {
+    const waitForTask = vi.fn(async () =>
+      failedSnapshot({
+        status: "cancelled",
+        usage: {
+          durationMs: 3,
+          modelUsage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+          totalTokens: 3,
+        },
+      }),
+    );
+    const port = createPort(async () => backgroundedOutput(), { waitForTask, stopTask: vi.fn() });
+
+    const result = await new SwarmWorker(port).execute(createTask());
+
+    expect(result).toMatchObject({
+      status: "cancelled",
+      taskId: "subtask-1",
+      usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+      totalTokens: 3,
+    });
+  });
+
+  it("does not fabricate usage when a failed background snapshot has none", async () => {
+    const waitForTask = vi.fn(async () => failedSnapshot());
+    const port = createPort(async () => backgroundedOutput(), { waitForTask, stopTask: vi.fn() });
+
+    const result = await new SwarmWorker(port).execute(createTask());
+
+    if (result.status !== "failed") throw new Error("expected a failed result");
+    expect(result.error).toBe("child boom");
+    expect(result).not.toHaveProperty("usage");
+    expect(result).not.toHaveProperty("totalTokens");
   });
 
   it("stops the background worker when the round aborts while waiting", async () => {

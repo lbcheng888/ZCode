@@ -46,11 +46,13 @@ export const globHandler: ToolHandler = async (input, context) => {
         operation: "read",
         workingDirectory: context.workingDirectory,
         workspaceRoot: context.workspaceRoot,
+        workspaceBoundary: context.workspaceBoundary,
       })
     : resolveToolWorkingDirectory(undefined, {
         operation: "read",
         workingDirectory: context.workingDirectory,
         workspaceRoot: context.workspaceRoot,
+        workspaceBoundary: context.workspaceBoundary,
       });
 
   const result = await fileSystemPort.searchFiles(

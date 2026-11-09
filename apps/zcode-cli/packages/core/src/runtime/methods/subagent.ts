@@ -2,6 +2,7 @@
 import {
   RESPOND_TO_COORDINATOR_TOOL_NAME,
   SESSION_ENTRY_MODEL_SELECTION,
+  SessionEventType,
   parseModelSelectionValue,
 } from "@zcode/contracts";
 import type { CollaborationMode, SubagentRunOptions, WorkspaceId } from "@zcode/contracts";
@@ -320,6 +321,10 @@ export function createDefaultSubagentPort(
             modelSelection: cloneModelSelection(childSelection),
             modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
             workingDirectory: request.workingDirectory,
+            // swarm worker 的强制工作区边界只由请求显式携带；普通子代理不设，行为不变。
+            ...(request.workspaceBoundary === undefined
+              ? {}
+              : { workspaceBoundary: request.workspaceBoundary }),
             // Bash cd 只改变执行 cwd；若丢失绑定身份，child 会落到另一个 workspace，重启后无法打开。
             workspacePath: this.config.workspacePath ?? request.workspaceRoot,
             workspaceIdentity:
@@ -441,6 +446,20 @@ export function createDefaultSubagentPort(
             eventSink: {
               onSessionEvent: async (event) => {
                 request.reportActivity?.();
+                // child 每次模型回复成功后把正文交给父会话；父侧只做摘要展示，
+                // 是否截断与事件发射由 runner 决定，这里不改变 child 事件本身。
+                if (event.type === SessionEventType.ModelComplete) {
+                  const payload = event.payload;
+                  if (
+                    typeof payload === "object" &&
+                    payload !== null &&
+                    "content" in payload &&
+                    typeof payload.content === "string" &&
+                    payload.content.length > 0
+                  ) {
+                    request.onChildAssistantMessage?.(payload.content);
+                  }
+                }
                 // child runtime 的事件已经按 childSessionId 落库，但旧链路只把
                 // 少量工具事件镜像给 parent sink，导致 UI 订阅 child topic 后只能拿到打开时
                 // 的 hydration，后续流式内容不会更新。raw child event 只通知父 runtime 的

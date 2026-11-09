@@ -3,10 +3,19 @@
 // ============================================================
 
 import {
+  AGENT_SWARM_ITEM_PLACEHOLDER,
+  AGENT_SWARM_MAX_OUTPUT_CHARS,
+  AGENT_SWARM_MAX_RESUME_AGENT_ID_CHARS,
+  AGENT_SWARM_MAX_RESUME_PROMPT_CHARS,
+  AGENT_SWARM_MAX_TASKS,
   AgentErrorCode,
   AgentInputJsonSchema,
   AgentInputSchema,
   AgentOutputSchema,
+  AgentSwarmInputJsonSchema,
+  AgentSwarmInputSchema,
+  AgentSwarmOutputJsonSchema,
+  AgentSwarmOutputSchema,
   AgentType,
   CoreErrorType,
   createCoreError,
@@ -14,7 +23,7 @@ import {
   type AgentOutput,
   type TraceContext,
 } from "@zcode/contracts";
-import { TASK_TOOL_NAME } from "../compat.js";
+import { AGENT_SWARM_TOOL_NAME, TASK_TOOL_NAME } from "../compat.js";
 import type { ToolEntry, ToolHandler } from "../types.js";
 
 const MAX_AGENT_MODEL_BYTES = 120_000;
@@ -350,3 +359,117 @@ export function createTaskToolEntry(
 ): ToolEntry {
   return createTaskToolEntryFromAgent(createAgentToolEntry(options));
 }
+
+// ============================================================
+// AgentSwarm
+// ============================================================
+// 语义对齐 kimi-code：items + prompt_template（{{item}}）把同一份任务模板扇出到多个
+// 独立输入，或 resume_agent_ids 继续既有 agent。所有 worker 共享调用方 workspace，
+// 不建 worktree、不做 merge；失败逐任务回报，不把任何失败折叠成整体成功。
+
+const AGENT_SWARM_PROVIDER_DESCRIPTION = [
+  "# AgentSwarm",
+  "",
+  "Run one same-shape subagent task over many independent inputs in the caller's workspace (multi-input fan-out).",
+  "",
+  "Use AgentSwarm only when several inputs need the same task template. For a single task use Agent; for different kinds of work use separate Agent calls. Call AgentSwarm at most once per response.",
+  "",
+  "## Input",
+  `- \`items\` + \`prompt_template\`: every ${AGENT_SWARM_ITEM_PLACEHOLDER} in the template is replaced with one item. At least 2 items are required unless resuming. Filled prompts must be distinct.`,
+  `- \`resume_agent_ids\`: continue existing agents by id. Each key is an \`agent_id\` from a previous Agent/AgentSwarm result (1-${AGENT_SWARM_MAX_RESUME_AGENT_ID_CHARS} characters); each value is the message to send (1-${AGENT_SWARM_MAX_RESUME_PROMPT_CHARS} characters). Resumed agents keep their context.`,
+  `- \`description\` (3-5 words) and optional \`subagent_type\` apply to the whole call. At most ${AGENT_SWARM_MAX_TASKS} tasks in total (items plus resume_agent_ids keys).`,
+  "",
+  "## Contract",
+  "- All workers share the caller's workspace: no worktree isolation and no merge. Tasks must be independent and must not write the same files.",
+  "- Workers run concurrently (up to 8 at a time). For resumed tasks, this call waits for the task's terminal state when the port supports `waitForTask`; otherwise it reports accepted delivery and the background result is not available in this response. An item that returns `async_launched` is settled here instead: `waitForTask` yields its terminal state; without `waitForTask` the harness stops it via `stopTask` and reports cancelled; when both are missing it reports failed. Results are returned per task in <agent_swarm_result>; a failed task with an `agent_id` can be resumed later with `resume_agent_ids`.",
+  "- Do not use AgentSwarm to re-run work already delegated in this turn.",
+].join("\n");
+
+/**
+ * 聚合结果的 UTF-8 字节预算：字符预算是 200k（AGENT_SWARM_MAX_OUTPUT_CHARS），CJK 每字符
+ * 最多 3 字节、200k 汉字约 600 KB。取 4× 字符上限（800_000 字节）保证 200k 汉字/emoji
+ * 的聚合不会先被字节闸截断；字符上限才是权威，字节预算只做兜底。
+ */
+const AGENT_SWARM_MAX_RESULT_BYTES = AGENT_SWARM_MAX_OUTPUT_CHARS * 4;
+
+/**
+ * AgentSwarm 只经 swarm-runtime 的公开入口 index.js 进入，不深导入 agent-swarm.js。
+ * 但静态 import 会在工具注册期形成初始化环：handlers/agent → swarm/index →
+ * target-continuation → methods/target → runtime/deps → tool/index → handlers/index →
+ * handlers/agent；此时若本模块先被导入，handlers/index 建 builtInTools 会读到尚未初始化的
+ * entry 绑定（undefined）。handler 内按需导入同一公开入口，既守住模块契约，也不把 goal
+ * swarm 的依赖图带进工具层的初始化顺序。
+ */
+const agentSwarmHandler: ToolHandler = async (input, context) => {
+  const { runAgentSwarm } = await import("../../runtime/swarm/index.js");
+  return runAgentSwarm(input, context);
+};
+
+function formatAgentSwarmOutputForModel(output: unknown): string {
+  return AgentSwarmOutputSchema.parse(output);
+}
+
+export const agentSwarmToolEntry: ToolEntry = {
+  capability:
+    "Fan out one subagent task template over independent inputs in the caller's shared workspace",
+  metadata: {
+    name: AGENT_SWARM_TOOL_NAME,
+    description: AGENT_SWARM_PROVIDER_DESCRIPTION,
+    // 非常驻派发工具：由 ToolSearch 加载后再经 DeferredToolCall 调用；除 Agent/Task
+    // 之外的派发工具不进 resident，避免每次请求都带上整段 fan-out 描述。
+    shouldDefer: true,
+    readOnly: true,
+    destructive: false,
+    concurrentSafe: true,
+    // 字符上限 200k 才是权威；字节预算必须至少 4× 字符上限，否则 200k 汉字（约 600 KB）
+    // / emoji 聚合会先被 serializer 的字节闸截断。
+    maxOutputBytes: AGENT_SWARM_MAX_RESULT_BYTES,
+    sideEffectScope: "session",
+    riskLevel: "low",
+    needsApproval: false,
+  },
+  handler: agentSwarmHandler,
+  // serializer 的字节预算之外再显式声明按 UTF-16 字符计的 200k 阈值。
+  maxModelChars: AGENT_SWARM_MAX_OUTPUT_CHARS,
+  formatModelContent: formatAgentSwarmOutputForModel,
+  inputSchema: AgentSwarmInputJsonSchema,
+  outputSchema: AgentSwarmOutputJsonSchema,
+  runtimeInputSchema: AgentSwarmInputSchema,
+  runtimeOutputSchema: AgentSwarmOutputSchema,
+  permission: {
+    permission: "subagent",
+    reason:
+      "AgentSwarm launches child runtime tasks; child tool calls are separately constrained and approved",
+    riskLevel: "low",
+    sideEffectScope: "session",
+    needsApproval: false,
+    patternSources: ["input"],
+    alwaysAllowPatternSources: ["input"],
+    denyPriority: "beforeAsk",
+  },
+  resultBudget: {
+    maxInlineBytes: AGENT_SWARM_MAX_RESULT_BYTES,
+    maxModelBytes: AGENT_SWARM_MAX_RESULT_BYTES,
+    strategy: "artifact",
+    preview: {
+      maxBytes: AGENT_SWARM_MAX_RESULT_BYTES,
+      direction: "head",
+    },
+    artifact: {
+      enabled: true,
+      retention: "session",
+    },
+  },
+  timeout: { kind: "none" },
+  cancellation: {
+    supported: true,
+    cleanup: "bestEffort",
+    userVisibleMessage: "AgentSwarm was cancelled before all swarm tasks returned findings",
+  },
+  trace: {
+    required: true,
+    propagateToAdapters: true,
+    recordInput: "summary",
+    recordOutput: "summary",
+  },
+};

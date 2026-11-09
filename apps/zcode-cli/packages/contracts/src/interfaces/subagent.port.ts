@@ -20,6 +20,11 @@ export interface SubagentRunRequest {
   callerCanReadOutputFile?: boolean;
   workingDirectory: string;
   workspaceRoot: string;
+  /**
+   * swarm worker 的强制工作区边界（绝对路径，隔离工作树映射后的根）。在场时 child runtime
+   * 的文件工具与显式 cwd 被限制在该目录内；非 swarm 请求不设。
+   */
+  workspaceBoundary?: string;
   trace: TraceContext;
 }
 
@@ -120,6 +125,18 @@ export type SubagentTaskStatus =
   | "stopped"
   | "lost";
 
+/**
+ * 子代理任务终态的用量快照：耗时、模型 usage 明细、工具调用数与汇总 token。
+ * runner 只在拿到真实事实时写对应字段；终态消费方（SwarmWorker 预算、通知卡片）
+ * 统一从这里读取，不再把整块 snapshot.usage 当成 ModelUsage。
+ */
+export interface SubagentTaskUsageSnapshot {
+  durationMs?: number;
+  modelUsage?: ModelUsage;
+  toolUseCount?: number;
+  totalTokens?: number;
+}
+
 export interface SubagentTaskSnapshot {
   taskId: string;
   agentId: string;
@@ -134,6 +151,11 @@ export interface SubagentTaskSnapshot {
   error?: string;
   output?: AgentOutput;
   outputFile?: string;
+  /**
+   * 任务终态用量：completed/stopped 由 runner 写入耗时等事实，失败路径从原 error
+   * （或其 cause 链）提取已发生的模型用量；没有真实数据时只写 durationMs，不估算。
+   */
+  usage?: SubagentTaskUsageSnapshot;
   notified?: boolean;
 }
 

@@ -122,6 +122,7 @@ export const editHandler: ToolHandler = async (input, context) => {
     operation: "write",
     workingDirectory: context.workingDirectory,
     workspaceRoot: context.workspaceRoot,
+    workspaceBoundary: context.workspaceBoundary,
   });
 
   const stat = await statEditableFile(filePath, context);

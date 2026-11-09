@@ -1,7 +1,7 @@
 import type {
-  ModelUsage,
   SessionId,
   SubagentTaskSnapshot,
+  SubagentTaskUsageSnapshot,
   TraceContext,
   TurnId,
 } from "@zcode/contracts";
@@ -16,12 +16,9 @@ export type RuntimeTaskType =
   | "local_dynamic_workflow"
   | "monitor_mcp";
 
-export interface RuntimeTaskUsageSnapshot {
-  durationMs?: number;
-  modelUsage?: ModelUsage;
-  toolUseCount?: number;
-  totalTokens?: number;
-}
+// 与 contracts 的 SubagentTaskSnapshot.usage 同一形状：registry 只是持有任务事实，
+// 不定义第二套用量字段。
+export type RuntimeTaskUsageSnapshot = SubagentTaskUsageSnapshot;
 
 export interface RuntimeTaskPendingMessage {
   id: string;
@@ -52,8 +49,16 @@ export interface RuntimeTaskSnapshot extends SubagentTaskSnapshot {
   messageSink?: RuntimeTaskMessageSink;
   output?: AgentOutput;
   parentSessionId?: SessionId;
+  /** 注册时的执行 cwd/workspaceRoot；终态恢复必须沿用原任务，不能用发送方 cwd。 */
+  workingDirectory?: string;
+  workspaceRoot?: string;
   pendingMessages?: RuntimeTaskPendingMessage[];
   prompt?: string;
+  /**
+   * 原任务的强制工作区边界（swarm worker 的隔离工作树根）。SendMessage 恢复终态任务时
+   * 必须以它为权威；发送方的 workingDirectory/workspaceRoot 不是原任务的执行边界。
+   */
+  workspaceBoundary?: string;
   /**
    * workflow run 产物的序列化文本。TaskOutput 的投影只读得到 registry 条目（dwf 从不写
    * outputFile），所以产物必须在终态更新时就存到条目上。

@@ -1255,6 +1255,8 @@ export interface SwarmRoundJournalPayload {
   /** decomposed 携带的分解清单。 */
   taskIds?: readonly string[];
   taskDescriptions?: readonly string[];
+  /** decomposed 携带的逐任务父 tool call id，与 taskIds 同序；旧日志缺席。 */
+  taskToolCallIds?: readonly string[];
   /** task_result 携带的单个 worker 终态。 */
   result?: SwarmJournalTaskResult;
   /** round_completed 携带的汇总：成功/失败任务与截断后的聚合产出。 */

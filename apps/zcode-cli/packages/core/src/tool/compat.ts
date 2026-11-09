@@ -1,7 +1,12 @@
 export const AGENT_TOOL_NAME = "Agent";
 export const TASK_TOOL_NAME = "Task";
+export const AGENT_SWARM_TOOL_NAME = "AgentSwarm";
 
-const subagentDispatchToolNames = new Set<string>([AGENT_TOOL_NAME, TASK_TOOL_NAME]);
+const subagentDispatchToolNames = new Set<string>([
+  AGENT_TOOL_NAME,
+  TASK_TOOL_NAME,
+  AGENT_SWARM_TOOL_NAME,
+]);
 
 const hookMatcherAliasesByToolName = new Map<string, readonly string[]>([
   [AGENT_TOOL_NAME, [TASK_TOOL_NAME]],

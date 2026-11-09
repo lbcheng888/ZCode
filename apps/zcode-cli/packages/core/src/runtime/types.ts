@@ -280,6 +280,11 @@ export interface AgentRuntimeConfig {
   outputStyle?: OutputStylePromptConfig;
   agentName?: string; // Default: "zcode-agent"
   workingDirectory?: string; // Required for context builder
+  /**
+   * 强制工作区边界（绝对路径）：只由 swarm worker 经 SubagentRunRequest 写入 child runtime。
+   * 文件工具与显式 cwd 被限制在边界内；缺席 = 普通会话，行为不变。
+   */
+  workspaceBoundary?: string;
   /** 本次运行的附加目录，仅用于环境 prompt 展示，不参与配置发现或持久化。 */
   additionalDirectories?: readonly string[];
   /**

@@ -183,6 +183,7 @@ function createWorkspaceFactory(options: {
       const workspace = {
         workingDirectory: `/isolated/${request.roundId}/${request.taskId}/packages/core`,
         workspaceRoot: `/isolated/${request.roundId}/${request.taskId}`,
+        boundary: `/isolated/${request.roundId}/${request.taskId}/worktree`,
         merged: 0,
         disposed: 0,
         async merge() {
@@ -328,6 +329,9 @@ describe("SwarmOrchestrator.decomposeGoal", () => {
     expect(journal.map((entry) => entry.phase)).toEqual(["round_started", "decomposed"]);
     expect(journal[0]?.objective).toBe("重建会话同步层");
     expect(journal[1]?.taskDescriptions).toEqual(tasks.map((task) => task.description));
+    // 父 tool call id 与 taskIds 同序落盘：恢复回放时投影靠它把 Subagent* 实时事件挂回 unit。
+    expect(journal[1]?.taskIds).toEqual(tasks.map((task) => task.taskId));
+    expect(journal[1]?.taskToolCallIds).toEqual(tasks.map((task) => String(task.parentToolCallId)));
   });
 
   it("strips ```json fences from the decomposition response", async () => {
@@ -704,6 +708,10 @@ describe("SwarmOrchestrator.runSwarm isolation and merge gate", () => {
     // t2 从未进执行面，也没有共享目录回退。
     expect(port.runCalls).toHaveLength(1);
     expect(port.runCalls[0]?.request.workingDirectory).not.toBe("/repo/packages/core");
+    // worker 收到的是整棵工作树根，而不是映射后的 workspaceRoot。
+    expect(port.runCalls[0]?.request.workspaceBoundary).toBe(
+      "/isolated/r-create-fail/t1/worktree",
+    );
     expect(tasks.map((task) => task.status)).toEqual(["done", "failed"]);
   });
 
@@ -1651,6 +1659,38 @@ describe("GitWorktreeSwarmWorkspaceFactory", () => {
     const directories = port.runCalls.map((call) => call.request.workingDirectory);
     expect(new Set(directories).size).toBe(2);
     expect(directories.every((directory) => directory !== repo.path)).toBe(true);
+  });
+
+  it("fails closed when a worker rewrites the worktree .git pointer toward the base repo", async () => {
+    const repo = await createGitRepo("README.md", "base\n");
+    const baseHead = await runGitIn(repo.path, ["rev-parse", "HEAD"]);
+    const workspace = await new GitWorktreeSwarmWorkspaceFactory().create({
+      roundId: "r-git-gitdir-tamper",
+      taskId: "t1",
+      baseWorkingDirectory: repo.path,
+      baseWorkspaceRoot: repo.path,
+    });
+    const pointerPath = join(workspace.boundary, ".git");
+    const originalPointer = await readFile(pointerPath, "utf8");
+    try {
+      await writeFile(join(workspace.boundary, "worker.txt"), "worker\n");
+      // 复现 high 复审：worker 的文件工具把 .git 指向基准仓库。旧实现会在 merge 的
+      // add/commit 时信任该指针，把提交直接落到基准当前分支，绕过 merge gate 与 target CAS。
+      await writeFile(pointerPath, `gitdir: ${join(repo.path, ".git")}\n`);
+      await expect(workspace.merge()).rejects.toThrow(
+        /does not point at its registered git dir/,
+      );
+      // 基准 HEAD、index 与工作树都没有被 worker 提交改写。
+      expect(await runGitIn(repo.path, ["rev-parse", "HEAD"])).toBe(baseHead);
+      expect(await runGitIn(repo.path, ["status", "--porcelain"])).toBe("");
+      await expect(readFile(join(repo.path, "worker.txt"), "utf8")).rejects.toThrow();
+    } finally {
+      // 还原指针后 git worktree remove 才能通过登记校验；失败时直接删临时根兜底。
+      await writeFile(pointerPath, originalPointer).catch(() => undefined);
+      await workspace.dispose().catch(async () => {
+        await rm(join(workspace.boundary, ".."), { recursive: true, force: true });
+      });
+    }
   });
 
   it("detects a merge conflict and fails only the conflicting worker", async () => {

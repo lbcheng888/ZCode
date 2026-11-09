@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "composite": false,
+    "incremental": false
+  },
+  "include": ["src/**/*", "tests/agent-swarm-tool.test.ts"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}

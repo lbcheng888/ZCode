@@ -45,6 +45,10 @@ export function resolveRuntimePermissionContext(
     runtimeScope: deps.runtimeScope,
     workingDirectory: deps.getWorkingDirectory(),
     workspaceRoot: deps.getWorkspaceRoot(),
+    // swarm child 的路径狱边界随权限上下文一起透传；普通会话取到 undefined，判定不读它。
+    ...(deps.getWorkspaceBoundary === undefined
+      ? {}
+      : { workspaceBoundary: deps.getWorkspaceBoundary() }),
     // M4：admission 结论随上下文透传；首次判定与 hook recheck 共用同一份事实。
     ...(deps.permissionMandate ? { mandate: deps.permissionMandate } : {}),
     ...(deps.permissionOrigin ? { origin: deps.permissionOrigin } : {}),

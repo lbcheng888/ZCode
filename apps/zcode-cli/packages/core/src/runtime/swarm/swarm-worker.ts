@@ -16,8 +16,10 @@ import type {
   AgentBackgroundedOutput,
   AgentCompletedOutput,
   AgentOutput,
+  Model,
   SubagentFailedUsage,
   SubagentPort,
+  SubagentRunOptions,
   SubagentRunRequest,
   SubagentTaskSnapshot,
 } from "@zcode/contracts";
@@ -37,8 +39,17 @@ export class SwarmWorker {
   /**
    * 执行单个子任务。signal 是取消的权威方：预取消不 spawn，执行中 abort 记 cancelled。
    * 信号由编排层按回合作用域传入，任务对象本身不携带取消状态。
+   * model/modelOverride 来自调用方 Agent Loop：原样透传给 SubagentPort.run，让 child
+   * 继承父会话的模型事实（AgentSwarm 前台并发即走这条）。
    */
-  async execute(task: SwarmTask, options?: { signal?: AbortSignal }): Promise<SwarmTaskResult> {
+  async execute(
+    task: SwarmTask,
+    options?: {
+      signal?: AbortSignal;
+      model?: Model;
+      modelOverride?: SubagentRunOptions["modelOverride"];
+    },
+  ): Promise<SwarmTaskResult> {
     if (!task.taskId) {
       throw new Error("Swarm task requires a non-empty taskId");
     }
@@ -46,18 +57,25 @@ export class SwarmWorker {
       throw new Error(`Swarm task ${task.taskId} requires a non-empty prompt`);
     }
 
-    const { signal } = options ?? {};
+    const { signal, model, modelOverride } = options ?? {};
     const startedAt = Date.now();
     if (signal?.aborted) {
       return createCancelledResult(task, startedAt, signal.reason);
     }
 
+    // 三个字段都不在场时不传 options，保持既有调用方的 SubagentPort.run 签名字节不变。
+    const runOptions: SubagentRunOptions | undefined =
+      signal === undefined && model === undefined && modelOverride === undefined
+        ? undefined
+        : {
+            ...(signal === undefined ? {} : { signal }),
+            ...(model === undefined ? {} : { model }),
+            ...(modelOverride === undefined ? {} : { modelOverride }),
+          };
+
     let output: AgentOutput;
     try {
-      output = await this.subagentPort.run(
-        toSubagentRunRequest(task),
-        signal === undefined ? undefined : { signal },
-      );
+      output = await this.subagentPort.run(toSubagentRunRequest(task), runOptions);
     } catch (error) {
       // signal 是取消的权威方：abort 导致的拒绝一律记 cancelled，其余原样记 failed。
       // 失败前已发生的模型调用只存在于错误对象（含 cause 链）的 usage 上；原样提取，
@@ -191,6 +209,16 @@ export class SwarmWorker {
           snapshot.error ?? `Backgrounded swarm worker ${task.taskId} ended with status ${snapshot.status}`,
           snapshot.error === undefined ? undefined : new Error(snapshot.error),
           startedAt,
+          // 失败前已发生的用量由 runner 写进 snapshot.usage；只取模型明细与汇总 token，
+          // 不把整个 usage 快照当成 ModelUsage 交给预算记账。
+          {
+            ...(snapshot.usage?.modelUsage === undefined
+              ? {}
+              : { usage: snapshot.usage.modelUsage }),
+            ...(snapshot.usage?.totalTokens === undefined
+              ? {}
+              : { totalTokens: snapshot.usage.totalTokens }),
+          },
         );
       case "cancelled":
       case "killed":
@@ -199,6 +227,14 @@ export class SwarmWorker {
           task,
           startedAt,
           snapshot.error ?? `backgrounded worker ended with status ${snapshot.status}`,
+          {
+            ...(snapshot.usage?.modelUsage === undefined
+              ? {}
+              : { usage: snapshot.usage.modelUsage }),
+            ...(snapshot.usage?.totalTokens === undefined
+              ? {}
+              : { totalTokens: snapshot.usage.totalTokens }),
+          },
         );
       case "running":
         return createFailedResult(
@@ -241,6 +277,10 @@ function toSubagentRunRequest(task: SwarmTask): SubagentRunRequest {
       : { callerCanReadOutputFile: task.callerCanReadOutputFile }),
     workingDirectory: task.workingDirectory,
     workspaceRoot: task.workspaceRoot,
+    // 隔离工作树是整棵树的边界：worker 的文件工具与显式 cwd 只能落在这里，回写只走 merge。
+    // 边界只由编排层显式写入；缺席即共享调用方 workspace（AgentSwarm 走这条），
+    // 不得回退 workspaceRoot——那会把普通会话误变成路径狱。
+    ...(task.workspaceBoundary === undefined ? {} : { workspaceBoundary: task.workspaceBoundary }),
     trace: task.trace,
   };
 }

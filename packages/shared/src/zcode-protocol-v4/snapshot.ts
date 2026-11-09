@@ -429,7 +429,8 @@ export type SubagentProjectionState = z.infer<typeof subagentProjectionStateSche
 /**
  * 蜂群活动读数：宿主把 SwarmOrchestrator 的 work unit 状态投影成计数。
  * additive-optional：键缺席 = 旧发送端未投影（unknown≠0），UI 不渲染指示器；
- * 显式对象才是「已发布」。回合结束后宿主必须撤掉该键/置零，避免残留读数冒充进行中。
+ * 显式对象才是「已发布」。round_completed 后保留终态 units 供回看，宿主保留该键到
+ * 下一轮 round_started 或会话结束，不得提前撤掉/置零抹掉回看事实。
  */
 export const swarmActivityStateSchema = z.object({
   activeUnits: z.number().int().nonnegative(),
@@ -440,6 +441,25 @@ export const swarmActivityStateSchema = z.object({
   failedUnits: z.number().int().nonnegative().optional(),
   interrupted: z.boolean().optional(),
   roundId: z.string().optional(),
+  // 逐任务可渲染单元：与聚合计数由同一条 journal 事件序归约、同一次 state.updated 发布，
+  // 不另设状态键。additive-optional：旧发送端只发计数；显式 [] 才是「已发布且零单元」。
+  units: z
+    .array(
+      z.object({
+        taskId: z.string(),
+        description: z.string(),
+        status: z.enum(["pending", "running", "done", "failed", "cancelled"]),
+        error: z.string().optional(),
+        // 以下四项是从 Subagent* 事件归约来的实时活动事实：spawn 只给在途行补身份，
+        // message 写最近消息；task_result/round_completed/SessionResumed 收口终态时
+        // 一并清空 currentActivity 与 lastMessage。旧发送端/旧日志缺席。
+        agentId: z.string().optional(),
+        childSessionId: z.string().optional(),
+        currentActivity: z.string().optional(),
+        lastMessage: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 export type SwarmActivityState = z.infer<typeof swarmActivityStateSchema>;
 

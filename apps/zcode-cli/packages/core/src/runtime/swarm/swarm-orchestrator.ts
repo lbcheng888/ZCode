@@ -244,6 +244,9 @@ export class SwarmOrchestrator {
         roundId,
         taskIds: tasks.map((task) => task.taskId),
         taskDescriptions: descriptions,
+        // 父 tool call id 是 Subagent* 事件与 worker 的唯一关联键；journal 先于 spawn 落盘，
+        // 恢复回放时投影才能把实时活动挂回对应 unit。
+        taskToolCallIds: tasks.map((task) => task.parentToolCallId),
       },
       this.deps.scope.trace,
     );
@@ -448,11 +451,14 @@ export class SwarmOrchestrator {
 
     task.status = "running";
     // worker 只看到隔离目录；基准 task 的 workingDirectory 保持调用方原值。
+    // 强制边界是整棵工作树（不是映射后的 workspaceRoot），这样 worktree 根的
+    // `git add -A` 不可能捕获到边界外的改动。
     const isolatedTask: SwarmTask = workspace
       ? {
           ...task,
           workingDirectory: workspace.workingDirectory,
           workspaceRoot: workspace.workspaceRoot,
+          workspaceBoundary: workspace.boundary,
         }
       : task;
     const signal = this.deps.scope.signal;

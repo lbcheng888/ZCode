@@ -473,6 +473,7 @@ function createExecutionRequest(
       operation: "execute",
       workingDirectory: context.workingDirectory,
       workspaceRoot: context.workspaceRoot,
+      workspaceBoundary: context.workspaceBoundary,
     }),
     ...(bashPrelude ? { bashPrelude } : {}),
     // 会话上下文变量与 hooks 的插件环境一致（configured-runner-input.ts createPluginEnvOverlay）。

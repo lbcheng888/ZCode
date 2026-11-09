@@ -14,6 +14,7 @@ import {
   createSessionEvent,
   createSessionId,
   createTraceId,
+  dropTrailingHighSurrogate,
   getModelUsageTotalTokens,
   hasModelUsage,
   isCoreError,
@@ -44,7 +45,7 @@ import {
   type TraceContext,
 } from "@zcode/contracts";
 import { formatModelPickerValue } from "@zcode/shared/model-selection";
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -103,6 +104,13 @@ export interface ExploreSubagentRuntimeRequest {
   systemPrompt?: string;
   workingDirectory: string;
   workspaceRoot: string;
+  /** swarm worker 的强制工作区边界（绝对路径）；非 swarm 请求缺席。 */
+  workspaceBoundary?: string;
+  /**
+   * child 每次模型回复成功后把正文交给父会话（runner 截断后发 SubagentMessage）。
+   * 只做展示用途；回调不得阻塞或改变 child 的执行结果。
+   */
+  onChildAssistantMessage?: (text: string) => void;
   traceContext: TraceContext;
 }
 
@@ -452,14 +460,20 @@ export function createExploreSubagentPort(options: ExploreSubagentPortOptions): 
         borrowedForegroundAgentIds.delete(lifecycle.agentId);
         const totalDurationMs = Date.now() - lifecycle.startedAt;
         const errorMessage = error instanceof Error ? error.message : String(error);
+        const failedUsage = extractSubagentFailedUsage(error);
         await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
         registry.update(lifecycle.agentId, (task) => ({
           ...withoutRuntimeMessageState(task),
           status: "failed",
           completedAt: new Date(),
           error: errorMessage,
+          // 失败前已发生的模型用量只从根因读取；没有真实数据时只保留耗时，不估算 token。
           usage: {
             durationMs: totalDurationMs,
+            ...(failedUsage.usage === undefined ? {} : { modelUsage: failedUsage.usage }),
+            ...(failedUsage.totalTokens === undefined
+              ? {}
+              : { totalTokens: failedUsage.totalTokens }),
           },
         }));
         await emitSubagentEvent(
@@ -1114,6 +1128,19 @@ async function resumeTerminalAgentInBackground(
     );
   }
 
+  if (task.workspaceBoundary !== undefined) {
+    try {
+      await access(task.workspaceBoundary);
+    } catch {
+      // swarm 工作树在轮末 dispose；恢复一个已失去工作树的终态 worker 只会得到
+      // 一个所有工具都越界的 child runtime，必须在这里 typed 失败，不能静默启动。
+      return createSendMessageFailure(
+        request,
+        `Cannot resume local agent ${task.agentId}: its swarm worktree was disposed after the round; start a new swarm task instead.`,
+      );
+    }
+  }
+
   const resumeRequest: SubagentRunRequest = {
     sessionId: request.sessionId,
     turnId: request.turnId,
@@ -1123,8 +1150,11 @@ async function resumeTerminalAgentInBackground(
     // 修复原因：恢复时用 summary 作描述，完成通知和卡片标题都会变成这次消息的摘要。
     description: task.description,
     prompt: request.message,
-    workingDirectory: request.workingDirectory,
-    workspaceRoot: request.workspaceRoot,
+    // 恢复的是原任务：cwd/root 也取原任务快照，发送方 cwd 无权改写。
+    workingDirectory: task.workingDirectory ?? request.workingDirectory,
+    workspaceRoot: task.workspaceRoot ?? request.workspaceRoot,
+    // 恢复后的 child 仍是原 swarm worker：边界属于原任务，发送方 cwd 无权改写。
+    ...(task.workspaceBoundary === undefined ? {} : { workspaceBoundary: task.workspaceBoundary }),
     trace: request.trace,
   };
   const lifecycle = createSubagentLifecycleFromTask(options, resumeRequest, profile, task);
@@ -1269,6 +1299,9 @@ function createSendMessageFailure(
   };
 }
 
+/** 父会话 SubagentMessage 只做一行预览：200 字符足够识别进度，又不挤占父 timeline。 */
+const SUBAGENT_MESSAGE_SUMMARY_MAX_CHARS = 200;
+
 async function runAgentToCompletion(
   options: ExploreSubagentPortOptions,
   request: SubagentRunRequest,
@@ -1279,12 +1312,15 @@ async function runAgentToCompletion(
   executionOptions: SubagentExecutionOptions = {},
 ): Promise<{ events: SessionEvent[]; output: AgentCompletedOutput }> {
   let sessionReady = false;
+  // child 的每条模型回复都向父会话发一行摘要；先挂在这里，等 child 收口后统一等齐，
+  // 保证 SubagentMessage 一定排在 SubagentStopped 之前。
+  const pendingChildMessages: Promise<void>[] = [];
   const notifySessionReady = async (selection?: ModelSelection) => {
     if (sessionReady) return;
     await executionOptions.onSessionReady?.(selection);
     sessionReady = true;
   };
-  const childResult = await options.runExploreAgent(
+  const childCompletion = options.runExploreAgent(
     {
       agentId: lifecycle.agentId,
       agentType: request.agentType,
@@ -1310,10 +1346,45 @@ async function runAgentToCompletion(
       systemPrompt: lifecycle.profile.systemPrompt,
       workingDirectory: request.workingDirectory,
       workspaceRoot: request.workspaceRoot,
+      // 边界必须沿 SubagentRunRequest → child runtime 一路显式下传；丢了就只剩“普通会话”。
+      ...(request.workspaceBoundary === undefined
+        ? {}
+        : { workspaceBoundary: request.workspaceBoundary }),
+      onChildAssistantMessage: (text) => {
+        pendingChildMessages.push(
+          emitSubagentEvent(
+            options,
+            SessionEventType.SubagentMessage,
+            request,
+            lifecycle.runTraceContext,
+            {
+              agentId: lifecycle.agentId,
+              agentType: request.agentType,
+              childSessionId: lifecycle.childSessionId,
+              parentToolCallId: request.parentToolCallId,
+              summaryText: dropTrailingHighSurrogate(
+                text.slice(0, SUBAGENT_MESSAGE_SUMMARY_MAX_CHARS),
+              ),
+            },
+          ).catch((error: unknown) => {
+            // 摘要只服务父 timeline 展示；发射失败不得反向破坏 child 执行。
+            options.logger?.warn("Subagent message mirror failed", {
+              ...traceContextToLogContext(lifecycle.runTraceContext),
+              agentId: lifecycle.agentId,
+              errorMessage: error instanceof Error ? error.message : String(error),
+              event: "subagent.message.mirror_failed",
+              module: "core.subagent",
+              status: "failed",
+            });
+          }),
+        );
+      },
       traceContext: lifecycle.childTraceContext,
     },
     runOptions,
   );
+  // child 成功或失败都先等已产出的摘要落地，保证 SubagentMessage 先于调用方的 SubagentStopped。
+  const childResult = await childCompletion.finally(() => Promise.all(pendingChildMessages));
   // 测试桩和旧注入实现可能尚未主动调用 readiness hook；真实 AgentRuntime 会在
   // persist 后调用。回落只保证兼容，不改变生产链路的 persist-before-spawn 顺序。
   await notifySessionReady();
@@ -1617,6 +1688,12 @@ function createRuntimeTaskSnapshot(input: {
     parentToolCallId: input.request.parentToolCallId,
     parentSessionId: input.request.sessionId,
     prompt: input.request.prompt,
+    workingDirectory: input.request.workingDirectory,
+    workspaceRoot: input.request.workspaceRoot,
+    // 原任务的强制边界必须随 snapshot 持久化：终态恢复时它是唯一权威，不能由发送方 cwd 重建。
+    ...(input.request.workspaceBoundary === undefined
+      ? {}
+      : { workspaceBoundary: input.request.workspaceBoundary }),
     startedAt: input.startedAt,
     status: input.status,
     taskType: "local_agent",
@@ -1741,6 +1818,7 @@ async function finalizeBackgroundFailure(
   // 会把 provider 的 429 原文替换成通用的 “Turn execution failed”；这里只选择
   // wrapper 下的根因 message，不压缩空白或截断 provider 原文。
   const errorMessage = error instanceof Error ? selectExecutionErrorMessage(error) : String(error);
+  const failedUsage = extractSubagentFailedUsage(error);
   const completedAt = new Date();
   const totalDurationMs = Date.now() - lifecycle.startedAt;
   await writeFailedAgentArtifacts(lifecycle, request, errorMessage);
@@ -1758,8 +1836,12 @@ async function finalizeBackgroundFailure(
     status: "failed",
     completedAt,
     error: errorMessage,
+    // 后台失败同样要留住已发生的真实用量：waitForTask 的消费方只拿得到 snapshot。
+    // 根因链上没有用量事实时只保留耗时，不估算 token。
     usage: {
       durationMs: totalDurationMs,
+      ...(failedUsage.usage === undefined ? {} : { modelUsage: failedUsage.usage }),
+      ...(failedUsage.totalTokens === undefined ? {} : { totalTokens: failedUsage.totalTokens }),
     },
   }));
   enqueueBackgroundNotification(

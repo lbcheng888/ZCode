@@ -302,6 +302,7 @@ function resolvePatchPath(
     operation: "write",
     workingDirectory: context.workingDirectory,
     workspaceRoot: context.workspaceRoot,
+    workspaceBoundary: context.workspaceBoundary,
   });
 }
 

@@ -4,6 +4,7 @@ import {
   RESPOND_TO_COORDINATOR_TOOL_NAME,
 } from "@zcode/contracts";
 import type { AgentProfile, ModelSelection } from "@zcode/shared";
+import { AGENT_SWARM_TOOL_NAME } from "../tool/compat.js";
 import {
   filterDisallowedToolNames,
   getToolRuleName,
@@ -13,6 +14,8 @@ import {
 export const SUBAGENT_CHILD_FORCED_DISALLOWED_TOOLS = [
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  // AgentSwarm 会再拉起一批子代理；child 持有它等于允许嵌套 swarm，统一剔除。
+  AGENT_SWARM_TOOL_NAME,
 ] as const;
 
 export function buildSubagentChildDisallowRules(
@@ -79,7 +82,7 @@ export const SPEC_RESTRICTED_TOOLFACE = [
  * - 出站网络工具：sideEffectScope=network，不走子进程代理 env；
  * - 信道句柄：对会话外发声（回复频道、跨 agent 消息、升级、结果投递）；
  * - node_repl（js）：进程内任意 JS，fetch 不经代理 env；
- * - 编排/派发工具：Agent/Task/CreateWorkflow 等派生的子运行拿的是
+ * - 编排/派发工具：Agent/Task/AgentSwarm/CreateWorkflow 等派生的子运行拿的是
  *   general-purpose profile（tools:["*"]）与常规 env，父 profile 约束不向下遗传；
  * - 调度与 goal 武装：Cron/OffPeak/Goal 在 verdict 前埋下未来的自主 run。
  */
@@ -97,6 +100,9 @@ export const SPEC_RESTRICTED_OUTBOUND_DISALLOWED_TOOLS = [
   "js",
   "Agent",
   "Task",
+  // 同 Agent/Task 的派发族：AgentSwarm 在调用方 workspace 里再拉起一批子代理，
+  // 是第二层编排，spec run 在 verdict 前不持有。
+  AGENT_SWARM_TOOL_NAME,
   "Workflow",
   "CreateWorkflow",
   "AmendWorkflow",

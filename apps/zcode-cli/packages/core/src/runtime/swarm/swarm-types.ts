@@ -1,9 +1,10 @@
 /**
  * 蜂群编排的共享类型与轮级身份生成。
  *
- * 编排实现（swarm-orchestrator.ts）、worker、聚合器、证据格式化与 journal 都引用
- * 这里的同一组定义；拆出独立模块是为了让 runtime 入口只承载轮生命周期，而不是
- * 把纯类型堆在实现文件里。
+ * 编排实现（swarm-orchestrator.ts，goal swarm 的 worktree 隔离路径）、AgentSwarm
+ * 执行面（agent-swarm.ts，共享调用方 workspace 的同形 fan-out）、worker、聚合器、
+ * 证据格式化与 journal 都引用这里的同一组定义；拆出独立模块是为了让 runtime 入口只
+ * 承载轮生命周期，而不是把纯类型堆在实现文件里。
  */
 
 import type {
@@ -26,7 +27,8 @@ export type SwarmTaskStatus = "pending" | "running" | "done" | "failed" | "cance
 /**
  * 蜂群中的一个子任务：既是分解产物，也是交给 SubagentPort.run 的执行请求。
  * status 在 runSwarm 期间原位迁移，调用方可据此观察进度。workingDirectory /
- * workspaceRoot 始终是调用方的基准目录；worker 实际执行目录由隔离工作树覆盖。
+ * workspaceRoot 始终是调用方的基准目录；是否隔离由编排层用 workspaceBoundary 显式决定——
+ * goal swarm 写入隔离工作树根，AgentSwarm 不写（worker 直接在调用方 workspace 执行）。
  */
 export interface SwarmTask {
   /** swarm 内的任务标识，用于把结果对回任务。 */
@@ -43,6 +45,12 @@ export interface SwarmTask {
   parentToolCallId: ToolCallId | string;
   workingDirectory: string;
   workspaceRoot: string;
+  /**
+   * worker 的强制工作区边界。goal swarm 编排层在执行前写入隔离工作树根；AgentSwarm
+   * 与普通会话缺席该字段，即共享调用方 workspace——worker 不回退 workspaceRoot
+   *（那会把普通会话误变成路径狱）。
+   */
+  workspaceBoundary?: string;
   trace: TraceContext;
   callerCanReadOutputFile?: boolean;
 }
@@ -124,6 +132,11 @@ export interface SwarmWorkspace {
   readonly workingDirectory: string;
   /** 子代理实际 workspaceRoot（映射到工作树内与 baseWorkspaceRoot 相同的相对位置）。 */
   readonly workspaceRoot: string;
+  /**
+   * 强制工作区边界 = 整棵隔离工作树的根。worker 的文件工具与显式 cwd 只能落在该树内，
+   * 因此 worktree 根的 `git add -A` 不会把边界外的改动带进 merge。
+   */
+  readonly boundary: string;
   /** 合并闸门：预检冲突后把本 worker 的 commit 合入基准工作树；冲突时抛错且不改基准。 */
   merge(): Promise<void>;
   /** 移除工作树与临时目录；失败原样上浮。 */

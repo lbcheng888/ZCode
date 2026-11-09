@@ -46,6 +46,7 @@ const READ_TOOL_NAME = "Read";
 type PermissionFlowContext = ToolRuntimePermissionCapabilityContext & {
   workingDirectory: string;
   workspaceRoot: string;
+  workspaceBoundary: string | undefined;
 };
 
 /**
@@ -96,6 +97,8 @@ function resolvePermissionFlowContext(
     mode,
     workingDirectory: preparedContext?.workingDirectory ?? deps.getWorkingDirectory(),
     workspaceRoot: preparedContext?.workspaceRoot ?? deps.getWorkspaceRoot(),
+    // swarm child 的路径狱边界必须随权限判定一起可见；prepared 上下文不能把它擦掉。
+    workspaceBoundary: preparedContext?.workspaceBoundary ?? deps.getWorkspaceBoundary?.(),
   };
 }
 

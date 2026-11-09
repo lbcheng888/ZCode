@@ -65,6 +65,7 @@ import {
   CoreErrorType,
   ModelErrorCode,
   SessionEventType,
+  dropTrailingHighSurrogate,
   getModelUsageContextTokens,
 } from "@zcode/contracts";
 import {
@@ -441,8 +442,88 @@ function sameSwarmActivity(
     current.completedUnits === next.completedUnits &&
     (current.failedUnits ?? 0) === (next.failedUnits ?? 0) &&
     current.interrupted === next.interrupted &&
-    current.totalUnits === next.totalUnits
+    current.totalUnits === next.totalUnits &&
+    sameSwarmUnits(current.units, next.units)
   );
+}
+
+type SwarmActivityUnit = NonNullable<SwarmActivityState["units"]>[number];
+
+/** 逐任务行按字段比较：status/error/实时活动变化不能被相同的聚合计数掩盖掉。 */
+function sameSwarmUnits(
+  current: SwarmActivityState["units"],
+  next: SwarmActivityState["units"],
+): boolean {
+  if (current === next) return true;
+  if (current === undefined || next === undefined) return false;
+  if (current.length !== next.length) return false;
+  return current.every((unit, index) => {
+    const other = next[index];
+    return (
+      unit.taskId === other.taskId &&
+      unit.description === other.description &&
+      unit.status === other.status &&
+      unit.error === other.error &&
+      unit.agentId === other.agentId &&
+      unit.childSessionId === other.childSessionId &&
+      unit.currentActivity === other.currentActivity &&
+      unit.lastMessage === other.lastMessage
+    );
+  });
+}
+
+/**
+ * journal 清单只接受非空字符串数组；undefined 视为空清单，其它形状返回 null。
+ * 调用方决定收口策略：decomposed 的坏清单整条忽略，round_completed 必须按空数组继续收口。
+ */
+function readSwarmIdList(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const ids: string[] = [];
+  for (const id of value) {
+    if (typeof id !== "string" || id.length === 0) return null;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/** worker 终态映射到单元状态；未知状态与聚合口径一致按失败处理。 */
+function swarmUnitStatus(status: unknown): "done" | "failed" | "cancelled" {
+  return status === "done" ? "done" : status === "cancelled" ? "cancelled" : "failed";
+}
+
+/**
+ * 最近消息副行只保留可读前缀，避免逐条消息无界撑大快照与 state.updated 帧。
+ * 按码元截断后剥离末尾孤立高位代理，不留下半个 emoji。
+ */
+const SWARM_UNIT_LAST_MESSAGE_MAX_CHARS = 200;
+
+function truncateSwarmUnitLastMessage(text: string): string {
+  return text.length <= SWARM_UNIT_LAST_MESSAGE_MAX_CHARS
+    ? text
+    : dropTrailingHighSurrogate(text.slice(0, SWARM_UNIT_LAST_MESSAGE_MAX_CHARS));
+}
+
+/** 终态行不再携带实时活动：收口点统一剥离，避免旧活动冒充仍在运行。 */
+function clearSwarmUnitActivity(unit: SwarmActivityUnit): SwarmActivityUnit {
+  const next = { ...unit };
+  delete next.currentActivity;
+  delete next.lastMessage;
+  return next;
+}
+
+/**
+ * journal 的 taskToolCallIds 是 Subagent* 事件的辅助关联键：旧日志缺席、坏形状
+ * （非数组/空串）一律视为无法关联。长度是否与 taskIds 对齐由调用方判定。
+ */
+function readSwarmToolCallIds(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids: string[] = [];
+  for (const id of value) {
+    if (typeof id !== "string" || id.length === 0) return undefined;
+    ids.push(id);
+  }
+  return ids;
 }
 
 interface FileToolInputPreviewState {
@@ -482,6 +563,9 @@ export class ProductProjection {
   // 蜂群 task_result 去重账本：`${roundId}:${taskId}` 已计数 = 同一 worker 的重复
   // journal 不再推进计数。冷恢复在空候选上重放同一事件流，会重建出同一份账本。
   private countedSwarmTaskKeys = new Set<string>();
+  // 蜂群 unit 实时活动的关联索引：decomposed 的 taskToolCallIds → taskId。
+  // 只对当前轮有效，换轮即清；旧 journal 没有该字段时保持空表（不关联任何 Subagent* 事件）。
+  private swarmUnitTaskIdByToolCallId = new Map<string, string>();
   private subagentRowIdByAgentId = new Map<string, number>();
   private hookRowIdByInvocationId = new Map<string, number>();
   // resume SessionStart 没有 turnId；先保留在 CLI projection，下一条真实 user-intent
@@ -1256,6 +1340,7 @@ export class ProductProjection {
       ]),
     );
     clone.countedSwarmTaskKeys = new Set(this.countedSwarmTaskKeys);
+    clone.swarmUnitTaskIdByToolCallId = new Map(this.swarmUnitTaskIdByToolCallId);
     clone.subagentRowIdByAgentId = new Map(this.subagentRowIdByAgentId);
     clone.hookRowIdByInvocationId = new Map(this.hookRowIdByInvocationId);
     clone.pendingSessionHookInvocations = new Map(
@@ -1322,6 +1407,7 @@ export class ProductProjection {
     this.openForegroundToolCallIds = candidate.openForegroundToolCallIds;
     this.fileToolInputPreviewByCallId = candidate.fileToolInputPreviewByCallId;
     this.countedSwarmTaskKeys = candidate.countedSwarmTaskKeys;
+    this.swarmUnitTaskIdByToolCallId = candidate.swarmUnitTaskIdByToolCallId;
     this.subagentRowIdByAgentId = candidate.subagentRowIdByAgentId;
     this.hookRowIdByInvocationId = candidate.hookRowIdByInvocationId;
     this.pendingSessionHookInvocations = candidate.pendingSessionHookInvocations;
@@ -1767,7 +1853,19 @@ export class ProductProjection {
       const staleSwarmControl = this.snapshot.control.canStop;
       const roundStartedOnly =
         swarmActivity.totalUnits === 0 && swarmActivity.activeUnits === 0 && staleSwarmControl;
-      const interrupted = swarmActivity.activeUnits > 0 || roundStartedOnly;
+      // 新 Runtime 不接管旧轮在途单元：running 行按中断收尾并剥掉实时活动，否则 UI
+      // 仍把死掉的 worker 显示成并行执行。已终态的行原样保留。
+      const hasRunningUnits =
+        swarmActivity.units?.some((unit) => unit.status === "running") ?? false;
+      const units =
+        swarmActivity.units === undefined
+          ? undefined
+          : swarmActivity.units.map((unit) =>
+              unit.status === "running"
+                ? clearSwarmUnitActivity({ ...unit, status: "cancelled" as const })
+                : unit,
+            );
+      const interrupted = swarmActivity.activeUnits > 0 || roundStartedOnly || hasRunningUnits;
       if (interrupted || staleSwarmControl) {
         deltas.push({
           op: "state.updated",
@@ -1775,6 +1873,7 @@ export class ProductProjection {
             ...(staleSwarmControl ? this.controlPatch({ canStop: false }) : {}),
             swarmActivity: {
               ...swarmActivity,
+              ...(units === undefined ? {} : { units }),
               ...(interrupted ? { activeUnits: 0, interrupted: true } : {}),
             },
           },
@@ -4675,7 +4774,102 @@ export class ProductProjection {
   // schema/UI 已有 subagent row，但旧 reducer 未消费 Subagent* 事件；
   // cold hydration 即使合成事件也无法恢复下钻行。这里让 live/cold 共用同一状态机。
 
+  /**
+   * 把 Subagent* 事件带来的实时活动写回 journal 分解出的 unit。
+   * parentToolCallId 未命中（旧 journal / 非蜂群子代理）时不创建 unit，原 subagent row
+   * 行为保持不变。
+   */
+  private updateSwarmUnitByParentToolCall(
+    parentToolCallId: string | undefined,
+    update: (unit: SwarmActivityUnit) => SwarmActivityUnit,
+  ): ConversationDelta[] {
+    if (!parentToolCallId) return [];
+    const taskId = this.swarmUnitTaskIdByToolCallId.get(parentToolCallId);
+    if (taskId === undefined) return [];
+    const current = this.snapshot.swarmActivity;
+    const units = current?.units;
+    if (current === undefined || units === undefined) return [];
+    const index = units.findIndex((unit) => unit.taskId === taskId);
+    if (index === -1) return [];
+    const nextUnits = [...units];
+    nextUnits[index] = update(units[index]!);
+    const swarmActivity: SwarmActivityState = { ...current, units: nextUnits };
+    if (sameSwarmActivity(current, swarmActivity)) return [];
+    return [{ op: "state.updated", patch: { swarmActivity } }];
+  }
+
   private onSubagentSpawned(event: SessionEvent): ConversationDelta[] {
+    const deltas = this.onSubagentSpawnedRow(event);
+    const payload = event.payload as Record<string, unknown>;
+    const childSessionId = this.stringPayload(payload, "childSessionId");
+    return [
+      ...deltas,
+      ...this.updateSwarmUnitByParentToolCall(
+        this.stringPayload(payload, "parentToolCallId"),
+        (unit) => {
+          // 迟到 spawn 不得复活已收口的行：只给仍在途的 unit 补身份。
+          if (unit.status !== "running" && unit.status !== "pending") return unit;
+          return {
+            ...unit,
+            agentId: this.subagentAgentId(payload, event),
+            ...(childSessionId === undefined ? {} : { childSessionId }),
+          };
+        },
+      ),
+    ];
+  }
+
+  private onSubagentMessage(event: SessionEvent): ConversationDelta[] {
+    const deltas = this.onSubagentMessageRow(event);
+    const payload = event.payload as Record<string, unknown>;
+    const message =
+      this.stringPayload(payload, "summaryText") ??
+      this.stringPayload(payload, "text") ??
+      this.stringPayload(payload, "message");
+    return [
+      ...deltas,
+      ...this.updateSwarmUnitByParentToolCall(
+        this.stringPayload(payload, "parentToolCallId"),
+        (unit) =>
+          message === undefined
+            ? unit
+            : { ...unit, lastMessage: truncateSwarmUnitLastMessage(message) },
+      ),
+    ];
+  }
+
+  private onSubagentStopped(event: SessionEvent): ConversationDelta[] {
+    const deltas = this.onSubagentStoppedRow(event);
+    const payload = event.payload as Record<string, unknown>;
+    const subagentStatus = this.mapSubagentStatus(this.stringPayload(payload, "status"));
+    const childSessionId = this.stringPayload(payload, "childSessionId");
+    return [
+      ...deltas,
+      ...this.updateSwarmUnitByParentToolCall(
+        this.stringPayload(payload, "parentToolCallId"),
+        (unit) => {
+          // 已由 task_result 收口的行不降级；stopped 只补身份并清活动行。
+          const terminated = unit.status === "running" || unit.status === "pending";
+          const next: SwarmActivityUnit = {
+            ...unit,
+            ...(terminated
+              ? { status: subagentStatus === "success" ? ("done" as const) : subagentStatus }
+              : {}),
+            ...(unit.agentId === undefined
+              ? { agentId: this.subagentAgentId(payload, event) }
+              : {}),
+            ...(unit.childSessionId === undefined && childSessionId !== undefined
+              ? { childSessionId }
+              : {}),
+          };
+          delete next.currentActivity;
+          return next;
+        },
+      ),
+    ];
+  }
+
+  private onSubagentSpawnedRow(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as Record<string, unknown>;
     const agentId = this.subagentAgentId(payload, event);
     const existing = this.findSubagentLifecycleRow(agentId, payload, event);
@@ -4793,7 +4987,7 @@ export class ProductProjection {
     return { op: "state.updated", patch: { backgroundWorks } };
   }
 
-  private onSubagentMessage(event: SessionEvent): ConversationDelta[] {
+  private onSubagentMessageRow(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as Record<string, unknown>;
     const row = this.findSubagentRow(this.subagentAgentId(payload, event));
     const append =
@@ -4804,7 +4998,7 @@ export class ProductProjection {
     return [{ op: "row.delta", rowId: row.rowId, path: "summaryText", append }];
   }
 
-  private onSubagentStopped(event: SessionEvent): ConversationDelta[] {
+  private onSubagentStoppedRow(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as Record<string, unknown>;
     const agentId = this.subagentAgentId(payload, event);
     const existing = this.findSubagentLifecycleRow(agentId, payload, event);
@@ -4994,6 +5188,11 @@ export class ProductProjection {
     const payload = rawPayload as SwarmRoundJournalPayload & { error?: unknown };
     const roundId = rawField.roundId;
     const current = this.snapshot.swarmActivity;
+    // 换轮即失效上一轮的 toolCallId 索引：新轮 taskId 会重复，旧映射会把新轮的
+    // Subagent* 事件挂到错误行。同轮重放不清，保证迟到事件仍能命中。
+    if (current !== undefined && current.roundId !== roundId) {
+      this.swarmUnitTaskIdByToolCallId.clear();
+    }
     // 同一 roundId 才继承已有计数；缺 round_started 的恢复片段从零基线继续累计。
     const base: SwarmActivityState =
       current?.roundId === roundId
@@ -5008,6 +5207,8 @@ export class ProductProjection {
           completedUnits: 0,
           failedUnits: 0,
           totalUnits: 0,
+          // 新轮显式发布空单元列表：清掉上一轮的行，同时与「未发布」区分。
+          units: [],
         };
         const control = {
           canStop: true,
@@ -5028,13 +5229,37 @@ export class ProductProjection {
         ];
       }
       case "decomposed": {
-        const totalUnits = payload.taskIds?.length ?? 0;
+        // 分解清单是 units 的唯一来源；坏清单整条忽略，避免用半截数组造出与计数不符的行。
+        const taskIds = readSwarmIdList(payload.taskIds);
+        if (taskIds === null) return [];
+        const taskDescriptions = Array.isArray(payload.taskDescriptions)
+          ? payload.taskDescriptions
+          : undefined;
+        const totalUnits = taskIds.length;
+        // 父 tool call id 只做关联索引：旧 journal 缺席或形状对不齐时不建映射，
+        // units 仍按 taskIds 正常发布（旧行为不变）。
+        const taskToolCallIds = readSwarmToolCallIds(payload.taskToolCallIds);
+        if (taskToolCallIds !== undefined && taskToolCallIds.length === taskIds.length) {
+          this.swarmUnitTaskIdByToolCallId.clear();
+          taskIds.forEach((taskId, index) => {
+            this.swarmUnitTaskIdByToolCallId.set(taskToolCallIds[index]!, taskId);
+          });
+        }
+        const units: SwarmActivityUnit[] = taskIds.map((taskId, index) => {
+          const rawDescription = taskDescriptions?.[index];
+          return {
+            taskId,
+            description: typeof rawDescription === "string" ? rawDescription : "",
+            status: "running" as const,
+          };
+        });
         const swarmActivity: SwarmActivityState = {
           roundId,
           activeUnits: totalUnits,
           completedUnits: 0,
           failedUnits: 0,
           totalUnits,
+          units,
         };
         if (sameSwarmActivity(current, swarmActivity)) return [];
         return [{ op: "state.updated", patch: { swarmActivity } }];
@@ -5055,18 +5280,75 @@ export class ProductProjection {
         if (this.countedSwarmTaskKeys.has(key)) return [];
         this.countedSwarmTaskKeys.add(key);
         const done = result.status === "done";
+        const status = swarmUnitStatus(result.status);
+        const error =
+          typeof result.error === "string" && result.error.length > 0 ? result.error : undefined;
+        const units = [...(base.units ?? [])];
+        const unitIndex = units.findIndex((unit) => unit.taskId === result.taskId);
+        if (unitIndex === -1) {
+          // 缺 decomposed 的恢复片段：终态事实本身仍要可渲染，描述只能用空占位。
+          units.push({
+            taskId: result.taskId,
+            description: "",
+            status,
+            ...(error === undefined ? {} : { error }),
+          });
+        } else {
+          const unit = units[unitIndex];
+          // task_result 是终态事实：收口时剥掉实时活动，终态行不再带旧消息。
+          units[unitIndex] = clearSwarmUnitActivity({
+            ...unit,
+            status,
+            // 新事实带 error 时覆盖；缺席则保留行上已有错误，不静默清空。
+            ...(error === undefined ? {} : { error }),
+          });
+        }
         const swarmActivity: SwarmActivityState = {
           ...base,
           activeUnits: Math.max(0, base.activeUnits - 1),
           completedUnits: base.completedUnits + (done ? 1 : 0),
           failedUnits: (base.failedUnits ?? 0) + (done ? 0 : 1),
+          units,
         };
         if (sameSwarmActivity(current, swarmActivity)) return [];
         return [{ op: "state.updated", patch: { swarmActivity } }];
       }
       case "round_completed": {
-        const completedUnits = payload.completedTaskIds?.length ?? 0;
-        const failedUnits = payload.failedTaskIds?.length ?? 0;
+        // round_completed 是唯一清 canStop 的权威收尾事实：坏计数帧不能整条丢弃，
+        // 否则 UI 永远停在「可停止」。非法清单按空数组收口，running 行按 cancelled 结束。
+        const completedTaskIds = readSwarmIdList(payload.completedTaskIds) ?? [];
+        const failedTaskIds = readSwarmIdList(payload.failedTaskIds) ?? [];
+        const completedUnits = completedTaskIds.length;
+        const failedUnits = failedTaskIds.length;
+        const completedIds = new Set(completedTaskIds);
+        const failedIds = new Set(failedTaskIds);
+        const roundInterrupted = Boolean(payload.error);
+        const roundError =
+          typeof payload.error === "string" && payload.error.length > 0 ? payload.error : undefined;
+        const units =
+          base.units === undefined
+            ? undefined
+            : base.units.map((unit) => {
+                // task_result 已给的终态是更细的事实（尤其 cancelled），汇总不降级覆盖；
+                // 轮已收口，所有行都按终态剥掉实时活动。
+                if (unit.status !== "running" && unit.status !== "pending") {
+                  return clearSwarmUnitActivity(unit);
+                }
+                if (completedIds.has(unit.taskId)) {
+                  return clearSwarmUnitActivity({ ...unit, status: "done" as const });
+                }
+                if (failedIds.has(unit.taskId)) {
+                  return clearSwarmUnitActivity({ ...unit, status: "failed" as const });
+                }
+                // 轮已结束且汇总没有给它终态：running 行不能再留在 UI 上；按 cancelled 收口，
+                // 轮级 error 在场时把原始错误带到行上。
+                const error = unit.error ?? roundError;
+                return clearSwarmUnitActivity({
+                  ...unit,
+                  status: "cancelled" as const,
+                  ...(error === undefined ? {} : { error }),
+                });
+              });
         const swarmActivity: SwarmActivityState = {
           roundId,
           activeUnits: 0,
@@ -5074,7 +5356,9 @@ export class ProductProjection {
           failedUnits,
           // 已发布的分解总数不得被终态汇总倒推变小；两者取大保持计数单调。
           totalUnits: Math.max(base.totalUnits, completedUnits + failedUnits),
-          ...(payload.error ? { interrupted: true } : {}),
+          ...(roundInterrupted ? { interrupted: true } : {}),
+          // units 缺席 = 该轮未发布过分解事实（unknown）；显式列表才参与收口。
+          ...(units === undefined ? {} : { units }),
         };
         const control = {
           canStop: false,

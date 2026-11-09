@@ -89,6 +89,7 @@ export class ToolExecutorImpl implements ToolExecutor {
           options.getWorkingDirectory?.() ??
           options.workingDirectory ??
           "."),
+      getWorkspaceBoundary: options.getWorkspaceBoundary,
       workspaceIdentity: options.workspaceIdentity,
       workspaceWriteLeaseAdmission: options.workspaceWriteLeaseAdmission,
       getWriteLeaseOwnerRunId: options.getWriteLeaseOwnerRunId,

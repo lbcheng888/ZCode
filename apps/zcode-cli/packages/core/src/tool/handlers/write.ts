@@ -89,6 +89,7 @@ export const writeHandler: ToolHandler = async (input, context) => {
     operation: "write",
     workingDirectory: context.workingDirectory,
     workspaceRoot: context.workspaceRoot,
+    workspaceBoundary: context.workspaceBoundary,
   });
 
   let originalFile: string | null = null;

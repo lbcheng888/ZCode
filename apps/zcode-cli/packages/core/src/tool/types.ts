@@ -233,6 +233,8 @@ export interface ToolExecutionContext {
   setWorkingDirectory?: (cwd: string) => Promise<void> | void;
   workingDirectory: string;
   workspaceRoot: string;
+  /** swarm worker 的强制工作区边界；缺席 = 普通会话，path-policy 不做路径狱。 */
+  workspaceBoundary?: string;
   workspaceIdentity?: string;
   remoteSessionId?: string;
   clientMode?: "desktop-continuous" | "web-remote-replayable";
@@ -512,6 +514,8 @@ export interface ToolRuntimePermissionCapabilityContext {
   runtimeScope?: ToolRuntimeScope;
   workingDirectory?: string;
   workspaceRoot?: string;
+  /** swarm worker 的强制工作区边界；缺席 = 普通会话。 */
+  workspaceBoundary?: string;
   /**
    * M4：本回合 prompt admission 解析的 mandate 结论（结构 = PermissionMandateFacts）。
    * 首次判定与 hook 修改输入后的 recheck 必须复用同一份结论，不能各自重新推导。

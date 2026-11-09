@@ -32,6 +32,7 @@ import { grepToolEntry } from "./grep.js";
 import { webFetchToolEntry } from "./webfetch.js";
 import { webSearchToolEntry } from "./websearch.js";
 import {
+  agentSwarmToolEntry,
   agentToolEntry,
   createAgentToolEntry,
   createTaskToolEntry,
@@ -147,6 +148,9 @@ export const builtInTools: ToolEntry[] = [
   replyToChannelToolEntry,
   agentToolEntry,
   taskToolEntry,
+  // 同形多输入 fan-out：与 Agent/Task 同属 includeAgent 门（compat 的派发名集合），
+  // 共享调用方 workspace，不建 worktree。
+  agentSwarmToolEntry,
   skillToolEntry,
   jsToolEntry,
   createWorkflowToolEntry,

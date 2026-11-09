@@ -53,11 +53,13 @@ export const grepHandler: ToolHandler = async (input, context) => {
         operation: "read",
         workingDirectory: context.workingDirectory,
         workspaceRoot: context.workspaceRoot,
+        workspaceBoundary: context.workspaceBoundary,
       })
     : resolveToolWorkingDirectory(undefined, {
         operation: "read",
         workingDirectory: context.workingDirectory,
         workspaceRoot: context.workspaceRoot,
+        workspaceBoundary: context.workspaceBoundary,
       });
 
   const contextLines = parsed.context ?? parsed["-C"];
