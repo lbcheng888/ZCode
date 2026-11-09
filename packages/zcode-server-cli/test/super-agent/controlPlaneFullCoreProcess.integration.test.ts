@@ -46,11 +46,34 @@ const roots: string[] = [];
 const children: ChildProcess[] = [];
 const stderrByChild = new WeakMap<ChildProcess, string>();
 
+async function removeRoot(root: string): Promise<void> {
+  // 子进程 SIGKILL 后仍可能有落盘尾巴；直接 rm 会撞 ENOTEMPTY，短暂重试直到目录稳定。
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt >= 20) throw error;
+      await delay(100);
+    }
+  }
+}
+
 afterEach(async () => {
-  for (const child of children.splice(0)) {
+  const running = children.splice(0);
+  for (const child of running) {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    running.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) resolve();
+          else child.once("exit", () => resolve());
+        }),
+    ),
+  );
+  await Promise.all(roots.splice(0).map(removeRoot));
 });
 
 const exitByChild = new WeakMap<ChildProcess, string>();
