@@ -387,6 +387,13 @@ export function shouldExposeSessionEventToProtocol(event: SessionEvent): boolean
     return false;
   }
 
+  if (event.type === SessionEventType.SwarmRoundJournal) {
+    // 蜂群 journal 是崩溃恢复用的内部账本；v3 快照不消费，v4 由 ProductProjection
+    // 直接消费同一事件流投影成 swarmActivity。透出到 v3 只会把每条 worker 终态映射成
+    // 无信息的 session.updated。同 TodosUpdated 的剥离理由。
+    return false;
+  }
+
   if (event.type !== SessionEventType.ModelStreaming) {
     return true;
   }

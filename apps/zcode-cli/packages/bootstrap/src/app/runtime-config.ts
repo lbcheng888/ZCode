@@ -145,6 +145,10 @@ export function resolveAppRuntimeConfig(input: {
     // 否则读用户配置 features.goalLayer,配置缺省 true。显式 off 仍可关闭。
     goalLayerEnabled:
       options.runtimeConfig?.goalLayerEnabled ?? configResult.config.features.goalLayer,
+    // swarm 灰度旗：只认会话级显式值（CLI/Host 传入 runtimeConfig.swarm）；用户配置
+    // 文件没有同名键，避免普通配置意外开启蜂群执行。runtime 只在 goalLayerEnabled
+    // 为真时使用它（蜂群回合必须有三维预算闸门）。
+    swarm: options.runtimeConfig?.swarm,
     embeddedSearchBackend:
       options.runtimeConfig?.embeddedSearchBackend ??
       resolveDefaultEmbeddedSearchBackend({

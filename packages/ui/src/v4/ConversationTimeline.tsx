@@ -2287,7 +2287,7 @@ function ConversationTimelineImpl({
                   "pointer-events-auto relative z-10 w-full shrink-0 transition-[width,max-width,transform] duration-150 ease-out @min-[1280px]/conversation:transition-[transform]",
                   contentWidthClassName,
                   // 浮窗形态下输入框外壳就是浮窗最外层，不留内边距。
-                  !centeredEmptyLayout && !floatingComposerDock && "px-2 pb-4",
+                  !centeredEmptyLayout && !floatingComposerDock && "px-2 pb-2",
                   !centeredEmptyLayout && summaryPanelInlineOffsetClassName,
                 )}
               >

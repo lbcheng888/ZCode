@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // CLI workspace 的 solution 入口：`tsc -b` 按各包自己的 tsconfig 依次构建/类型检查，
+  // 命令面与根仓 `tsc -b <dir>` 一致；不在本文件里复制任何 compilerOptions，避免出现
+  // 与包内配置分叉的第二套真相。zcode-cua-plugin 的 tsconfig 无输入（类型检查由
+  // check-sdk.mjs 负责），tools/typescript 只导出共享配置，二者不参与引用。
+  "files": [],
+  "references": [
+    { "path": "./packages/adapters" },
+    { "path": "./packages/android-emulator-plugin" },
+    { "path": "./packages/bootstrap" },
+    { "path": "./packages/browser-use-plugin" },
+    { "path": "./packages/cheng-contract" },
+    { "path": "./packages/cheng-contract/tsconfig.test.json" },
+    { "path": "./packages/cheng-host" },
+    { "path": "./packages/cheng-host/tsconfig.test.json" },
+    { "path": "./packages/cli" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/core" },
+    { "path": "./packages/debug" },
+    { "path": "./packages/debug/tsconfig.server.json" },
+    { "path": "./packages/dynamic-workflow" },
+    { "path": "./packages/dynamic-workflow-runtime" },
+    { "path": "./packages/i18n" },
+    { "path": "./packages/ios-simulator-plugin" },
+    { "path": "./packages/node-repl-host" },
+    { "path": "./packages/office-runtime" },
+    { "path": "./packages/shared-types" },
+    { "path": "./packages/swift-bridge" },
+    { "path": "./packages/telemetry" },
+    { "path": "./packages/tui" },
+    { "path": "./packages/zcode-site-plugin" },
+    { "path": "./tools/prompt-trajectory" },
+    { "path": "./tools/provider-regression" }
+  ]
+}

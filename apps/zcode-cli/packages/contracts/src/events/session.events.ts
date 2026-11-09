@@ -182,6 +182,10 @@ export const SessionEventType = {
   CheckpointCreated: "checkpoint_created",
   TargetChanged: "target_changed",
   TargetCompletionVerification: "target_completion_verification",
+  // 蜂群轮 journal。v3 mapper/快照不消费；v4 ProductProjection 消费它生成
+  // swarmActivity 实时读数，持久化事件流同时用于进程崩溃后按 roundId 重建最近
+  // 一轮的分解与逐 worker 终态（见 core runtime/swarm-orchestrator.ts）。
+  SwarmRoundJournal: "swarm_round_journal",
   // TodoWrite 写库成功后的权威清单。SQLite todo 表是行权威；本事件只服务 live 投影与
   // 进程内 replay，冷恢复由 todo 表合成同构事件。
   TodosUpdated: "todos_updated",
@@ -1221,6 +1225,46 @@ export interface TargetChangedPayload {
   chengPlanCard?: GoalContinuationChengPlanCard;
 }
 
+/** 蜂群轮 journal 的阶段；每个阶段都带 roundId，恢复时按最近 roundId 归并。 */
+export type SwarmRoundJournalPhase =
+  | "round_started"
+  | "decomposed"
+  | "task_result"
+  | "round_completed";
+
+/** 单个 worker 的 journal 终态；output / error 与聚合器同一口径。 */
+export interface SwarmJournalTaskResult {
+  taskId: string;
+  status: "done" | "failed" | "cancelled";
+  output?: string;
+  error?: string;
+}
+
+/**
+ * SwarmOrchestrator 写入 session event 的轮级 journal。
+ *
+ * 事件只追加、不原地修改：崩溃后从最近一条 `round_started` 起回放，按 taskId
+ * 取每个 worker 的最后一次 `task_result`，即可知道哪些子任务已完成、哪些失败，
+ * 从而从最近断点恢复而不是把整轮当成从未发生。
+ */
+export interface SwarmRoundJournalPayload {
+  phase: SwarmRoundJournalPhase;
+  roundId: string;
+  /** round_started 携带的目标正文。 */
+  objective?: string;
+  /** decomposed 携带的分解清单。 */
+  taskIds?: readonly string[];
+  taskDescriptions?: readonly string[];
+  /** task_result 携带的单个 worker 终态。 */
+  result?: SwarmJournalTaskResult;
+  /** round_completed 携带的汇总：成功/失败任务与截断后的聚合产出。 */
+  completedTaskIds?: readonly string[];
+  failedTaskIds?: readonly string[];
+  output?: string;
+  /** round_completed 的失败/取消原因；正常完成时缺席。 */
+  error?: string;
+}
+
 /**
  * TodoWrite 成功写库后的完整清单快照。
  *
@@ -1438,4 +1482,5 @@ export type SessionEventPayload =
   | MicrocompactBoundaryEventPayload
   | CheckpointCreatedPayload
   | RewindTriggeredPayload
-  | CompactBoundaryPayload;
+  | CompactBoundaryPayload
+  | SwarmRoundJournalPayload;

@@ -49,6 +49,7 @@ import { createTuiModelAvailabilityChecker } from "./tui-login-state.js";
 import { withTuiMetadata } from "./tui-submit-metadata.js";
 import { DEFAULT_CLI_WORKFLOW_MODE, resolveWorkflowModeRuntimeConfig } from "./workflow-mode.js";
 import { resolveGoalLayerRuntimeConfig, type CliGoalLayerMode } from "./goal-layer.js";
+import { resolveSwarmRuntimeConfig } from "./swarm.js";
 import type {
   CliModeState,
   CliPermissionMode,
@@ -256,6 +257,7 @@ export function createTuiSubmitPrompt(
   browserExecutable?: GlobalOptions["browserExecutable"],
   workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
   goalLayer?: CliGoalLayerMode,
+  swarm?: boolean,
 ): TuiPromptHandler {
   let app: Awaited<ReturnType<NonNullable<RunDependencies["createZCodeApp"]>>> | undefined;
   let activeUiLocale = uiLocale;
@@ -370,6 +372,7 @@ export function createTuiSubmitPrompt(
           // 首个 app 与 /new、/resume、fork 都经这里创建，mode 因此在进程内一致。
           ...resolveWorkflowModeRuntimeConfig(workflowMode),
           ...resolveGoalLayerRuntimeConfig(goalLayer),
+          ...resolveSwarmRuntimeConfig(swarm),
           modelStreaming: "on",
           titleGeneration: TUI_TITLE_GENERATION_CONFIG,
           workingDirectory,

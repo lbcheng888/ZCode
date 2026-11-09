@@ -425,6 +425,24 @@ export const subagentProjectionStateSchema = z.object({
 });
 export type SubagentProjectionState = z.infer<typeof subagentProjectionStateSchema>;
 
+// ── swarm（目标续跑回合内的并行工作单元计数）──
+/**
+ * 蜂群活动读数：宿主把 SwarmOrchestrator 的 work unit 状态投影成计数。
+ * additive-optional：键缺席 = 旧发送端未投影（unknown≠0），UI 不渲染指示器；
+ * 显式对象才是「已发布」。回合结束后宿主必须撤掉该键/置零，避免残留读数冒充进行中。
+ */
+export const swarmActivityStateSchema = z.object({
+  activeUnits: z.number().int().nonnegative(),
+  completedUnits: z.number().int().nonnegative(),
+  totalUnits: z.number().int().nonnegative(),
+  // 以下三项 additive-optional：旧发送端只发三项基础计数。item 级失败/中断读数
+  // 与轮次身份不参与基础「active」判定，缺席按 unknown 而不是 0 处理。
+  failedUnits: z.number().int().nonnegative().optional(),
+  interrupted: z.boolean().optional(),
+  roundId: z.string().optional(),
+});
+export type SwarmActivityState = z.infer<typeof swarmActivityStateSchema>;
+
 // ── goal / plan ──
 export const planItemSchema = z.object({
   id: z.string(),
@@ -583,6 +601,9 @@ export const conversationSnapshotSchema = z.object({
   workflowRuns: workflowRunsStateSchema.optional(),
   goal: goalStateSchema.nullable(),
   plan: planStateSchema.nullable(),
+  // 蜂群活动读数（additive-optional）：键缺席 = 旧发送端未投影（unknown≠0），
+  // 客户端不渲染指示器；显式对象才是当前回合的实时读数。
+  swarmActivity: swarmActivityStateSchema.optional(),
   // 软门禁(Soft Gate)：additive 字段,必须带 default(null)。
   // 旧快照/旧发送端不携带此字段 → 解析得 null,不破坏兼容性(遵守冻结规则)。
   // pendingCount === 0 时投影层置 null(提示条消失)。

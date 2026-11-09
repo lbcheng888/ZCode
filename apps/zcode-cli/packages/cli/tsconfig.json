@@ -5,7 +5,9 @@
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    // CLI 包只做类型检查（build 走 scripts/build.mjs），solution 的 `tsc -b` 不落源码旁产物。
+    "noEmit": true
   },
   "include": ["src/**/*"]
 }

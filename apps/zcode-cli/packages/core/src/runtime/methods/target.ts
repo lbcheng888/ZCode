@@ -18,6 +18,11 @@ import type {
 } from "../deps.js";
 import type { ContinueActiveTargetLoopOptions, TurnResult } from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import {
+  formatSwarmRoundEvidence,
+  type SwarmRoundEvidence,
+} from "../swarm-orchestrator.js";
+import { runSwarmGoalContinuation } from "./target-swarm.js";
 import { createRuntimeCommandId } from "../command-queue.js";
 import type {
   TargetContinuationRuntimeCommand,
@@ -294,7 +299,7 @@ export async function executeTargetContinuationCommand(
     });
     return null;
   }
-  const continuationTarget = latestTarget;
+  let continuationTarget = latestTarget;
   // 三维预算回合边界检查(设计 §3.2/§4.1):任一维已到 100% 时,先把 target 置
   // blocked(budget_limited,code budget-exhausted),再执行一次宽限终局回合——
   // 全程工具 veto,逼模型写面向用户的终局总结;终局回合结束后循环的候选闸门
@@ -331,6 +336,26 @@ export async function executeTargetContinuationCommand(
       });
     }
   }
+  // 蜂群模式（swarm 灰度）：目标已确认 active 且 Host 开启 swarm 时，本回合先由
+  // SwarmOrchestrator 把目标分解为并行子任务并执行；聚合产出拼进回合提示，随
+  // goal-continuation 输入进入会话历史，完成 verifier 下一轮据此判分。
+  // swarm 恒受 goal layer 约束：关掉 goal 层就没有三维预算闸门可依（M10）。
+  let swarmEvidence: SwarmRoundEvidence | undefined;
+  if (this.config.swarm === true && isGoalLayerEnabled(this.config)) {
+    const nextAction = verificationResult?.verification.nextAction;
+    const swarmContinuation = await runSwarmGoalContinuation.call(this, {
+      ...(options.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
+      ...(options.inputId === undefined ? {} : { inputId: options.inputId }),
+      ...(options.intent === undefined ? {} : { intent: options.intent }),
+      ...(nextAction === undefined ? {} : { nextAction }),
+      target: continuationTarget,
+      traceContext,
+    });
+    if (swarmContinuation.kind === "skip") return null;
+    if (swarmContinuation.kind === "turn_result") return swarmContinuation.result;
+    continuationTarget = swarmContinuation.target;
+    swarmEvidence = swarmContinuation.evidence;
+  }
   // S4：goal continuation 的路线卡先于 prompt 组装现读；无 plan 事实不制造空卡。
   // 卡片只是只读先验证据：host RPC 失败时告警并省略，绝不能阻断续跑回合。
   let chengPlanCard: Awaited<
@@ -350,22 +375,25 @@ export async function executeTargetContinuationCommand(
       });
     }
   }
+  const continuationPrompt = formatGoalContinuationPrompt(
+    continuationTarget,
+    verificationResult?.verification,
+    {
+      goalLayerEnabled: isGoalLayerEnabled(this.config),
+      workflowDelegation:
+        isGoalLayerEnabled(this.config) &&
+        this.config.dynamicWorkflowEnabled !== false &&
+        this.dynamicWorkflowToolsActivated,
+      ...(chengPlanCard === undefined ? {} : { chengPlanCard }),
+    },
+  );
   const prompt = wrapSystemReminderForSource(
     "target_continuation",
     // workflow 委派指引与判定权阶梯(设计 §3.3)只在工具面在场时进入提示:
     // CreateWorkflow 缺席的会话(fail-closed 灰度)模型无处发起 run,指引只会误导。
-    formatGoalContinuationPrompt(
-      continuationTarget,
-      verificationResult?.verification,
-      {
-        goalLayerEnabled: isGoalLayerEnabled(this.config),
-        workflowDelegation:
-          isGoalLayerEnabled(this.config) &&
-          this.config.dynamicWorkflowEnabled !== false &&
-          this.dynamicWorkflowToolsActivated,
-        ...(chengPlanCard === undefined ? {} : { chengPlanCard }),
-      },
-    ),
+    swarmEvidence === undefined
+      ? continuationPrompt
+      : `${continuationPrompt}\n\n${formatSwarmRoundEvidence(swarmEvidence)}`,
   );
   const continuationTrace = createChildTraceContext(traceContext, {
     sessionId: this.sessionId,

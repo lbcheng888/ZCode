@@ -791,4 +791,33 @@ describe("resolveAppRuntimeConfig：dynamicWorkflowEnabled 透传", () => {
       }).runtimeConfig.goalLayerEnabled,
     ).toBe(true);
   });
+
+  // M10：swarm 是会话级灰度旗（CLI/Host 传入 runtimeConfig.swarm），配置文件没有同名键。
+  it("publishes the session-level swarm flag and defaults it to off", () => {
+    const configResult = createConfigResult();
+    const base = {
+      cliStorageRoot: "/tmp/zcode-cli-storage",
+      subagentOutputRootDir: "/tmp/zcode-subagent-output",
+      workingDirectory,
+    };
+    expect(
+      resolveAppRuntimeConfig({
+        ...base,
+        configResult,
+        options: { runtimeConfig: { swarm: true } },
+      }).runtimeConfig.swarm,
+    ).toBe(true);
+    // 未显式传入时保持缺席（runtime 按 === true 判开）。
+    expect(
+      resolveAppRuntimeConfig({ ...base, configResult, options: {} }).runtimeConfig.swarm,
+    ).toBeUndefined();
+    // 协议显式 false 也必须原样透传，不能被装配层改写成缺席。
+    expect(
+      resolveAppRuntimeConfig({
+        ...base,
+        configResult,
+        options: { runtimeConfig: { swarm: false } },
+      }).runtimeConfig.swarm,
+    ).toBe(false);
+  });
 });

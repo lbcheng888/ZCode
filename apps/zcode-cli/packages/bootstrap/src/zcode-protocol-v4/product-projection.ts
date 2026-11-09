@@ -33,6 +33,7 @@ import type {
   StreamRecoveryRetryStartedPayload,
   StreamRecoveryStartedPayload,
   StreamingToolLedgerPayload,
+  SwarmRoundJournalPayload,
   TargetChangedPayload,
   TargetCompletionVerificationPayload,
   ToolCallErrorPayload,
@@ -113,6 +114,7 @@ import type {
   StatePatch,
   SubagentProjectionState,
   SubagentRow,
+  SwarmActivityState,
   TimelineMarkerPayload,
   TimelineMarkerRow,
   ToolCallDisplay,
@@ -427,6 +429,22 @@ function nonNegativeInteger(value: number, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
+/** 蜂群读数按字段比较；optional 缺席与显式值都参与比较，避免无变化时多产一条 state.updated。 */
+function sameSwarmActivity(
+  current: SwarmActivityState | undefined,
+  next: SwarmActivityState,
+): boolean {
+  return (
+    current !== undefined &&
+    current.roundId === next.roundId &&
+    current.activeUnits === next.activeUnits &&
+    current.completedUnits === next.completedUnits &&
+    (current.failedUnits ?? 0) === (next.failedUnits ?? 0) &&
+    current.interrupted === next.interrupted &&
+    current.totalUnits === next.totalUnits
+  );
+}
+
 interface FileToolInputPreviewState {
   lastPublishedAt: number | null;
   pendingAppend: string;
@@ -461,6 +479,9 @@ export class ProductProjection {
   // snapshot 是权威状态；该 Set 只是 TurnComplete 缺终态兜底的派生索引，避免每轮扫描全表。
   private openForegroundToolCallIds = new Set<string>();
   private fileToolInputPreviewByCallId = new Map<string, FileToolInputPreviewState>();
+  // 蜂群 task_result 去重账本：`${roundId}:${taskId}` 已计数 = 同一 worker 的重复
+  // journal 不再推进计数。冷恢复在空候选上重放同一事件流，会重建出同一份账本。
+  private countedSwarmTaskKeys = new Set<string>();
   private subagentRowIdByAgentId = new Map<string, number>();
   private hookRowIdByInvocationId = new Map<string, number>();
   // resume SessionStart 没有 turnId；先保留在 CLI projection，下一条真实 user-intent
@@ -1234,6 +1255,7 @@ export class ProductProjection {
         { ...state },
       ]),
     );
+    clone.countedSwarmTaskKeys = new Set(this.countedSwarmTaskKeys);
     clone.subagentRowIdByAgentId = new Map(this.subagentRowIdByAgentId);
     clone.hookRowIdByInvocationId = new Map(this.hookRowIdByInvocationId);
     clone.pendingSessionHookInvocations = new Map(
@@ -1299,6 +1321,7 @@ export class ProductProjection {
     this.latestListAppsSnapshot = candidate.latestListAppsSnapshot;
     this.openForegroundToolCallIds = candidate.openForegroundToolCallIds;
     this.fileToolInputPreviewByCallId = candidate.fileToolInputPreviewByCallId;
+    this.countedSwarmTaskKeys = candidate.countedSwarmTaskKeys;
     this.subagentRowIdByAgentId = candidate.subagentRowIdByAgentId;
     this.hookRowIdByInvocationId = candidate.hookRowIdByInvocationId;
     this.pendingSessionHookInvocations = candidate.pendingSessionHookInvocations;
@@ -1671,6 +1694,8 @@ export class ProductProjection {
         return this.onBackgroundTaskLifecycle(event);
       case SessionEventType.DynamicWorkflowRunProgress:
         return this.onDynamicWorkflowRunProgress(event);
+      case SessionEventType.SwarmRoundJournal:
+        return this.onSwarmRoundJournal(event);
       case SessionEventType.SubagentSpawned:
         return this.onSubagentSpawned(event);
       case SessionEventType.SubagentMessage:
@@ -1731,6 +1756,30 @@ export class ProductProjection {
     // 冷恢复的旧提示不是当前授权事实，等新 gate 重读后再显示。
     if (this.snapshot.workspaceMcpAdmission) {
       deltas.push({ op: "state.updated", patch: { workspaceMcpAdmission: null } });
+    }
+    // 新 Runtime epoch 不会接管旧进程的在途蜂群：残留读数必须按中断收尾，
+    // 否则 UI 会把已经随旧进程死掉的回合显示成仍在并行执行。
+    const swarmActivity = this.snapshot.swarmActivity;
+    if (swarmActivity !== undefined) {
+      // round_started 已把 canStop 置 true，但若进程在 decomposed/round_completed
+      // 之前死掉，activeUnits 仍是 0。resume 是新的 Runtime epoch 边界：只要蜂群
+      // 读数在场且控制位仍可停止，就是旧轮留下的残留控制位。
+      const staleSwarmControl = this.snapshot.control.canStop;
+      const roundStartedOnly =
+        swarmActivity.totalUnits === 0 && swarmActivity.activeUnits === 0 && staleSwarmControl;
+      const interrupted = swarmActivity.activeUnits > 0 || roundStartedOnly;
+      if (interrupted || staleSwarmControl) {
+        deltas.push({
+          op: "state.updated",
+          patch: {
+            ...(staleSwarmControl ? this.controlPatch({ canStop: false }) : {}),
+            swarmActivity: {
+              ...swarmActivity,
+              ...(interrupted ? { activeUnits: 0, interrupted: true } : {}),
+            },
+          },
+        });
+      }
     }
     return deltas;
   }
@@ -4924,6 +4973,130 @@ export class ProductProjection {
     // `applyAll(prior, diff(prior, next))` 与 next **逐字节**一致是被 property 测试钉住的契约，
     // 所以 applyEventInternal 把这串 delta 应用回去之后，this.snapshot.workflowRuns 仍是 next。
     return diffWorkflowRunsState(prior, workflowRuns);
+  }
+
+  // ── swarm 实时读数：SwarmRoundJournal → swarmActivity 状态键 ──
+  // journal 是轮级 append-only 事实（round_started/decomposed/task_result/round_completed）。
+  // 投影不依赖 v3 mapper，live 与冷恢复 replay 共用本分支——恢复后的计数必然与在线一致。
+  // 只发布读数与停止控制位，不伪造 turn phase：蜂群跑在既有 goal 续跑轮内。
+  private onSwarmRoundJournal(event: SessionEvent): ConversationDelta[] {
+    // round_completed 的错误明细按可选事实读取：缺席 = 正常收尾，存在 = 本轮以中断收尾，
+    // UI 据此显示「已中断」而不是「仍有 active」。
+    // 事件体可能来自旧日志或损坏 store：先校验对象与 phase，null/未知 phase 的坏事件
+    // 不得让投影抛 TypeError 打断整条 v4 投影/hydration。
+    const rawPayload = event.payload as unknown;
+    if (rawPayload === null || typeof rawPayload !== "object" || Array.isArray(rawPayload)) {
+      return [];
+    }
+    const rawField = rawPayload as { phase?: unknown; roundId?: unknown };
+    if (typeof rawField.phase !== "string") return [];
+    if (typeof rawField.roundId !== "string" || rawField.roundId.length === 0) return [];
+    const payload = rawPayload as SwarmRoundJournalPayload & { error?: unknown };
+    const roundId = rawField.roundId;
+    const current = this.snapshot.swarmActivity;
+    // 同一 roundId 才继承已有计数；缺 round_started 的恢复片段从零基线继续累计。
+    const base: SwarmActivityState =
+      current?.roundId === roundId
+        ? current
+        : { roundId, activeUnits: 0, completedUnits: 0, failedUnits: 0, totalUnits: 0 };
+
+    switch (payload.phase) {
+      case "round_started": {
+        const swarmActivity: SwarmActivityState = {
+          roundId,
+          activeUnits: 0,
+          completedUnits: 0,
+          failedUnits: 0,
+          totalUnits: 0,
+        };
+        const control = {
+          canStop: true,
+          stopState: "stoppable" as const,
+          stopTargetKind: "assistant" as const,
+        };
+        const controlChanged =
+          this.snapshot.control.canStop !== control.canStop ||
+          this.snapshot.control.stopState !== control.stopState ||
+          this.snapshot.control.stopTargetKind !== control.stopTargetKind;
+        // 同一条 journal 重放时读数与控制位都没变：不产 delta，seq/revision 不抬。
+        if (!controlChanged && sameSwarmActivity(current, swarmActivity)) return [];
+        return [
+          {
+            op: "state.updated",
+            patch: { ...this.controlPatch(control), swarmActivity },
+          },
+        ];
+      }
+      case "decomposed": {
+        const totalUnits = payload.taskIds?.length ?? 0;
+        const swarmActivity: SwarmActivityState = {
+          roundId,
+          activeUnits: totalUnits,
+          completedUnits: 0,
+          failedUnits: 0,
+          totalUnits,
+        };
+        if (sameSwarmActivity(current, swarmActivity)) return [];
+        return [{ op: "state.updated", patch: { swarmActivity } }];
+      }
+      case "task_result": {
+        const result = payload.result;
+        if (
+          result === undefined ||
+          result === null ||
+          typeof result !== "object" ||
+          typeof result.taskId !== "string" ||
+          result.taskId.length === 0
+        ) {
+          return [];
+        }
+        const key = `${roundId}:${result.taskId}`;
+        // 同一 worker 的 task_result 只推进一次计数；重复 journal 原样忽略。
+        if (this.countedSwarmTaskKeys.has(key)) return [];
+        this.countedSwarmTaskKeys.add(key);
+        const done = result.status === "done";
+        const swarmActivity: SwarmActivityState = {
+          ...base,
+          activeUnits: Math.max(0, base.activeUnits - 1),
+          completedUnits: base.completedUnits + (done ? 1 : 0),
+          failedUnits: (base.failedUnits ?? 0) + (done ? 0 : 1),
+        };
+        if (sameSwarmActivity(current, swarmActivity)) return [];
+        return [{ op: "state.updated", patch: { swarmActivity } }];
+      }
+      case "round_completed": {
+        const completedUnits = payload.completedTaskIds?.length ?? 0;
+        const failedUnits = payload.failedTaskIds?.length ?? 0;
+        const swarmActivity: SwarmActivityState = {
+          roundId,
+          activeUnits: 0,
+          completedUnits,
+          failedUnits,
+          // 已发布的分解总数不得被终态汇总倒推变小；两者取大保持计数单调。
+          totalUnits: Math.max(base.totalUnits, completedUnits + failedUnits),
+          ...(payload.error ? { interrupted: true } : {}),
+        };
+        const control = {
+          canStop: false,
+          stopState: "idle" as const,
+          stopTargetKind: "unknown" as const,
+        };
+        const controlChanged =
+          this.snapshot.control.canStop !== control.canStop ||
+          this.snapshot.control.stopState !== control.stopState ||
+          this.snapshot.control.stopTargetKind !== control.stopTargetKind;
+        if (!controlChanged && sameSwarmActivity(current, swarmActivity)) return [];
+        return [
+          {
+            op: "state.updated",
+            patch: { ...this.controlPatch(control), swarmActivity },
+          },
+        ];
+      }
+      default:
+        // 未知 phase 是坏 journal 事实：不产出 delta，也不修改快照。
+        return [];
+    }
   }
 
   private removeQueueItems(ids: readonly string[]): ConversationDelta[] {

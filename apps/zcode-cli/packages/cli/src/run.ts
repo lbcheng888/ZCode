@@ -38,6 +38,7 @@ import {
   WORKFLOW_MODE_SCOPE_ERROR,
 } from "./workflow-mode.js";
 import { GOAL_LAYER_SCOPE_ERROR, normalizeGoalLayerOption } from "./goal-layer.js";
+import { SWARM_SCOPE_ERROR } from "./swarm.js";
 import type {
   CliPermissionMode,
   CliResumeRequest,
@@ -552,6 +553,20 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
   // 未传旗时不写 goalLayerEnabled:由 bootstrap 回落 features.goalLayer(默认 false)。
   const goalLayer = goalLayerOption;
 
+  // 蜂群灰度旗与 --goal-layer 同作用域：只有会建会话的入口（--prompt / --target / tui）接受。
+  const swarm = parsed.values.swarm;
+  if (
+    swarm !== undefined &&
+    !isForceMcsSupportedInvocation({
+      positionals: parsed.positionals,
+      prompt: parsed.values.prompt as string | undefined,
+      targetRequest,
+    })
+  ) {
+    ctx.stderr.write(`${SWARM_SCOPE_ERROR}\n`);
+    return 1;
+  }
+
   if (
     (forceMcs || parsed.values["toolsearch-mode"] !== undefined) &&
     !isForceMcsSupportedInvocation({
@@ -608,6 +623,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       presentationSurface,
       workflowMode,
       goalLayer,
+      swarm,
     );
   }
 
@@ -627,6 +643,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       presentationSurface,
       workflowMode,
       goalLayer,
+      swarm,
     );
   }
 
@@ -684,6 +701,7 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
         toolsearchMode,
         workflowMode,
         goalLayer,
+        swarm,
       );
     default:
       ctx.stderr.write(`Unknown command: ${commandName(parsed.positionals)}\n\n`);

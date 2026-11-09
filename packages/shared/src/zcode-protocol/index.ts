@@ -2005,6 +2005,9 @@ export const zcodeSessionCreateParamsSchema = z
     // 灰度 mode 随布尔同行下发（launch.md「On demand: activation」）：`onDemand` 让 CLI 把十个
     // 工具推迟到会话首次 `/workflow` 才注册；缺席 = 按布尔行事（alwaysOn），供旧 Host 配对。
     dynamicWorkflowMode: zcodeDynamicWorkflowModeSchema.optional(),
+    // 蜂群执行灰度旗：Host 裁决后显式下发，缺省不下发 = 关（fail-closed）；
+    // 用户配置文件没有同名键，只有会话级参数能开启。
+    swarm: z.boolean().optional(),
   })
   .strict();
 export type ZCodeSessionCreateParams = z.infer<typeof zcodeSessionCreateParamsSchema>;
@@ -2025,6 +2028,8 @@ export const zcodeSessionResumeParamsSchema = z
     // 与 create 同语义；resume 不带会导致冷恢复丢工作流工具簇。
     dynamicWorkflowEnabled: z.boolean().optional(),
     dynamicWorkflowMode: zcodeDynamicWorkflowModeSchema.optional(),
+    // 与 create 同语义；resume 不带会导致冷恢复丢蜂群灰度旗。
+    swarm: z.boolean().optional(),
   })
   .strict();
 export type ZCodeSessionResumeParams = z.infer<typeof zcodeSessionResumeParamsSchema>;

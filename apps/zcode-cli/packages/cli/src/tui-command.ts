@@ -28,6 +28,7 @@ export const runTuiCommand = async (
   toolsearchMode: ToolSearchMode = "off",
   workflowMode: DynamicWorkflowMode = DEFAULT_CLI_WORKFLOW_MODE,
   goalLayer?: CliGoalLayerMode,
+  swarm?: boolean,
 ): Promise<number> => {
   try {
     const modeState = createCliModeState(mode);
@@ -55,6 +56,7 @@ export const runTuiCommand = async (
       options.browserExecutable,
       workflowMode,
       goalLayer,
+      swarm,
     );
     // 缺陷根因（关停竞态，与 prompt-command 同型）：这里原样透传 deps.shutdownCleanupTimeoutMs
     // （缺省 undefined）时，shutdown.ts 落到自己的 2s 缺省，而 promptHandler.close 内部按

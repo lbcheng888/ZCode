@@ -4,6 +4,7 @@ import {
   FileText,
   ListTodo,
   LoaderIcon,
+  Network,
   Pause,
   Play,
   Target,
@@ -30,7 +31,24 @@ import type { OpenPlanDetailSideTabRequest } from "@/lib/workspaceSidePane.js";
 import { getStatusPanelTodoFocusWindow } from "../statusPanelTodoWindow.js";
 import { useNowTicker } from "@/components/workflow-graph/use-now-ticker.js";
 
-type ChipId = "goal" | "plans" | "bash" | "agents" | "progress";
+type ChipId = "goal" | "plans" | "bash" | "agents" | "swarm" | "progress";
+
+/**
+ * 蜂群活动快照：宿主把 SwarmOrchestrator 的 work unit 状态投影成计数。
+ * 进行中发布实时计数；中断轮保留 interrupted 读数供提示，正常收尾由宿主撤键。
+ */
+export interface ComposerSwarmActivity {
+  /** 运行中的工作单元数。 */
+  activeUnits: number;
+  /** 已完成的工作单元数。 */
+  completedUnits: number;
+  /** 工作单元总数。 */
+  totalUnits: number;
+  /** 失败/取消的工作单元数；缺席 = 旧发送端未投影。 */
+  failedUnits?: number;
+  /** 本轮已按中断收尾（运行时重启或错误终态）；缺席 = 未中断。 */
+  interrupted?: boolean;
+}
 
 const GOAL_STATUS_MESSAGE_IDS: Record<GoalState["status"], string> = {
   active: "chat.composerChips.goalStatus.active",
@@ -54,17 +72,19 @@ function formatElapsed(seconds: number): string {
 
 /**
  * composer 上方的状态 chip 行（对齐 Kimi Code 桌面版的信息层级）：
- * 目标 / 计划 / 后台 Bash / 后台 Agent / 当前进度。目标由 chip 行上方的完整卡片承载
+ * 目标 / 计划 / 后台 Bash / 后台 Agent / 蜂群活动 / 当前进度。目标由 chip 行上方的完整卡片承载
  * （标题 + 状态 + 暂停/继续/取消 + objective + 预算行），关闭后回落到 goal chip；
  * 其余每颗 chip 只带一行摘要，点开在**同一位置**就地展开明细（限高滚动）。计划面板里的
  * 每条计划行是「跳到计划详情侧 tab」的入口（与状态面板同一个 buildSessionPlanOpenRequest），
- * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。
+ * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。蜂群活动是纯指示器，
+ * 只展示活跃/完成/失败计数与中断状态，没有可展开的明细。
  *
  * 计数语义与 kimi 一致：后台类 chip 的数字是「运行中」数量，为 0 时整颗隐藏。
  */
 export function ComposerStatusChips({
   model,
   isStreaming = false,
+  swarmActivity,
   defaultOpenChip = null,
   onCancelGoal,
   onPauseGoal,
@@ -77,6 +97,11 @@ export function ComposerStatusChips({
   model: ConversationStatusPanelModel;
   /** 会话运行期在进度 chip 上给一个转圈，替代旧待办条的渐变动画。 */
   isStreaming?: boolean;
+  /**
+   * 蜂群活动快照；缺省（未开 swarm / 旧宿主）或没有可展示的计数时整颗指示器不渲染。
+   * 中断收尾（interrupted=true）即使 active=0 也保留读数，让用户看到这轮为何停下。
+   */
+  swarmActivity?: ComposerSwarmActivity | null;
   /** 仅测试与快照:初始展开某颗 chip；目标卡片默认展开，不走该开关。 */
   defaultOpenChip?: ChipId | null;
   /** 取消目标：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
@@ -114,6 +139,7 @@ export function ComposerStatusChips({
     model,
     progress,
     isStreaming,
+    swarmActivity,
     intl,
     parentSessionId,
     onOpenPlanDetail,
@@ -121,6 +147,9 @@ export function ComposerStatusChips({
   if (chips.length === 0) {
     return null;
   }
+  // 底边距由组件条件决定：有蜂群 chip 时用负边距紧贴 composer，否则保持原有的 mb-2。
+  // 不能让宿主再传 mb-2——tailwind-merge 会按后序覆盖，-mb-2 永远生效不了。
+  const hasSwarmChip = chips.some((chip) => chip.id === "swarm");
   const active = chips.find((chip) => chip.id === openChip && chip.panel) ?? null;
   const closeGoalCard = () => {
     if (!goal) return;
@@ -129,7 +158,7 @@ export function ComposerStatusChips({
   };
 
   return (
-    <div className={cn("flex flex-col gap-2", className)}>
+    <div className={cn("flex flex-col gap-2", hasSwarmChip ? "-mb-2" : "mb-2", className)}>
       {/* 展开面板与 chip 行同列、在行上方：用户视线不需要移动，composer 也不被顶走。 */}
       {goal && goalCardOpen ? (
         <GoalCard
@@ -156,6 +185,27 @@ export function ComposerStatusChips({
         {chips.map((chip) => {
           // 目标 chip 不开第二个明细面：点它只在「展开卡片 ⇄ 收起卡片」间切换。
           const expanded = chip.id === "goal" ? goalCardOpen : openChip === chip.id;
+          const content = (
+            <>
+              {chip.icon}
+              <span className="font-medium">{chip.label}</span>
+              {chip.trailing}
+            </>
+          );
+          const chipClassName = cn(
+            "inline-flex shrink-0 items-center gap-2 rounded-lg border border-card-border bg-card px-3 py-1.5 text-ui-base text-foreground-subtle",
+            !chip.static &&
+              "transition-colors hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused",
+            !chip.static && expanded && "bg-hover/30 text-foreground",
+          );
+          // 纯指示器没有明细面：不渲染成按钮，避免点开一个空面板。
+          if (chip.static) {
+            return (
+              <span key={chip.id} data-testid={chip.testId} className={chipClassName}>
+                {content}
+              </span>
+            );
+          }
           return (
             <button
               key={chip.id}
@@ -174,14 +224,9 @@ export function ComposerStatusChips({
                 }
                 setOpenChip(expanded ? null : chip.id);
               }}
-              className={cn(
-                "inline-flex shrink-0 items-center gap-2 rounded-lg border border-card-border bg-card px-3 py-1.5 text-ui-base text-foreground-subtle transition-colors hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused",
-                expanded && "bg-hover/30 text-foreground",
-              )}
+              className={chipClassName}
             >
-              {chip.icon}
-              <span className="font-medium">{chip.label}</span>
-              {chip.trailing}
+              {content}
             </button>
           );
         })}
@@ -528,6 +573,8 @@ interface Chip {
   trailing?: React.ReactNode;
   /** 目标 chip 不开内联面板：明细由上方目标卡片承载，避免同一目标两个明细面。 */
   panel?: React.ReactNode;
+  /** 纯指示器：没有可展开明细面，按 span 渲染而不是按钮。 */
+  static?: boolean;
   testId?: string;
 }
 
@@ -535,6 +582,7 @@ function buildChips({
   model,
   progress,
   isStreaming,
+  swarmActivity,
   intl,
   parentSessionId,
   onOpenPlanDetail,
@@ -542,6 +590,7 @@ function buildChips({
   model: ConversationStatusPanelModel;
   progress: ProgressSummary | null;
   isStreaming: boolean;
+  swarmActivity: ComposerSwarmActivity | null | undefined;
   intl: ReturnType<typeof useZCodeIntl>["intl"];
   parentSessionId?: string;
   onOpenPlanDetail?: (request: OpenPlanDetailSideTabRequest) => void;
@@ -658,6 +707,11 @@ function buildChips({
     });
   }
 
+  const swarmChip = buildSwarmChip(swarmActivity, intl);
+  if (swarmChip) {
+    chips.push(swarmChip);
+  }
+
   if (progress) {
     chips.push({
       id: "progress",
@@ -676,6 +730,65 @@ function buildChips({
   }
 
   return chips;
+}
+
+/**
+ * 蜂群活动指示器：进行中显示 active 计数与完成进度；中断收尾后保留一颗只读指示器，
+ * 让用户看到「这轮因运行时重启/错误而中断」，而不是让读数静默消失。
+ * totalUnits=0 时没有可展示的单元，整颗隐藏（旧发送端也不会带这个键）。
+ */
+function buildSwarmChip(
+  activity: ComposerSwarmActivity | null | undefined,
+  intl: ReturnType<typeof useZCodeIntl>["intl"],
+): Chip | null {
+  if (!activity || activity.totalUnits <= 0) return null;
+  const interrupted = activity.interrupted === true;
+  if (activity.activeUnits <= 0 && !interrupted) return null;
+  const failedUnits = activity.failedUnits ?? 0;
+  const progress = interrupted
+    ? intl.formatMessage(
+        { id: "chat.composerChips.swarmInterruptedProgress" },
+        { completed: activity.completedUnits, total: activity.totalUnits },
+      )
+    : intl.formatMessage(
+        { id: "chat.composerChips.swarmProgress" },
+        {
+          active: activity.activeUnits,
+          completed: activity.completedUnits,
+          total: activity.totalUnits,
+        },
+      );
+  return {
+    id: "swarm",
+    static: true,
+    label: intl.formatMessage({
+      id: interrupted ? "chat.composerChips.swarmInterrupted" : "chat.composerChips.swarm",
+    }),
+    icon: <Network className="size-4 shrink-0" />,
+    trailing: (
+      <span
+        data-swarm-active={activity.activeUnits}
+        data-swarm-progress={`${activity.completedUnits}/${activity.totalUnits}`}
+        data-swarm-interrupted={interrupted ? "true" : undefined}
+        data-swarm-failed={failedUnits > 0 ? failedUnits : undefined}
+        className="inline-flex items-center gap-1.5 font-mono text-foreground-subtle"
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            interrupted ? "bg-[var(--color-warning)]" : "bg-[var(--color-success)]",
+          )}
+        />
+        {progress}
+        {failedUnits > 0 ? (
+          <span className="text-[var(--color-danger)]">
+            {intl.formatMessage({ id: "chat.composerChips.swarmFailed" }, { failed: failedUnits })}
+          </span>
+        ) : null}
+      </span>
+    ),
+  };
 }
 
 interface ProgressSummary {

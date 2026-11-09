@@ -20,6 +20,7 @@ import type {
   McpPort,
   Model,
   ModelSelection,
+  SessionEvent,
   SkillContent,
   SkillLoadOutcome,
   SkillOperationOptions,
@@ -42,6 +43,7 @@ import {
 } from "../../subagent/mcp-config.js";
 import { mirrorSubagentToolEvent } from "../../subagent/tool-event-mirror.js";
 import { isBuiltInExploreAgentProfile } from "../../subagent/profile.js";
+import { aggregateModelUsageFromEvents } from "../../subagent/runner.js";
 import {
   SPEC_RESTRICTED_PROFILE_NAME,
   buildSubagentChildDisallowRules,
@@ -582,11 +584,63 @@ export function createDefaultSubagentPort(
           );
           if (cancelled || !childRuntime.hasResidencyBlockingWork()) await release;
         }
+      } catch (error) {
+        // 失败请求的 provider usage 只存在于已落库的 ModelNetworkStatus；
+        // 挂到原 error 上，让父 Agent 的失败结果仍能看到真实 token 消耗。
+        await attachSubagentFailedUsage(this, request.sessionId, error);
+        throw error;
       } finally {
         childBinding?.release();
       }
     },
   });
+}
+
+/**
+ * 把已持久化的失败请求用量挂到原 error（不覆盖 error 自带字段，不伪造数据）。
+ * 事件读取失败只降级为告警；错误本身仍原样上浮。
+ */
+async function attachSubagentFailedUsage(
+  runtime: AgentRuntimeInternal,
+  sessionId: ExploreSubagentRuntimeRequest["sessionId"],
+  error: unknown,
+): Promise<void> {
+  if (typeof error !== "object" || error === null) return;
+
+  let events: SessionEvent[];
+  try {
+    events = await runtime.eventStore.getEvents(sessionId);
+  } catch (lookupError) {
+    runtime.logger?.warn("Subagent failed usage lookup failed", {
+      event: "subagent.failed_usage.lookup_failed",
+      childSessionId: sessionId,
+      error: lookupError instanceof Error ? lookupError.message : String(lookupError),
+    });
+    return;
+  }
+
+  const usage = aggregateModelUsageFromEvents(events);
+  if (usage === undefined) return;
+  // 子 runtime 若已带出自己叠加过的用量事实，保持原字段。
+  if (!Object.prototype.hasOwnProperty.call(error, "usage")) {
+    Object.defineProperty(error, "usage", {
+      configurable: true,
+      enumerable: false,
+      value: usage,
+      writable: true,
+    });
+  }
+  if (
+    usage.totalTokens !== undefined &&
+    !Object.prototype.hasOwnProperty.call(error, "totalTokens")
+  ) {
+    Object.defineProperty(error, "totalTokens", {
+      configurable: true,
+      enumerable: false,
+      value: usage.totalTokens,
+      writable: true,
+    });
+  }
 }
 
 function resolveSubagentEmbeddedSearchEnabled(): boolean {

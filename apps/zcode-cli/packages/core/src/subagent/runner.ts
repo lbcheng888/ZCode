@@ -27,6 +27,7 @@ import {
   type ModelUsage,
   type SessionEvent,
   type SessionId,
+  type SubagentFailedUsage,
   type SubagentLaunchOptions,
   type SubagentLaunchRequest,
   type SubagentPort,
@@ -1317,7 +1318,7 @@ async function runAgentToCompletion(
   // persist 后调用。回落只保证兼容，不改变生产链路的 persist-before-spawn 顺序。
   await notifySessionReady();
 
-  const usage = aggregateModelUsage(childResult.events);
+  const usage = aggregateModelUsageFromEvents(childResult.events);
   const totalTokens = usage?.totalTokens;
   const totalToolUseCount = resolveSubagentToolUseCount(childResult.events);
   const totalDurationMs = Date.now() - lifecycle.startedAt;
@@ -2188,7 +2189,7 @@ async function writeAgentMetadataFile(
   );
 }
 
-function aggregateModelUsage(events: SessionEvent[]): ModelUsage | undefined {
+export function aggregateModelUsageFromEvents(events: SessionEvent[]): ModelUsage | undefined {
   let usage: ModelUsage | undefined;
 
   for (const event of events) {
@@ -2214,6 +2215,34 @@ function aggregateModelUsage(events: SessionEvent[]): ModelUsage | undefined {
   }
 
   return usage;
+}
+
+/**
+ * 沿 error 的 cause 链读取子代理失败时挂载的用量事实。
+ * runner 会把非 CoreError 包装成新的错误，原始挂载只能经 cause 链取回；
+ * 链上没有可用数据时返回空对象，不补造任何值。
+ */
+export function extractSubagentFailedUsage(error: unknown): SubagentFailedUsage {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const record = current as { cause?: unknown; totalTokens?: unknown; usage?: unknown };
+    const usageCandidate = isRecord(record.usage) ? (record.usage as ModelUsage) : undefined;
+    const usage = usageCandidate && hasModelUsage(usageCandidate) ? usageCandidate : undefined;
+    const totalTokens =
+      typeof record.totalTokens === "number" && Number.isFinite(record.totalTokens)
+        ? record.totalTokens
+        : undefined;
+    if (usage !== undefined || totalTokens !== undefined) {
+      return {
+        ...(usage === undefined ? {} : { usage }),
+        ...(totalTokens === undefined ? {} : { totalTokens }),
+      };
+    }
+    current = record.cause;
+  }
+  return {};
 }
 
 function resolveSubagentToolUseCount(events: SessionEvent[]): number {

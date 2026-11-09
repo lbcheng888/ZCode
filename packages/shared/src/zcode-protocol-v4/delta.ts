@@ -27,6 +27,7 @@ import {
   sessionModelTransitionSchema,
   sessionUsageStateSchema,
   subagentProjectionStateSchema,
+  swarmActivityStateSchema,
   workspaceHookAdmissionStateSchema,
   workspaceMcpAdmissionStateSchema,
 } from "./snapshot.js";
@@ -57,6 +58,9 @@ export const statePatchSchema = z.object({
   pendingCommands: z.array(commandStateSummarySchema).optional(),
   backgroundWorks: z.array(backgroundWorkSummarySchema).optional(),
   subagents: subagentProjectionStateSchema.optional(),
+  // 蜂群活动读数：键级整体替换，缺席 = 不碰该键。与快照同名同形，live delta 与
+  // 冷恢复收尾的全量 patch 都必须保留该键，否则客户端解码时会静默剥掉读数。
+  swarmActivity: swarmActivityStateSchema.optional(),
   // workflow run 的实时运行态。容器本身不 strict，所以旧桌面收到这个新键只是**剥离一个键**、
   // 保住 patch 其余全部键——这正是它不需要任何版本偏斜防御的原因。
   workflowRuns: workflowRunsStateSchema.optional(),

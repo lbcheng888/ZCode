@@ -3630,6 +3630,9 @@ async function createRecord(
       modelSelection: "model" in params ? toRuntimeModelSelection(initialModel) : undefined,
       parentSessionId,
       taskType,
+      // 蜂群执行灰度旗：只有 create/resume 参数显式携带时才写入；缺席不补值，
+      // 装配层按「会话级显式值才开启」处理（用户配置无同名键，fail-closed）。
+      swarm: "swarm" in params ? params.swarm : undefined,
       // 动态工作流灰度门（docs/dynamic-workflow/launch.md「Gray release」「On demand: activation」）：
       // 与 offPeakPort 同一套读法——本次 create/resume 参数优先，缺席时读 Host 同步到进程的
       // workspace 级结论。取值与「必须显式布尔」的理由收在 resolveDynamicWorkflowRuntimeGate。

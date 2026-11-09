@@ -4,7 +4,7 @@
 
 import type { AgentProfile } from "@zcode/shared";
 import type { AgentBackgroundedOutput, AgentOutput } from "../tools/agent.js";
-import type { Model, ModelSelection } from "../model/index.js";
+import type { Model, ModelSelection, ModelUsage } from "../model/index.js";
 import type { ModelRequestDependencies } from "../model/invocation-context.js";
 import type { ExecutionPort } from "./execution.port.js";
 import type { SessionId, ToolCallId, TurnId } from "./shared.js";
@@ -63,6 +63,15 @@ export type SubagentStartOptions = SubagentRunOptions;
 
 export interface SubagentWaitOptions {
   signal?: AbortSignal;
+}
+
+/**
+ * 失败子代理已持久化的模型用量事实：失败请求的 provider usage 与汇总 token。
+ * 由宿主从原 error（或其 cause 链）读取，用于失败卡片展示真实消耗。
+ */
+export interface SubagentFailedUsage {
+  usage?: ModelUsage;
+  totalTokens?: number;
 }
 
 export interface SubagentStopOptions {

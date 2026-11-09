@@ -153,6 +153,12 @@ export interface AgentRuntimeConfig {
   permissionTimeoutMs?: number;
   compact?: AutoCompactPolicyConfig;
   targetCompletionVerification?: { enabled?: boolean };
+  /**
+   * 蜂群执行灰度旗（缺席即关闭）：开启时 goal 续跑回合先由 SwarmOrchestrator 分解并
+   * 并行执行子任务。只在 goalLayerEnabled=true 时生效——蜂群回合跑在 goal 续跑的
+   * 三维预算/回合闸门内，关掉 goal 层就没有闸门可依。
+   */
+  swarm?: boolean;
   midConversationSystem?: {
     mode?: "auto" | "force";
   };

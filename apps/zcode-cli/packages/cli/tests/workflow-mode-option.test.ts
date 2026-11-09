@@ -8,6 +8,7 @@ import type { CommandCenterApp, CommandCenterDeps } from "../src/command-center.
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
 import { WORKFLOW_DISABLED_NOTICE, WORKFLOW_MODE_SCOPE_ERROR } from "../src/workflow-mode.js";
 import { GOAL_LAYER_SCOPE_ERROR } from "../src/goal-layer.js";
+import { SWARM_SCOPE_ERROR } from "../src/swarm.js";
 
 /**
  * 独立 CLI 的 `--workflow-mode`（docs/dynamic-workflow/launch.md「The standalone CLI:
@@ -52,18 +53,27 @@ type RuntimeConfigSeen = {
   goalLayerEnabled?: boolean;
 };
 
-/** 记录每次建 app 时的两个工作流字段；app 本身只够跑通一次 prompt / TUI 启动。 */
-function createRecordingDeps(): { deps: RunDependencies; seen: RuntimeConfigSeen[] } {
+/**
+ * 记录每次建 app 时的两个工作流字段；app 本身只够跑通一次 prompt / TUI 启动。
+ * swarm 单独收集：它只认会话级显式值，未传时必须保持「不写键」而不是 false。
+ */
+function createRecordingDeps(): {
+  deps: RunDependencies;
+  seen: RuntimeConfigSeen[];
+  swarmSeen: (boolean | undefined)[];
+} {
   const seen: RuntimeConfigSeen[] = [];
+  const swarmSeen: (boolean | undefined)[] = [];
   const deps: RunDependencies = {
     createModelAdapter: () => ({}) as never,
     createZCodeApp: (options) => {
-      const config = (options?.runtimeConfig ?? {}) as RuntimeConfigSeen;
+      const config = (options?.runtimeConfig ?? {}) as RuntimeConfigSeen & { swarm?: boolean };
       seen.push({
         dynamicWorkflowEnabled: config.dynamicWorkflowEnabled,
         dynamicWorkflowToolsOnDemand: config.dynamicWorkflowToolsOnDemand,
         goalLayerEnabled: config.goalLayerEnabled,
       });
+      swarmSeen.push(config.swarm);
       return {
         getLocale: () => "en-US",
         getModel: () => "openai/gpt-test",
@@ -86,7 +96,7 @@ function createRecordingDeps(): { deps: RunDependencies; seen: RuntimeConfigSeen
     skipUserConfig: true,
     listCustomCommands: async () => ({ commands: [], diagnostics: [] }) as never,
   };
-  return { deps, seen };
+  return { deps, seen, swarmSeen };
 }
 
 // 未传 --goal-layer 时不写该字段(由 features.goalLayer 兜底,默认 true)。
@@ -246,6 +256,47 @@ test("--goal-layer is rejected outside session entrypoints", async () => {
   assert.equal(await run(ctx, deps), 1);
   assert.equal(ctx.stderr.output(), `${GOAL_LAYER_SCOPE_ERROR}\n`);
   assert.deepEqual(seen, []);
+});
+
+// ── swarm 灰度旗（只认会话级显式值；缺席不写键）─────────────────────────────
+
+test("headless --prompt with --swarm writes runtimeConfig.swarm true", async () => {
+  const { deps, swarmSeen } = createRecordingDeps();
+  const ctx = createContext(["--prompt", "hello", "--swarm"]);
+  assert.equal(await run(ctx, deps), 0);
+  assert.ok(swarmSeen.length > 0, "prompt creates the app with the session config");
+  for (const value of swarmSeen) assert.equal(value, true);
+});
+
+test("headless --prompt without --swarm does not write the key", async () => {
+  const { deps, swarmSeen } = createRecordingDeps();
+  const ctx = createContext(["--prompt", "hello"]);
+  assert.equal(await run(ctx, deps), 0);
+  assert.ok(swarmSeen.length > 0);
+  for (const value of swarmSeen) assert.equal(value, undefined);
+});
+
+test("TUI with --swarm carries the flag to every created app", async () => {
+  const { deps, swarmSeen } = createRecordingDeps();
+  const ctx = createContext(["tui", "--swarm"]);
+  const exitCode = await run(ctx, {
+    ...deps,
+    runTui: async (options) => {
+      await options.loadStartupOptions?.();
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.ok(swarmSeen.length > 0, "the TUI creates its first app at startup");
+  for (const value of swarmSeen) assert.equal(value, true);
+});
+
+test("--swarm is rejected outside session entrypoints", async () => {
+  const { deps, swarmSeen } = createRecordingDeps();
+  const ctx = createContext(["app-server", "--swarm"]);
+  assert.equal(await run(ctx, deps), 1);
+  assert.equal(ctx.stderr.output(), `${SWARM_SCOPE_ERROR}\n`);
+  assert.deepEqual(swarmSeen, []);
 });
 
 // ── DWG-15：作用域 ──────────────────────────────────────────────────────────

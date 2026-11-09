@@ -6002,6 +6002,7 @@ export function SessionPane({
         <ComposerStatusChips
           model={statusPanelModel}
           isStreaming={isRunning}
+          swarmActivity={snapshot?.swarmActivity}
           onCancelGoal={
             !readOnly && !selectionSideChat && snapshot?.availability.clearGoal?.allowed === true
               ? handleRequestClearGoal
@@ -6028,7 +6029,6 @@ export function SessionPane({
           }
           parentSessionId={sessionId ?? undefined}
           onOpenPlanDetail={onOpenPlanDetail ? handleOpenPlanDetail : undefined}
-          className="mb-2"
         />
       ) : null}
       {!readOnly && !selectionSideChat ? (
