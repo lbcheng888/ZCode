@@ -8,7 +8,9 @@ export const superAgentDaemonModule = {
     "shared",
     "super-agent-adjudication",
     "super-agent-intake",
+    "super-agent-storage",
     "super-agent-trigger",
+    "super-agent-watchdog",
     "zcode-cli",
     // headless 裁决会话复用进程 Provider Registry 的路径契约（Built-in/Personal
     // Config env 键与文件布局）；不复制字符串。

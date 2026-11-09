@@ -10,8 +10,7 @@ import type {
   SubagentTaskSnapshot,
   TurnId,
 } from "@zcode/contracts";
-import { SwarmWorker } from "../src/runtime/swarm-worker.js";
-import type { SwarmTask } from "../src/runtime/swarm-orchestrator.js";
+import { SwarmWorker, type SwarmTask } from "../src/runtime/swarm/index.js";
 
 interface RunCall {
   request: SubagentRunRequest;

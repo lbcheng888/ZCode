@@ -42,7 +42,7 @@ import {
   type SwarmWorkspace,
   type SwarmWorkspaceFactory,
   type SwarmWorkspaceRequest,
-} from "../src/runtime/swarm-orchestrator.js";
+} from "../src/runtime/swarm/index.js";
 import { createRuntimeModel } from "../src/runtime/methods/runtime-model.js";
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
 import { createTestSessionEventStore } from "./test-event-store.js";

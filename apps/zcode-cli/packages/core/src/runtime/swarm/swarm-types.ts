@@ -18,7 +18,7 @@ import type {
   TurnId,
 } from "@zcode/contracts";
 
-import type { AgentRuntimeInternal } from "./internal.js";
+import type { AgentRuntimeInternal } from "../internal.js";
 
 /** 子任务生命周期状态。 */
 export type SwarmTaskStatus = "pending" | "running" | "done" | "failed" | "cancelled";

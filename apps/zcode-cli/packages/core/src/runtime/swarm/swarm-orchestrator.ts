@@ -40,7 +40,7 @@ import {
   createToolCallId,
 } from "@zcode/contracts";
 
-import { auxiliaryModelOptions } from "../model/auxiliary-model-options.js";
+import { auxiliaryModelOptions } from "../../model/auxiliary-model-options.js";
 import {
   SWARM_MIN_TASKS,
   createSwarmDecompositionResponseSchema,
@@ -97,10 +97,10 @@ import {
   createCoreError,
   getModelUsageTotalTokens,
   traceContextToLogContext,
-} from "./deps.js";
-import type { AgentRuntimeInternal } from "./internal.js";
-import { createRuntimeModel } from "./methods/runtime-model.js";
-import { recordModelUsageFact } from "./methods/usage-observability.js";
+} from "../deps.js";
+import type { AgentRuntimeInternal } from "../internal.js";
+import { createRuntimeModel } from "../methods/runtime-model.js";
+import { recordModelUsageFact } from "../methods/usage-observability.js";
 import { SwarmWorker } from "./swarm-worker.js";
 
 export * from "./swarm-types.js";

@@ -962,10 +962,11 @@ modules:
     roots:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/storage
     managed: true
-    requires: [ sqlite-migrations ]
+    requires: [ sqlite-migrations, super-agent-watchdog ]
     publicEntrypoints:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/storage/index.ts
       - apps/zcode-cli/packages/bootstrap/src/super-agent/storage/contract.ts
+      - apps/zcode-cli/packages/bootstrap/src/super-agent/storage/background-run-store.ts
     layers:
       app: .
     owner: conversation
@@ -986,7 +987,7 @@ modules:
     roots:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/trigger
     managed: true
-    requires: [ "shared" ]
+    requires: [ "shared", "zcode-cli" ]
     publicEntrypoints:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/trigger/index.ts
       - apps/zcode-cli/packages/bootstrap/src/super-agent/trigger/contract.ts
@@ -1046,10 +1047,11 @@ modules:
     roots:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/watchdog
     managed: true
-    requires: []
+    requires: [ "shared" ]
     publicEntrypoints:
       - apps/zcode-cli/packages/bootstrap/src/super-agent/watchdog/index.ts
       - apps/zcode-cli/packages/bootstrap/src/super-agent/watchdog/contract.ts
+      - apps/zcode-cli/packages/bootstrap/src/super-agent/watchdog/registry.ts
     layers:
       app: .
     owner: conversation
@@ -1074,7 +1076,9 @@ modules:
       - shared
       - super-agent-adjudication
       - super-agent-intake
+      - super-agent-storage
       - super-agent-trigger
+      - super-agent-watchdog
       - zcode-cli
       - provider-node
     publicEntrypoints:
@@ -1310,6 +1314,32 @@ modules:
     layers:
       adapters: .
     owner: desktop
+
+  # swarm-runtime：目标续跑回合内的并行蜂群执行器
+  - id: swarm-runtime
+    roots:
+      - apps/zcode-cli/packages/core/src/runtime/swarm
+    managed: true
+    requires:
+      - zcode-cli
+    publicEntrypoints:
+      - apps/zcode-cli/packages/core/src/runtime/swarm/index.ts
+      - apps/zcode-cli/packages/core/src/runtime/swarm/contract.ts
+    layers:
+      app: .
+    owner: conversation
+  # cli-swarm：独立 CLI 的 --swarm 灰度旗转换
+  - id: cli-swarm
+    roots:
+      - apps/zcode-cli/packages/cli/src/swarm
+    managed: true
+    requires: []
+    publicEntrypoints:
+      - apps/zcode-cli/packages/cli/src/swarm/index.ts
+      - apps/zcode-cli/packages/cli/src/swarm/contract.ts
+    layers:
+      app: .
+    owner: conversation
 
 global:
   # 临时时间戳（2026-09-10）：unmanaged-new-file 只约束此日期之后首次入库的文件。

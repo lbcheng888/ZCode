@@ -4,7 +4,7 @@
  */
 export const superAgentWatchdogModule = {
   id: "super-agent-watchdog",
-  requires: [],
+  requires: ["shared"],
   provides: ["super-agent-watchdog"],
   publicEntrypoints: ["index.ts", "contract.ts"],
 } as const;

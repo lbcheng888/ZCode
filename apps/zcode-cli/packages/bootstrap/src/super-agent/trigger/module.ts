@@ -4,7 +4,7 @@
  */
 export const superAgentTriggerModule = {
   id: "super-agent-trigger",
-  requires: ["shared"],
+  requires: ["shared", "zcode-cli"],
   provides: ["super-agent-trigger"],
   publicEntrypoints: ["index.ts", "contract.ts"],
 } as const;

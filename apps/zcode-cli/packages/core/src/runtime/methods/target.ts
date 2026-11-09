@@ -21,8 +21,8 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import {
   formatSwarmRoundEvidence,
   type SwarmRoundEvidence,
-} from "../swarm-orchestrator.js";
-import { runSwarmGoalContinuation } from "./target-swarm.js";
+} from "../swarm/index.js";
+import { runSwarmGoalContinuation } from "../swarm/index.js";
 import { createRuntimeCommandId } from "../command-queue.js";
 import type {
   TargetContinuationRuntimeCommand,

@@ -34,7 +34,7 @@ import {
   WORKFLOW_DISABLED_NOTICE,
 } from "./workflow-mode.js";
 import { resolveGoalLayerRuntimeConfig, type CliGoalLayerMode } from "./goal-layer.js";
-import { resolveSwarmRuntimeConfig } from "./swarm.js";
+import { resolveSwarmRuntimeConfig } from "./swarm/index.js";
 import type { DynamicWorkflowMode } from "@zcode/shared";
 import type { CommandCenterApp, SlashCommand } from "./command-center.js";
 import type {

@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   SwarmAggregator,
   SwarmRoundCancelledError,
-} from "../src/runtime/swarm-aggregator.js";
-import type { SwarmTaskResult } from "../src/runtime/swarm-orchestrator.js";
+  type SwarmTaskResult,
+} from "../src/runtime/swarm/index.js";
 
 function completed(taskId: string, text: string): SwarmTaskResult {
   return {

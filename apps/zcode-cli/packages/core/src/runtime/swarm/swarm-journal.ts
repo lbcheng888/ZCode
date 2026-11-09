@@ -14,8 +14,8 @@ import type {
 } from "@zcode/contracts";
 import { SessionEventType } from "@zcode/contracts";
 
-import { traceContextToLogContext } from "./deps.js";
-import type { AgentRuntimeInternal } from "./internal.js";
+import { traceContextToLogContext } from "../deps.js";
+import type { AgentRuntimeInternal } from "../internal.js";
 import { swarmTaskCompletedText, truncateSwarmWorkerOutput } from "./swarm-evidence.js";
 import { errorMessage } from "./swarm-results.js";
 import type {

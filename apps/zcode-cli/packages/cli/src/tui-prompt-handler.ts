@@ -49,7 +49,7 @@ import { createTuiModelAvailabilityChecker } from "./tui-login-state.js";
 import { withTuiMetadata } from "./tui-submit-metadata.js";
 import { DEFAULT_CLI_WORKFLOW_MODE, resolveWorkflowModeRuntimeConfig } from "./workflow-mode.js";
 import { resolveGoalLayerRuntimeConfig, type CliGoalLayerMode } from "./goal-layer.js";
-import { resolveSwarmRuntimeConfig } from "./swarm.js";
+import { resolveSwarmRuntimeConfig } from "./swarm/index.js";
 import type {
   CliModeState,
   CliPermissionMode,

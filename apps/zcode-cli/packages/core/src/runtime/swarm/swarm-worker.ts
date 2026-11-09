@@ -21,7 +21,7 @@ import type {
   SubagentRunRequest,
   SubagentTaskSnapshot,
 } from "@zcode/contracts";
-import { extractSubagentFailedUsage } from "../subagent/runner.js";
+import { extractSubagentFailedUsage } from "../../subagent/runner.js";
 import type {
   SwarmTask,
   SwarmTaskCancelledResult,

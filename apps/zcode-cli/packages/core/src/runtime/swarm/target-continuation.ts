@@ -16,13 +16,13 @@ import type { AgentRuntimeInternal } from "../internal.js";
 import type { TargetContinuationRuntimeCommandOptions } from "../command-queue.js";
 import {
   SwarmOrchestrator,
+  SwarmRoundCancelledError,
   SwarmRoundSupersededError,
   type SwarmRoundEvidence,
   type SwarmRoundUsage,
-} from "../swarm-orchestrator.js";
-import { SwarmRoundCancelledError } from "../swarm-aggregator.js";
+} from "./swarm-orchestrator.js";
 import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
-import { executeTargetBudgetOutcomeTurn, pauseActiveTargetWithReason } from "./target.js";
+import { executeTargetBudgetOutcomeTurn, pauseActiveTargetWithReason } from "../methods/target.js";
 
 export interface SwarmGoalContinuationInput {
   abortSignal?: AbortSignal;

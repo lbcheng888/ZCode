@@ -38,7 +38,7 @@ import {
   WORKFLOW_MODE_SCOPE_ERROR,
 } from "./workflow-mode.js";
 import { GOAL_LAYER_SCOPE_ERROR, normalizeGoalLayerOption } from "./goal-layer.js";
-import { SWARM_SCOPE_ERROR } from "./swarm.js";
+import { SWARM_SCOPE_ERROR } from "./swarm/index.js";
 import type {
   CliPermissionMode,
   CliResumeRequest,

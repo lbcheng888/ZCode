@@ -8,7 +8,7 @@ import type { CommandCenterApp, CommandCenterDeps } from "../src/command-center.
 import { createTuiSubmitPrompt } from "../src/tui-prompt-handler.js";
 import { WORKFLOW_DISABLED_NOTICE, WORKFLOW_MODE_SCOPE_ERROR } from "../src/workflow-mode.js";
 import { GOAL_LAYER_SCOPE_ERROR } from "../src/goal-layer.js";
-import { SWARM_SCOPE_ERROR } from "../src/swarm.js";
+import { SWARM_SCOPE_ERROR } from "../src/swarm/index.js";
 
 /**
  * 独立 CLI 的 `--workflow-mode`（docs/dynamic-workflow/launch.md「The standalone CLI:
