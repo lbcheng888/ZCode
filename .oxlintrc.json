@@ -40,6 +40,9 @@
         "**/apps/zcode-cli/packages/contracts/src/interfaces/session-store.port.ts",
         // model 契约继承上游存量 901 行；本次仅增加配置网络错误码，不为此拆分公共契约。
         "**/apps/zcode-cli/packages/contracts/src/model/index.ts",
+        // goal 完成闸门契约长期承载 verifier 协议解析、预算与失败收口；超 800 行只告警，不机械拆分。
+        "**/apps/zcode-cli/packages/contracts/src/tools/target.ts",
+        "src/tools/target.ts",
         // fork 选型回退只补一行隐藏提醒判定；不为行数机械拆分 fork 流程。
         "**/apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts",
         "**/apps/zcode-cli/packages/core/src/runtime/methods/steering.ts",
