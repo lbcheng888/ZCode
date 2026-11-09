@@ -1,6 +1,11 @@
+/* oxlint-disable eslint(max-lines) -- composer chip 行在同一文件收口目标/计划/蜂群等各 chip 的摘要与就地面板；逐 worker 面板只是蜂群 chip 的明细面，拆分会把同一 chip 的 label/panel 契约打散。 */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Ban,
   Bot,
+  Circle,
+  CircleCheck,
+  CircleX,
   FileText,
   ListTodo,
   LoaderIcon,
@@ -33,9 +38,33 @@ import { useNowTicker } from "@/components/workflow-graph/use-now-ticker.js";
 
 type ChipId = "goal" | "plans" | "bash" | "agents" | "swarm" | "progress";
 
+/** 单个 worker 的生命周期状态；与 SwarmTask/SwarmJournalTaskResult 的封闭集合一致。 */
+export type ComposerSwarmUnitStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+/**
+ * 逐 worker 读数：taskId 是行身份，description 是给用户看的短描述；
+ * error 只在 failed/cancelled 出现，承载子代理原始错误或取消原因。
+ * 实时活动字段由 Subagent* 事件归约而来，旧发送端/旧快照缺席。
+ */
+export interface ComposerSwarmActivityUnit {
+  taskId: string;
+  description: string;
+  status: ComposerSwarmUnitStatus;
+  error?: string;
+  /** 执行该 worker 的子代理身份；spawn 后出现。 */
+  agentId?: string;
+  /** 子代理 child session；spawn 后出现，用于下钻。 */
+  childSessionId?: string;
+  /** 旧宿主/旧快照可能携带；新投影不再写入，UI 不渲染（running 只展示 lastMessage）。 */
+  currentActivity?: string;
+  /** 最近一条子代理消息；宿主截断到 200 字符，终态行由宿主清空。 */
+  lastMessage?: string;
+}
+
 /**
  * 蜂群活动快照：宿主把 SwarmOrchestrator 的 work unit 状态投影成计数。
- * 进行中发布实时计数；中断轮保留 interrupted 读数供提示，正常收尾由宿主撤键。
+ * 进行中发布实时计数；中断轮保留 interrupted 读数供提示；round_completed 后
+ * 终态 units 保留供回看，直到下一轮 round_started 或会话结束才被覆盖。
  */
 export interface ComposerSwarmActivity {
   /** 运行中的工作单元数。 */
@@ -48,6 +77,8 @@ export interface ComposerSwarmActivity {
   failedUnits?: number;
   /** 本轮已按中断收尾（运行时重启或错误终态）；缺席 = 未中断。 */
   interrupted?: boolean;
+  /** 逐 worker 明细；缺席 = 旧发送端只投影计数，chip 保持纯指示器。 */
+  units?: readonly ComposerSwarmActivityUnit[];
 }
 
 const GOAL_STATUS_MESSAGE_IDS: Record<GoalState["status"], string> = {
@@ -76,8 +107,8 @@ function formatElapsed(seconds: number): string {
  * （标题 + 状态 + 暂停/继续/取消 + objective + 预算行），关闭后回落到 goal chip；
  * 其余每颗 chip 只带一行摘要，点开在**同一位置**就地展开明细（限高滚动）。计划面板里的
  * 每条计划行是「跳到计划详情侧 tab」的入口（与状态面板同一个 buildSessionPlanOpenRequest），
- * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。蜂群活动是纯指示器，
- * 只展示活跃/完成/失败计数与中断状态，没有可展开的明细。
+ * 由宿主注入 onOpenPlanDetail 后才可点；其余 chip 不新增第二个明细面。蜂群活动在有逐 worker
+ * 明细时就地展开 worker 清单（状态 + 截断描述），只有计数时保持纯指示器。
  *
  * 计数语义与 kimi 一致：后台类 chip 的数字是「运行中」数量，为 0 时整颗隐藏。
  */
@@ -92,6 +123,7 @@ export function ComposerStatusChips({
   onContinueFromPlanCard,
   parentSessionId,
   onOpenPlanDetail,
+  defaultGoalCardOpen = false,
   className,
 }: {
   model: ConversationStatusPanelModel;
@@ -102,8 +134,12 @@ export function ComposerStatusChips({
    * 中断收尾（interrupted=true）即使 active=0 也保留读数，让用户看到这轮为何停下。
    */
   swarmActivity?: ComposerSwarmActivity | null;
-  /** 仅测试与快照:初始展开某颗 chip；目标卡片默认展开，不走该开关。 */
+  /**
+   * 仅测试与快照:初始展开某颗 chip；目标卡片默认折叠，点目标 chip 才展开。
+   */
   defaultOpenChip?: ChipId | null;
+  /** 仅测试与快照:初始展开目标卡片；生产缺省 false（进入会话默认折叠）。 */
+  defaultGoalCardOpen?: boolean;
   /** 取消目标：只打开确认弹层，命令由 SessionPane 在确认后 dispatch。 */
   onCancelGoal?: () => void;
   /** 暂停目标；缺省表示宿主/旧 CLI 不支持，卡片不渲染该动作。 */
@@ -123,12 +159,14 @@ export function ComposerStatusChips({
 }) {
   const { intl } = useZCodeIntl();
   const [openChip, setOpenChip] = useState<ChipId | null>(defaultOpenChip);
-  // 收起目标卡片只记「被收起的是哪个 target」：换目标（含 cleared 后重建）自然重新展开，
-  // 组件实例跨会话复用也不会把「已关闭」带到另一个会话。
-  const [dismissedGoalTargetId, setDismissedGoalTargetId] = useState<string | null>(null);
+  // 目标卡片默认折叠：只记「当前展开的是哪个 target」。换目标（含 cleared 后重建）
+  // 自然回到折叠；组件实例跨会话复用也不会把展开态带到另一个会话。
+  const [expandedGoalTargetId, setExpandedGoalTargetId] = useState<string | null>(
+    defaultGoalCardOpen ? (model.goal?.targetId ?? null) : null,
+  );
   const progress = useMemo(() => buildProgress(model.plan), [model.plan]);
   const goal = model.goal;
-  const goalCardOpen = goal !== null && goal.targetId !== dismissedGoalTargetId;
+  const goalCardOpen = goal !== null && goal.targetId === expandedGoalTargetId;
   const now = useNowTicker(
     goalCardOpen &&
       goal !== null &&
@@ -147,18 +185,18 @@ export function ComposerStatusChips({
   if (chips.length === 0) {
     return null;
   }
-  // 底边距由组件条件决定：有蜂群 chip 时用负边距紧贴 composer，否则保持原有的 mb-2。
-  // 不能让宿主再传 mb-2——tailwind-merge 会按后序覆盖，-mb-2 永远生效不了。
-  const hasSwarmChip = chips.some((chip) => chip.id === "swarm");
+  // 目标会话的 chip 行与 composer 直接相邻：只保留行自身 pb-1 的 4px，不再叠加外部 mb-2；
+  // 普通会话没有目标卡片，保持旧版 mb-2 间距，避免 chip 行贴住 composer。
+  // 目标卡片/面板与 chip 行之间仍由根节点的 gap-2 分隔。
   const active = chips.find((chip) => chip.id === openChip && chip.panel) ?? null;
   const closeGoalCard = () => {
     if (!goal) return;
     setOpenChip(null);
-    setDismissedGoalTargetId(goal.targetId);
+    setExpandedGoalTargetId(null);
   };
 
   return (
-    <div className={cn("flex flex-col gap-2", hasSwarmChip ? "-mb-2" : "mb-2", className)}>
+    <div className={cn("flex flex-col gap-2", goal ? "mb-0" : "mb-2", className)}>
       {/* 展开面板与 chip 行同列、在行上方：用户视线不需要移动，composer 也不被顶走。 */}
       {goal && goalCardOpen ? (
         <GoalCard
@@ -218,7 +256,7 @@ export function ComposerStatusChips({
                     closeGoalCard();
                   } else {
                     setOpenChip(null);
-                    setDismissedGoalTargetId(null);
+                    setExpandedGoalTargetId(goal.targetId);
                   }
                   return;
                 }
@@ -733,42 +771,54 @@ function buildChips({
 }
 
 /**
- * 蜂群活动指示器：进行中显示 active 计数与完成进度；中断收尾后保留一颗只读指示器，
+ * 蜂群活动 chip：有逐 worker 明细时按 Chip.panel 就地展开（状态图标/文案 + 截断描述，
+ * failed/cancelled 附原始错误）；旧发送端只投影计数时保持纯指示器。
+ * 进行中显示 active 计数与完成进度；中断收尾后保留一颗只读指示器，
  * 让用户看到「这轮因运行时重启/错误而中断」，而不是让读数静默消失。
- * totalUnits=0 时没有可展示的单元，整颗隐藏（旧发送端也不会带这个键）。
+ * 有 units 时即使本轮已全部收尾也保留 chip，供回看每个 worker 的终态；
+ * 只有计数时沿用旧口径：无活跃单元且未中断则整颗隐藏。
+ * totalUnits=0 时没有可展示的计数，但 interrupted 位仍要渲染「已中断」，
+ * 让「round_started 即失败/恢复中断」这类零单元轮次不被静默吞掉。
  */
 function buildSwarmChip(
   activity: ComposerSwarmActivity | null | undefined,
   intl: ReturnType<typeof useZCodeIntl>["intl"],
 ): Chip | null {
-  if (!activity || activity.totalUnits <= 0) return null;
+  if (!activity) return null;
   const interrupted = activity.interrupted === true;
-  if (activity.activeUnits <= 0 && !interrupted) return null;
+  const units = activity.units ?? [];
+  const hasUnits = units.length > 0;
+  const hasCounts = activity.totalUnits > 0;
+  if (!hasCounts && !interrupted && !hasUnits) return null;
+  if (activity.activeUnits <= 0 && !interrupted && !hasUnits) return null;
   const failedUnits = activity.failedUnits ?? 0;
-  const progress = interrupted
-    ? intl.formatMessage(
-        { id: "chat.composerChips.swarmInterruptedProgress" },
-        { completed: activity.completedUnits, total: activity.totalUnits },
-      )
-    : intl.formatMessage(
-        { id: "chat.composerChips.swarmProgress" },
-        {
-          active: activity.activeUnits,
-          completed: activity.completedUnits,
-          total: activity.totalUnits,
-        },
-      );
-  return {
+  const progress = !hasCounts
+    ? undefined
+    : interrupted
+      ? intl.formatMessage(
+          { id: "chat.composerChips.swarmInterruptedProgress" },
+          { completed: activity.completedUnits, total: activity.totalUnits },
+        )
+      : intl.formatMessage(
+          { id: "chat.composerChips.swarmProgress" },
+          {
+            active: activity.activeUnits,
+            completed: activity.completedUnits,
+            total: activity.totalUnits,
+          },
+        );
+  const chip: Chip = {
     id: "swarm",
-    static: true,
     label: intl.formatMessage({
       id: interrupted ? "chat.composerChips.swarmInterrupted" : "chat.composerChips.swarm",
     }),
     icon: <Network className="size-4 shrink-0" />,
     trailing: (
       <span
-        data-swarm-active={activity.activeUnits}
-        data-swarm-progress={`${activity.completedUnits}/${activity.totalUnits}`}
+        data-swarm-active={hasCounts ? activity.activeUnits : undefined}
+        data-swarm-progress={
+          hasCounts ? `${activity.completedUnits}/${activity.totalUnits}` : undefined
+        }
         data-swarm-interrupted={interrupted ? "true" : undefined}
         data-swarm-failed={failedUnits > 0 ? failedUnits : undefined}
         className="inline-flex items-center gap-1.5 font-mono text-foreground-subtle"
@@ -789,6 +839,106 @@ function buildSwarmChip(
       </span>
     ),
   };
+  // 有逐 worker 明细才可展开；只有计数时仍是 span，避免点开一个空面板。
+  if (hasUnits) {
+    chip.panel = <SwarmActivityPanel units={units} intl={intl} />;
+  } else {
+    chip.static = true;
+  }
+  return chip;
+}
+
+const SWARM_UNIT_STATUS_MESSAGE_IDS: Record<ComposerSwarmUnitStatus, string> = {
+  pending: "chat.composerChips.swarmUnit.pending",
+  running: "chat.composerChips.swarmUnit.running",
+  done: "chat.composerChips.swarmUnit.done",
+  failed: "chat.composerChips.swarmUnit.failed",
+  cancelled: "chat.composerChips.swarmUnit.cancelled",
+};
+
+/**
+ * 逐 worker 明细：状态图标/文案 + 截断描述；failed/cancelled 的原始错误挂在副行。
+ * running 行有 lastMessage 时展示最近消息副行，不再重复状态文案；终态行不展示
+ * 活动/消息。行序与宿主发布的 units 保持一致（不排序、不折叠）。
+ */
+function SwarmActivityPanel({
+  units,
+  intl,
+}: {
+  units: readonly ComposerSwarmActivityUnit[];
+  intl: ReturnType<typeof useZCodeIntl>["intl"];
+}) {
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {units.map((unit) => {
+        const errorText = unit.error;
+        const showError =
+          (unit.status === "failed" || unit.status === "cancelled") && Boolean(errorText);
+        const lastMessage = unit.status === "running" ? unit.lastMessage : undefined;
+        return (
+          <li
+            key={unit.taskId}
+            data-swarm-unit={unit.taskId}
+            data-swarm-unit-status={unit.status}
+            className="flex items-start gap-2"
+          >
+            <span
+              className={cn(
+                "mt-0.5 inline-flex shrink-0 items-center gap-1 text-ui-sm font-medium",
+                swarmUnitStatusClass(unit.status),
+              )}
+            >
+              <SwarmUnitStatusIcon status={unit.status} />
+              {intl.formatMessage({ id: SWARM_UNIT_STATUS_MESSAGE_IDS[unit.status] })}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span
+                className="block truncate text-ui-base text-foreground-subtle"
+                title={unit.description}
+              >
+                {unit.description}
+              </span>
+              {lastMessage !== undefined ? (
+                <span
+                  className="mt-0.5 block truncate text-ui-sm text-foreground-subtle"
+                  title={lastMessage}
+                  data-swarm-unit-activity
+                  data-swarm-unit-last-message
+                >
+                  {lastMessage}
+                </span>
+              ) : null}
+              {showError && errorText ? (
+                <span
+                  className="block truncate text-ui-sm text-[var(--color-danger)]"
+                  title={errorText}
+                >
+                  {errorText}
+                </span>
+              ) : null}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function SwarmUnitStatusIcon({ status }: { status: ComposerSwarmUnitStatus }) {
+  const className = "size-3.5 shrink-0";
+  if (status === "running") {
+    return <LoaderIcon aria-hidden className={cn(className, "animate-spin")} />;
+  }
+  if (status === "done") return <CircleCheck aria-hidden className={className} />;
+  if (status === "failed") return <CircleX aria-hidden className={className} />;
+  if (status === "cancelled") return <Ban aria-hidden className={className} />;
+  return <Circle aria-hidden className={className} />;
+}
+
+function swarmUnitStatusClass(status: ComposerSwarmUnitStatus): string {
+  if (status === "running" || status === "done") return "text-[var(--color-success)]";
+  if (status === "failed") return "text-[var(--color-danger)]";
+  return "text-foreground-subtlest";
 }
 
 interface ProgressSummary {

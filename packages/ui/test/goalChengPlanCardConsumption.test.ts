@@ -45,6 +45,27 @@ function model(goal: GoalState): ConversationStatusPanelModel {
   };
 }
 
+/** 普通会话（无 goal）：chip 行仍需保留旧版 mb-2 间距。 */
+function modelWithoutGoal(): ConversationStatusPanelModel {
+  const items: PlanItem[] = [{ id: "pending", status: "pending", content: "待办事项" }];
+  return {
+    hasContent: true,
+    git: null,
+    goal: null,
+    sessionPlans: null,
+    plan: {
+      items,
+      displayItems: items,
+      completedCount: 0,
+      waitingCount: 1,
+      totalCount: 1,
+    },
+    runningBashWorks: [],
+    runningSubagentWorks: [],
+    runningWorkflowRuns: [],
+  };
+}
+
 describe("ChengPlan card renderer consumption", () => {
   it("renders goal.chengPlanCard as a visible compact route card", () => {
     const goal: GoalState = {
@@ -68,7 +89,9 @@ describe("ChengPlan card renderer consumption", () => {
         evidenceRefs: ["jobId:job-1", "settle_not_solved", "gate:blocked"],
       },
     };
-    const html = renderToStaticMarkup(createElement(ComposerStatusChips, { model: model(goal) }));
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, { model: model(goal), defaultGoalCardOpen: true }),
+    );
 
     expect(html).toContain(TID_V4_GOAL_CHENG_PLAN_CARD);
     expect(html).toContain('data-goal-cheng-plan-id="cheng-plan://job-1"');
@@ -89,7 +112,9 @@ describe("ChengPlan card renderer consumption", () => {
       iteration: 3,
       verifications: [],
     };
-    const html = renderToStaticMarkup(createElement(ComposerStatusChips, { model: model(goal) }));
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, { model: model(goal), defaultGoalCardOpen: true }),
+    );
 
     expect(html).not.toContain(TID_V4_GOAL_CHENG_PLAN_CARD);
   });
@@ -129,6 +154,7 @@ describe("ChengPlan card continue action（S4 一键接续）", () => {
     const withHandler = renderToStaticMarkup(
       createElement(ComposerStatusChips, {
         model: model(goalWithCard()),
+        defaultGoalCardOpen: true,
         onContinueFromPlanCard: vi.fn(),
       }),
     );
@@ -137,17 +163,43 @@ describe("ChengPlan card continue action（S4 一键接续）", () => {
     expect(withHandler).toContain("chat.target.chengCard.continue");
 
     const withoutHandler = renderToStaticMarkup(
-      createElement(ComposerStatusChips, { model: model(goalWithCard()) }),
+      createElement(ComposerStatusChips, {
+        model: model(goalWithCard()),
+        defaultGoalCardOpen: true,
+      }),
     );
     expect(withoutHandler).not.toContain(TID_V4_GOAL_CHENG_PLAN_CARD_CONTINUE);
     // 无卡时无论回调与否都不出现接续按钮。
     const noCard = renderToStaticMarkup(
       createElement(ComposerStatusChips, {
         model: model({ ...goalWithCard(), chengPlanCard: undefined }),
+        defaultGoalCardOpen: true,
         onContinueFromPlanCard: vi.fn(),
       }),
     );
     expect(noCard).not.toContain(TID_V4_GOAL_CHENG_PLAN_CARD_CONTINUE);
+  });
+
+  it("进入会话默认折叠目标卡，点目标 chip 后展开", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(createElement(ComposerStatusChips, { model: model(goalWithCard()) }));
+    });
+
+    expect(container.querySelector(`[data-testid="${TID_V4_GOAL_CHENG_PLAN_CARD}"]`)).toBeNull();
+    const goalButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("chat.statusPanel.goal"),
+    );
+    expect(goalButton).not.toBeUndefined();
+    await act(async () => {
+      (goalButton as HTMLButtonElement).click();
+    });
+    expect(
+      container.querySelector(`[data-testid="${TID_V4_GOAL_CHENG_PLAN_CARD}"]`),
+    ).not.toBeNull();
   });
 
   it("点击接续按钮 → 恰好回调一次（dispatch 由 SessionPane 经 resumeGoal 通道派发）", async () => {
@@ -160,6 +212,7 @@ describe("ChengPlan card continue action（S4 一键接续）", () => {
       root.render(
         createElement(ComposerStatusChips, {
           model: model(goalWithCard()),
+          defaultGoalCardOpen: true,
           onContinueFromPlanCard,
         }),
       );
@@ -212,9 +265,19 @@ describe("Swarm activity indicator", () => {
     expect(html).toContain("&quot;active&quot;:2");
     expect(html).toContain("&quot;completed&quot;:2");
     expect(html).toContain("&quot;total&quot;:4");
-    // 蜂群 chip 在场时组件自己输出 -mb-2（宿主不再传 mb-2，避免 tailwind-merge 覆盖）。
-    expect(html).toContain('class="flex flex-col gap-2 -mb-2"');
+    // chip 行与 composer 相邻：goal 会话只保留行自身 pb-1 的 4px，不再叠加外部 mb-2。
+    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
     expect(html).not.toContain('class="flex flex-col gap-2 mb-2"');
+    expect(html).not.toContain('class="flex flex-col gap-2 -mb-2"');
+  });
+
+  it("无 goal 会话恢复旧版 mb-2 间距", () => {
+    const html = renderToStaticMarkup(
+      createElement(ComposerStatusChips, { model: modelWithoutGoal() }),
+    );
+
+    expect(html).toContain('class="flex flex-col gap-2 mb-2"');
+    expect(html).not.toContain("mb-0");
   });
 
   it("运行中失败的单元追加 failed 读数，不改变进行中文案", () => {
@@ -270,7 +333,8 @@ describe("Swarm activity indicator", () => {
     expect(html).toContain("&quot;total&quot;:4");
     expect(html).toContain("chat.composerChips.swarmFailed:");
     expect(html).toContain("&quot;failed&quot;:1");
-    expect(html).toContain('class="flex flex-col gap-2 -mb-2"');
+    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(html).not.toContain("-mb-2");
   });
 
   it("快照缺席、无活跃单元且未中断、总数为 0 时整颗隐藏", () => {
@@ -287,9 +351,9 @@ describe("Swarm activity indicator", () => {
       }),
     );
     expect(idle).not.toContain("data-swarm-active");
-    // 无运行中单元且未中断 → 整颗隐藏，但底边距回到常规 mb-2。
-    expect(idle).toContain('class="flex flex-col gap-2 mb-2"');
-    expect(idle).not.toContain("-mb-2");
+    // 无运行中单元且未中断 → 整颗隐藏；goal 会话根节点保持 mb-0。
+    expect(idle).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(idle).not.toContain("mb-2");
 
     const empty = renderToStaticMarkup(
       createElement(ComposerStatusChips, {
@@ -298,15 +362,21 @@ describe("Swarm activity indicator", () => {
       }),
     );
     expect(empty).not.toContain("data-swarm-active");
+    expect(empty).not.toContain("chat.composerChips.swarm");
+  });
 
-    // 中断标记但没有任何工作单元：没有可展示的计数，同样隐藏。
+  it("interrupted=true 且 totalUnits=0 时仍渲染中断 chip（无计数）", () => {
     const interruptedEmpty = renderToStaticMarkup(
       createElement(ComposerStatusChips, {
         model: model(activeGoal()),
         swarmActivity: { activeUnits: 0, completedUnits: 0, totalUnits: 0, interrupted: true },
       }),
     );
+    expect(interruptedEmpty).toContain(">chat.composerChips.swarmInterrupted<");
+    expect(interruptedEmpty).toContain('data-swarm-interrupted="true"');
+    // 零单元没有可展示的计数：不发布 active/progress 读数。
     expect(interruptedEmpty).not.toContain("data-swarm-active");
-    expect(interruptedEmpty).not.toContain("chat.composerChips.swarmInterrupted");
+    expect(interruptedEmpty).not.toContain("data-swarm-progress");
+    expect(interruptedEmpty).not.toContain("chat.composerChips.swarmInterruptedProgress");
   });
 });

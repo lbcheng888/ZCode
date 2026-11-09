@@ -7,12 +7,16 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import {
   type CodingPlanResetType,
   type ZCodeContextUsageBreakdownItem,
   type ZCodeProvider,
 } from "@zcode/shared";
+import type { ConversationRow, SessionUsageState } from "@zcode/shared/zcode-protocol-v4";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover.js";
+import { CircleGauge, Database, Gauge } from "lucide-react";
 import { TID_CHAT_CONTEXT_USAGE_TRIGGER } from "@zcode/shared/test-ids";
 import {
   Context,
@@ -81,6 +85,8 @@ const CONTEXT_PROGRESS_TONE_COLORS = [
 ] as const;
 const PERCENT_MAX = 100;
 const CACHE_HIT_RATE_DISPLAY_THRESHOLD = 0.78;
+// 0.1% = 0.001；低于它的非零占比不能交给 Intl 四舍五入，否则会显示成 0%。
+const BELOW_POINT_ONE_PERCENT_RATIO = 0.001;
 
 export function formatContextUsageTokenCount(
   value: number,
@@ -112,6 +118,27 @@ export function formatContextUsageSummary({
       maximumFractionDigits: 0,
     },
   )} (${percentageFormatter.format(percent)})`;
+}
+
+/**
+ * 统计条上下文百分比：>0 且 <0.1% 时显示明确的「低于 0.1%」，避免四舍五入成 0% 后
+ * 被误读为上下文完全未占用；其余仍最多 1 位小数。文案由调用方解析，helper 保持纯函数。
+ */
+export function formatContextPercent(
+  percent: number | null,
+  locale: string,
+  options: { belowPointOnePercentLabel: string },
+): string | null {
+  if (percent === null) {
+    return null;
+  }
+  if (percent > 0 && percent < BELOW_POINT_ONE_PERCENT_RATIO) {
+    return options.belowPointOnePercentLabel;
+  }
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 1,
+    style: "percent",
+  }).format(Math.max(0, percent));
 }
 
 export function formatContextCacheHitRateLabel(
@@ -1099,5 +1126,456 @@ export function ChatContextUsage({
         </ContextContentBody>
       </ContextContent>
     </Context>
+  );
+}
+
+/** composer 下方的会话统计读数；只消费快照事实，不做估算。 */
+export interface ComposerUsageStats {
+  totalTokens: number;
+  uncachedInputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  cacheHitRate: number | null;
+  contextUsedTokens: number | null;
+  contextMaxTokens: number | null;
+  contextPercent: number | null;
+  /** 已加载窗口内的轮数/步数；窗口不完整时调用方传 partialWindow=true。 */
+  turns: number;
+  steps: number;
+  /**
+   * 只累加 modelDurationMs>0 的 turn 行；没有任何有效工时行时为 null。
+   * 0 不是工时事实：普通 provider 的 turn 只有工具区间，上游 highspeed 计时把缺失的模型段
+   * 落成 0；按 0 展示会得到「0 分 0 秒」并把该轮 output 混进 tok/s 分子。
+   */
+  modelDurationMs: number | null;
+  /** 只累加 toolDurationMs>0 的 turn 行；没有任何有效工时行时为 null。 */
+  toolDurationMs: number | null;
+  /** 只用「同一批」同时有 outputTokens 与 modelDurationMs>0 的行换算，禁止跨行混合放大。 */
+  tokensPerSecond: number | null;
+  /** 模型/工具工时都有效（>0）的 turn 行数；用于面板标注工时覆盖。 */
+  timedTurns: number;
+  partialWindow: boolean;
+}
+
+/** 只有正数工时才是事实；0 在上游可能代表「该段没有计时事件」，不能当真。 */
+function isUsableDurationMs(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value > 0;
+}
+
+export function buildComposerUsageStats(
+  usage: SessionUsageState | null | undefined,
+  rows: readonly ConversationRow[],
+  partialWindow = false,
+): ComposerUsageStats | null {
+  if (!usage) return null;
+  const inputTokens = Math.max(0, usage.cumulative.inputTokens);
+  const outputTokens = Math.max(0, usage.cumulative.outputTokens);
+  const cacheReadTokens = Math.max(0, usage.cumulative.cacheReadTokens);
+  const cacheWriteTokens = Math.max(0, usage.cumulative.cacheWriteTokens);
+  const totalTokens = inputTokens + outputTokens;
+  const contextWindow = usage.contextWindow;
+  if (totalTokens <= 0 && contextWindow === null) return null;
+
+  const turnRows = rows.filter((row) => row.kind === "turnHeader");
+  const steps = rows.reduce((count, row) => count + (row.kind === "toolCall" ? 1 : 0), 0);
+  // 工时字段 optional，且 0 不是工时事实：上游普通 provider 的 turn 只有工具区间，
+  // highspeed 计时把缺失的模型段落成 0。只对 >0 的行求和，没有有效行时返回 null，
+  // 不能用 0 冒充「0 秒」。
+  const modelTimedRows = turnRows.filter((row) => isUsableDurationMs(row.modelDurationMs));
+  const modelDurationMs =
+    modelTimedRows.length > 0
+      ? modelTimedRows.reduce(
+          (sum, row) => sum + Math.max(0, row.modelDurationMs ?? 0),
+          0,
+        )
+      : null;
+  const toolTimedRows = turnRows.filter((row) => isUsableDurationMs(row.toolDurationMs));
+  const toolDurationMs =
+    toolTimedRows.length > 0
+      ? toolTimedRows.reduce(
+          (sum, row) => sum + Math.max(0, row.toolDurationMs ?? 0),
+          0,
+        )
+      : null;
+  const timedTurns = turnRows.filter(
+    (row) => isUsableDurationMs(row.modelDurationMs) && isUsableDurationMs(row.toolDurationMs),
+  ).length;
+  // 输出速度必须落在同一批行上：只有该行同时有 outputTokens 与有效的 modelDurationMs
+  // 才参与，否则 0ms 行会把 output 计入分子却不进分母，算出虚高 tok/s。
+  const speedRows = turnRows.filter(
+    (row) => row.outputTokens !== undefined && isUsableDurationMs(row.modelDurationMs),
+  );
+  const speedOutputTokens = speedRows.reduce(
+    (sum, row) => sum + Math.max(0, row.outputTokens ?? 0),
+    0,
+  );
+  const speedModelDurationMs = speedRows.reduce(
+    (sum, row) => sum + Math.max(0, row.modelDurationMs ?? 0),
+    0,
+  );
+  const cacheHitRate =
+    inputTokens > 0 ? Math.min(1, Math.max(0, cacheReadTokens / inputTokens)) : null;
+  // 与 getRenderableTaskUsage 同一判定：used>0 且 size>0 才是可展示的上下文占用，
+  // 初始化/异常兜底的 0 值不得渲染成 0%。
+  const renderableContextWindow = contextWindow
+    ? getRenderableTaskUsage({
+        used: contextWindow.usedTokens,
+        size: contextWindow.maxTokens,
+      })
+    : null;
+  const contextPercent = renderableContextWindow
+    ? Math.min(
+        1,
+        Math.max(0, renderableContextWindow.used / renderableContextWindow.size),
+      )
+    : null;
+  return {
+    totalTokens,
+    uncachedInputTokens: Math.max(0, inputTokens - cacheReadTokens),
+    cacheReadTokens,
+    cacheWriteTokens,
+    outputTokens,
+    cacheHitRate,
+    contextUsedTokens: renderableContextWindow?.used ?? null,
+    contextMaxTokens: renderableContextWindow?.size ?? null,
+    contextPercent,
+    turns: turnRows.length,
+    steps,
+    modelDurationMs,
+    toolDurationMs,
+    tokensPerSecond:
+      speedModelDurationMs > 0 && speedOutputTokens > 0
+        ? speedOutputTokens / (speedModelDurationMs / 1000)
+        : null,
+    timedTurns,
+    partialWindow,
+  };
+}
+
+function formatUsageDuration(ms: number | null, intl: ComposerUsageStatsIntl): string {
+  // 没有带工时行时保持缺失态，不能显示成 0 分 0 秒。
+  if (ms === null) return "—";
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return intl.formatMessage(
+    { id: "chat.composerUsageStats.minutesSeconds" },
+    { minutes, seconds },
+  );
+}
+
+type ComposerUsageStatsIntl = {
+  formatMessage: (
+    descriptor: { id: string },
+    values?: Record<string, string | number>,
+  ) => string;
+};
+
+type ComposerUsageStatsPanelKey = "session" | "token" | "context";
+
+function UsageStatsPill({
+  panelKey,
+  panelTitle,
+  open,
+  onOpenChange,
+  icon,
+  ariaLabel,
+  label,
+  value,
+  panel,
+}: {
+  panelKey: ComposerUsageStatsPanelKey;
+  panelTitle: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  icon: ReactNode;
+  /** 只有数值文本的 pill 必须给出可访问名；未传时沿用可见 label + value 的原生可访问名。 */
+  ariaLabel?: string;
+  label?: string;
+  value: string;
+  panel: ReactNode;
+}) {
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      {/* 受控 Popover：只会被点击打开，不会像 HoverCard 那样在 hover/focus 时自动展开；
+          aria-expanded / aria-haspopup 由 PopoverTrigger 注入。 */}
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={ariaLabel}
+          className="inline-flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-ui-sm text-foreground-subtle transition-colors hover:bg-hover/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-input-border-focused"
+        >
+          {icon}
+          {label ? <span className="shrink-0">{label}</span> : null}
+          <span className="min-w-0 truncate font-mono text-foreground-subtle">{value}</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        aria-label={panelTitle}
+        className="w-[min(20rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover p-3 text-ui-base shadow-md"
+        data-composer-usage-stats-panel={panelKey}
+        side="top"
+      >
+        {panel}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function UsageStatsPanelRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-foreground-subtle">{label}</span>
+      <span className="shrink-0 font-mono tabular-nums text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function UsageStatsPanelHeader({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="mb-2 flex items-center justify-between gap-4 border-b border-border pb-2">
+      <span className="font-medium text-foreground">{title}</span>
+      <span className="shrink-0 font-mono tabular-nums text-foreground-subtle">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * composer 下方统计条：会话统计、Token 用量、上下文三颗读数。
+ * 对齐 dsh 的信息层次，但只使用 ZCode 快照里已有的事实；窗口不完整时明确标注。
+ */
+export function ComposerUsageStatsFooter({
+  usage,
+  rows,
+  partialWindow = false,
+  intl,
+  locale,
+  className,
+}: {
+  usage: SessionUsageState | null | undefined;
+  rows: readonly ConversationRow[];
+  partialWindow?: boolean;
+  intl: ComposerUsageStatsIntl;
+  locale: string;
+  className?: string;
+}) {
+  const stats = useMemo(
+    () => buildComposerUsageStats(usage, rows, partialWindow),
+    [usage, rows, partialWindow],
+  );
+  // 三颗 pill 共用一个受控 key：初始折叠，点击才展开；打开任一 pill 时自动收起其他。
+  const [openPanel, setOpenPanel] = useState<ComposerUsageStatsPanelKey | null>(null);
+  const hasSessionPill =
+    stats !== null &&
+    (stats.turns > 0 || stats.steps > 0 || stats.tokensPerSecond !== null);
+  // 0 值不是事实：totalTokens<=0 不渲染 Token pill；上下文 used/size 任一 <=0 不渲染 Context pill。
+  const hasTokenPill = stats !== null && stats.totalTokens > 0;
+  const hasContextPill =
+    stats !== null &&
+    stats.contextPercent !== null &&
+    stats.contextUsedTokens !== null &&
+    stats.contextMaxTokens !== null;
+  // 读数消失 pills 会卸载但 Radix 不会回调关闭；清掉失效 key，等读数恢复时保持折叠。
+  useEffect(() => {
+    setOpenPanel((current) => {
+      if (current === null) return current;
+      if (current === "session" && !hasSessionPill) return null;
+      if (current === "context" && !hasContextPill) return null;
+      if (current === "token" && !hasTokenPill) return null;
+      return current;
+    });
+  }, [hasContextPill, hasSessionPill, hasTokenPill]);
+  const handlePanelOpenChange = useCallback(
+    (panelKey: ComposerUsageStatsPanelKey, open: boolean) => {
+      // 关闭事件只允许清空自己的 key：相邻 pill 的 outside-close 可能先于新 pill 的 open
+      // 到达，若这里无条件 set null 会把刚点击打开的面板一起关掉。
+      setOpenPanel((current) =>
+        open ? panelKey : current === panelKey ? null : current,
+      );
+    },
+    [],
+  );
+  if (!stats) return null;
+  // Token 与 Context 都无意义时整条统计条返回 null，不留下只有空壳的 footer。
+  if (!hasTokenPill && !hasContextPill) return null;
+
+  const compactTotal = formatCompactTokenNumber(locale, stats.totalTokens);
+  const cacheHitLabel =
+    stats.cacheHitRate === null
+      ? null
+      : formatContextCacheHitRateLabel(stats.cacheHitRate, locale, {
+          showBelowThreshold: true,
+        });
+  const contextPercentLabel = formatContextPercent(
+    stats.contextPercent,
+    locale,
+    {
+      belowPointOnePercentLabel: intl.formatMessage({
+        id: "chat.composerUsageStats.belowPointOnePercent",
+      }),
+    },
+  );
+  // 折叠态只拿得到已加载窗口的 turns/steps/速度，必须显式标注窗口口径。
+  const partialShortLabel = stats.partialWindow
+    ? intl.formatMessage({ id: "chat.composerUsageStats.partialShort" })
+    : null;
+  const turnsLabel = intl.formatMessage(
+    { id: "chat.composerUsageStats.turns" },
+    { turns: stats.turns },
+  );
+  const stepsLabel = intl.formatMessage(
+    { id: "chat.composerUsageStats.steps" },
+    { steps: stats.steps },
+  );
+  // 工时覆盖只统计模型/工具工时都齐全的 turn 行；不全时面板明示覆盖范围。
+  const durationCoverageLabel =
+    stats.turns > 0 && stats.timedTurns < stats.turns
+      ? intl.formatMessage(
+          { id: "chat.composerUsageStats.durationCoverage" },
+          { covered: stats.timedTurns, total: stats.turns },
+        )
+      : null;
+  const speedLabel =
+    stats.tokensPerSecond === null
+      ? null
+      : intl.formatMessage(
+          { id: "chat.composerUsageStats.tokensPerSecond" },
+          {
+            rate: new Intl.NumberFormat(locale, {
+              maximumFractionDigits: stats.tokensPerSecond >= 10 ? 0 : 1,
+            }).format(stats.tokensPerSecond),
+          },
+        );
+  const sessionStatsValue = [partialShortLabel, turnsLabel, stepsLabel, speedLabel]
+    .filter(Boolean)
+    .join(" · ");
+  const fullNumber = new Intl.NumberFormat(locale);
+  const sessionStatsTitle = intl.formatMessage({
+    id: "chat.composerUsageStats.sessionStats",
+  });
+  const tokenUsageTitle = intl.formatMessage({
+    id: "chat.composerUsageStats.tokenUsage",
+  });
+  const contextTitle = intl.formatMessage({ id: "chat.composerUsageStats.context" });
+
+  return (
+    <div
+      data-composer-usage-stats="true"
+      className={cn(
+        "mt-1 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 px-3 pb-1 text-ui-sm text-foreground-subtle",
+        className,
+      )}
+    >
+      {hasSessionPill ? (
+        <UsageStatsPill
+          panelKey="session"
+          panelTitle={sessionStatsTitle}
+          open={openPanel === "session"}
+          onOpenChange={(open) => handlePanelOpenChange("session", open)}
+          icon={<Gauge aria-hidden className="size-3.5 shrink-0" />}
+          ariaLabel={`${sessionStatsTitle}: ${sessionStatsValue}`}
+          value={sessionStatsValue}
+          panel={
+            <div className="space-y-2">
+              <UsageStatsPanelHeader
+                title={sessionStatsTitle}
+                value={`${turnsLabel} ${stepsLabel}`}
+              />
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.modelTime" })}
+                value={formatUsageDuration(stats.modelDurationMs, intl)}
+              />
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.toolTime" })}
+                value={formatUsageDuration(stats.toolDurationMs, intl)}
+              />
+              {durationCoverageLabel ? (
+                <div className="text-ui-sm text-foreground-subtlest">
+                  {durationCoverageLabel}
+                </div>
+              ) : null}
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.outputSpeed" })}
+                value={speedLabel ?? "—"}
+              />
+              {stats.partialWindow ? (
+                <div className="text-ui-sm text-foreground-subtlest">
+                  {intl.formatMessage({ id: "chat.composerUsageStats.loadedWindow" })}
+                </div>
+              ) : null}
+            </div>
+          }
+        />
+      ) : null}
+
+      {hasTokenPill ? (
+        <UsageStatsPill
+          panelKey="token"
+          panelTitle={tokenUsageTitle}
+          open={openPanel === "token"}
+          onOpenChange={(open) => handlePanelOpenChange("token", open)}
+          icon={<Database aria-hidden className="size-3.5 shrink-0" />}
+          label={tokenUsageTitle}
+          value={`${compactTotal} tok${cacheHitLabel === null ? "" : ` · ${cacheHitLabel}`}`}
+          panel={
+            <div className="space-y-2">
+              <UsageStatsPanelHeader
+                title={tokenUsageTitle}
+                value={`${fullNumber.format(stats.totalTokens)} tok`}
+              />
+              {cacheHitLabel === null ? null : (
+                <UsageStatsPanelRow
+                  label={intl.formatMessage({ id: "chat.composerUsageStats.cacheHit" })}
+                  value={cacheHitLabel}
+                />
+              )}
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.uncachedInput" })}
+                value={`${fullNumber.format(stats.uncachedInputTokens)} tok`}
+              />
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.cacheRead" })}
+                value={`${fullNumber.format(stats.cacheReadTokens)} tok`}
+              />
+              <UsageStatsPanelRow
+                label={intl.formatMessage({ id: "chat.composerUsageStats.output" })}
+                value={`${fullNumber.format(stats.outputTokens)} tok`}
+              />
+            </div>
+          }
+        />
+      ) : null}
+
+      {stats.contextPercent !== null &&
+      stats.contextUsedTokens !== null &&
+      stats.contextMaxTokens !== null ? (
+        <UsageStatsPill
+          panelKey="context"
+          panelTitle={contextTitle}
+          open={openPanel === "context"}
+          onOpenChange={(open) => handlePanelOpenChange("context", open)}
+          icon={<CircleGauge aria-hidden className="size-3.5 shrink-0" />}
+          label={contextTitle}
+          value={contextPercentLabel ?? ""}
+          panel={
+            <div className="space-y-2">
+              <UsageStatsPanelHeader
+                title={contextTitle}
+                value={`${fullNumber.format(stats.contextUsedTokens)} / ${fullNumber.format(stats.contextMaxTokens)}`}
+              />
+              <UsageStatsPanelRow label="%" value={contextPercentLabel ?? "—"} />
+              {cacheHitLabel === null ? null : (
+                <UsageStatsPanelRow
+                  label={intl.formatMessage({ id: "chat.composerUsageStats.cacheHit" })}
+                  value={cacheHitLabel}
+                />
+              )}
+            </div>
+          }
+        />
+      ) : null}
+    </div>
   );
 }

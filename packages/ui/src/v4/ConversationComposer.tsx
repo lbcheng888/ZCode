@@ -199,6 +199,7 @@ import {
   V4ComposerModelControls,
   type ModelSelectionSource,
 } from "@/v4/composer/V4ComposerToolbar.js";
+import { ComposerUsageStatsFooter } from "@/chat-input-toolbar/contextUsage.js";
 import {
   resolveV4ComposerConfigPickerState,
   type V4ComposerConfigPicker,
@@ -573,6 +574,18 @@ export interface ConversationComposerProps {
 function formatAttachmentLineCount(attachment: ChatComposerAttachment, locale: string): string {
   const formatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 0 });
   return formatter.format(typeof attachment.lineCount === "number" ? attachment.lineCount : 0);
+}
+
+/**
+ * 已加载窗口是否只是全部会话行的一部分。
+ * 快照的 rows.window 可能只加载了最近一段；统计条必须显式拿到该口径，
+ * 否则折叠态会把「窗口内轮数/步数」冒充成「全部会话」。
+ */
+export function isComposerUsageStatsWindowPartial(
+  totalCount: number | undefined,
+  windowLength: number | undefined,
+): boolean {
+  return (totalCount ?? 0) > (windowLength ?? 0);
 }
 
 function ConversationComposerImpl({
@@ -2941,6 +2954,16 @@ function ConversationComposerImpl({
           </p>
         ) : null}
       </div>
+      <ComposerUsageStatsFooter
+        usage={snapshot?.usage ?? null}
+        rows={snapshot?.rows.window ?? []}
+        partialWindow={isComposerUsageStatsWindowPartial(
+          snapshot?.rows.totalCount,
+          snapshot?.rows.window.length,
+        )}
+        intl={intl}
+        locale={locale}
+      />
       <ImagePreviewDialog
         initialIndex={attachmentPreviewIndex}
         items={composerMediaPreviewItems}

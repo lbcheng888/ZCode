@@ -1,0 +1,18 @@
+{
+  // 测试文件类型检查专用：只把 ui 源与统计条测试纳入工程，避免把全量 test/ 目录的
+  // 测试依赖（fixtures 等）拖进 tsc。composite/incremental 关闭，纯 --noEmit 校验。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    // 包内 tsconfig 的 rootDir 是 src；测试文件在 test/ 下，--noEmit 也要先过 rootDir 校验。
+    "rootDir": "."
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "src/**/*.json",
+    "test/composerUsageStats.test.ts"
+  ]
+}
