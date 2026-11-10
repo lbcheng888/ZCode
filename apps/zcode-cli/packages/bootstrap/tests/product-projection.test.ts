@@ -4678,6 +4678,7 @@ describe("会话统计 sessionStats", () => {
   function mainRequest(input: {
     requestId: string;
     durationMs?: number;
+    timeToFirstContentMs?: number;
     timeToFirstTextMs?: number;
     outputTokens?: number;
     querySource?: string;
@@ -4694,6 +4695,9 @@ describe("会话统计 sessionStats", () => {
       attempt: 1,
       maxAttempts: 1,
       ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+      ...(input.timeToFirstContentMs !== undefined
+        ? { timeToFirstContentMs: input.timeToFirstContentMs }
+        : {}),
       ...(input.timeToFirstTextMs !== undefined
         ? { timeToFirstTextMs: input.timeToFirstTextMs }
         : {}),
@@ -4713,7 +4717,7 @@ describe("会话统计 sessionStats", () => {
       { turnNumber: 1, input: "统计首轮", messageId: "user-stats-1" },
       { turnId: turn1 },
     );
-    // 同一 turn 的第一次成功请求：timing 与 output 齐全，进入 decode 批次。
+    // 同一 turn 的第一次成功请求：首个文本时间兜底，timing 与 output 齐全，进入 decode 批次。
     log.push(
       SessionEventType.ModelNetworkStatus,
       mainRequest({
@@ -4724,7 +4728,7 @@ describe("会话统计 sessionStats", () => {
       }),
       { turnId: turn1 },
     );
-    // 同一 turn 的第二次成功请求：只计步数与 llmMs，没有 first-text timing，不能进 decode。
+    // 同一 turn 的第二次成功请求：没有任何首 token timing，只计步数与 llmMs，不能进 decode。
     log.push(
       SessionEventType.ModelNetworkStatus,
       mainRequest({
@@ -4827,6 +4831,57 @@ describe("会话统计 sessionStats", () => {
     expect(conversationSnapshotSchema.parse(snapshot).usage.sessionStats).toEqual(
       snapshot.usage.sessionStats,
     );
+  });
+
+  it("reasoning 模型按首个内容时间计入 decode，content 优先于 text", () => {
+    const log = new EventLog();
+    const turnId = "turn-stats-content";
+    log.push(SessionEventType.SessionCreated, SESSION_CREATED);
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "reasoning 统计", messageId: "user-stats-content" },
+      { turnId },
+    );
+    // 只上报首个内容时间（含 reasoning）：必须进入 decode，不能因缺首个文本时间漏计。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-stats-content-only",
+        durationMs: 1_000,
+        timeToFirstContentMs: 300,
+        outputTokens: 200,
+      }),
+      { turnId },
+    );
+    // 两者同时存在时取首个内容：decode 分母不能把 reasoning 时长再算一遍。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-stats-content-and-text",
+        durationMs: 800,
+        timeToFirstContentMs: 100,
+        timeToFirstTextMs: 260,
+        outputTokens: 70,
+      }),
+      { turnId },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 270, toolCallCount: 0, duration: 1_900, resultType: "success" },
+      { turnId },
+    );
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    expect(snapshot.usage.sessionStats).toEqual({
+      turns: 1,
+      steps: 2,
+      decodeMs: 1_400,
+      decodeTokens: 270,
+      llmMs: 1_800,
+      toolMs: 0,
+      ttftMs: 400,
+      ttftSteps: 2,
+    });
   });
 
   it("旧快照没有 sessionStats 时 usage 仍可解析（additive 兼容）", () => {

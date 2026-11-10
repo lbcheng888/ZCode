@@ -806,6 +806,7 @@ describe("v4 冷恢复（gateway 单元）", () => {
         turnId,
       ),
       // 持久事件日志里的成功 model step：统计只能由它累计一次。
+      // 首个内容（含 reasoning）先于首个文本，冷重放同样取首个内容做 decode 分母。
       makeEvent(
         "sess-cold",
         3,
@@ -822,7 +823,8 @@ describe("v4 冷恢复（gateway 单元）", () => {
           attempt: 1,
           maxAttempts: 1,
           durationMs: 1_000,
-          timeToFirstTextMs: 200,
+          timeToFirstContentMs: 200,
+          timeToFirstTextMs: 400,
           usage: { inputTokens: 100, outputTokens: 300 },
         },
         turnId,

@@ -2906,7 +2906,10 @@ export class ProductProjection {
       next.turns += 1;
     }
     const durationMs = nonNegativeMs(payload.durationMs);
-    const ttftMs = nonNegativeMs(payload.timeToFirstTextMs);
+    // 首 token 口径对齐 dsh：首个内容（含 reasoning）优先，其次首个文本；
+    // reasoning 模型不能把思考时长算进 decode 分母。
+    const ttftMs =
+      nonNegativeMs(payload.timeToFirstContentMs) ?? nonNegativeMs(payload.timeToFirstTextMs);
     const outputTokens = usageOutputTokens(payload.usage);
     if (durationMs !== undefined) next.llmMs += durationMs;
     if (ttftMs !== undefined) {
