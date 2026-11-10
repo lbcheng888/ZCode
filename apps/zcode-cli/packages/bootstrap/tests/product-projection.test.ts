@@ -23,9 +23,11 @@ import {
   conversationSnapshotSchema,
   filterConversationDeltasForProfile,
   hookInvocationRowSchema,
+  sessionUsageStateSchema,
   workflowRunStepCounts,
 } from "@zcode/shared/zcode-protocol-v4";
 import { ProductProjection } from "../src/zcode-protocol-v4/index.js";
+import { HYDRATION_TRACE_ID } from "../src/zcode-protocol-v4/projection-state.js";
 
 // ── 事件序列构造器 ──
 
@@ -4665,6 +4667,253 @@ describe("V4 API 重试状态投影", () => {
       ["tool-orphan", "cancelled"],
       ["tool-retry", "inputStreaming"],
     ]);
+  });
+});
+
+// ── 会话统计（整会话口径，对齐 dsh sessionStats）──
+
+describe("会话统计 sessionStats", () => {
+  const SESSION_CREATED = { mode: "default", contextWindow: 200_000 };
+
+  function mainRequest(input: {
+    requestId: string;
+    durationMs?: number;
+    timeToFirstTextMs?: number;
+    outputTokens?: number;
+    querySource?: string;
+  }): Record<string, unknown> {
+    return {
+      type: "model_request_completed",
+      timestamp: "2026-07-24T00:00:00.000Z",
+      traceId: "trace-stats",
+      requestId: input.requestId,
+      providerId: "provider-1",
+      modelId: "model-1",
+      transport: "sse",
+      querySource: input.querySource ?? "main_turn",
+      attempt: 1,
+      maxAttempts: 1,
+      ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+      ...(input.timeToFirstTextMs !== undefined
+        ? { timeToFirstTextMs: input.timeToFirstTextMs }
+        : {}),
+      ...(input.outputTokens !== undefined
+        ? { usage: { inputTokens: 100, outputTokens: input.outputTokens } }
+        : {}),
+    };
+  }
+
+  it("从主会话 model_request_completed 累计轮/模型步/工时，失败与旁路请求不混入", () => {
+    const log = new EventLog();
+    const turn1 = "turn-stats-1";
+    const turn2 = "turn-stats-2";
+    log.push(SessionEventType.SessionCreated, SESSION_CREATED);
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "统计首轮", messageId: "user-stats-1" },
+      { turnId: turn1 },
+    );
+    // 同一 turn 的第一次成功请求：timing 与 output 齐全，进入 decode 批次。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-stats-1",
+        durationMs: 1_000,
+        timeToFirstTextMs: 200,
+        outputTokens: 300,
+      }),
+      { turnId: turn1 },
+    );
+    // 同一 turn 的第二次成功请求：只计步数与 llmMs，没有 first-text timing，不能进 decode。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-stats-2",
+        durationMs: 500,
+        outputTokens: 50,
+      }),
+      { turnId: turn1 },
+    );
+    // 失败请求不是成功 model step。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      {
+        ...mainRequest({ requestId: "request-stats-failed", durationMs: 300 }),
+        type: "model_request_failed",
+        reason: "server_error",
+        retryable: true,
+        message: "server error",
+      },
+      { turnId: turn1 },
+    );
+    // 旁路 querySource 不属于主会话 model step。
+    for (const querySource of ["subagent", "compact", "session_title"]) {
+      log.push(
+        SessionEventType.ModelNetworkStatus,
+        mainRequest({
+          requestId: `request-stats-${querySource}`,
+          querySource,
+          durationMs: 900,
+          timeToFirstTextMs: 100,
+          outputTokens: 200,
+        }),
+        { turnId: turn1 },
+      );
+    }
+    // 工具调用只累计 toolMs，不增加 model step。
+    log.push(
+      SessionEventType.ToolCallScheduled,
+      {
+        toolCallId: "tool-stats-1",
+        toolName: "Bash",
+        input: { command: "true" },
+        schedule: { parallelGroups: [["tool-stats-1"]], executionOrder: ["tool-stats-1"] },
+      },
+      { turnId: turn1 },
+    );
+    log.push(
+      SessionEventType.ToolCallStarted,
+      {
+        toolCallId: "tool-stats-1",
+        toolName: "Bash",
+        startedAt: new Date(1_700_000_400_000),
+      },
+      { turnId: turn1 },
+    );
+    log.push(
+      SessionEventType.ToolCallResult,
+      { toolCallId: "tool-stats-1", duration: 700, result: { success: true, content: "ok" } },
+      { turnId: turn1 },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 350, toolCallCount: 1, duration: 3_000, resultType: "success" },
+      { turnId: turn1 },
+    );
+    // 第二轮再来一个成功请求，确认 turns 只按唯一 turnId 计数。
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 2, input: "统计次轮", messageId: "user-stats-2" },
+      { turnId: turn2 },
+    );
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-stats-3",
+        durationMs: 400,
+        timeToFirstTextMs: 100,
+        outputTokens: 100,
+      }),
+      { turnId: turn2 },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 100, toolCallCount: 0, duration: 500, resultType: "success" },
+      { turnId: turn2 },
+    );
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    expect(snapshot.usage.sessionStats).toEqual({
+      turns: 2,
+      steps: 3,
+      decodeMs: 1_100,
+      decodeTokens: 400,
+      llmMs: 1_900,
+      toolMs: 700,
+      ttftMs: 300,
+      ttftSteps: 2,
+    });
+    // 新增字段必须能过 wire schema，且完整快照保持可解析。
+    expect(conversationSnapshotSchema.parse(snapshot).usage.sessionStats).toEqual(
+      snapshot.usage.sessionStats,
+    );
+  });
+
+  it("旧快照没有 sessionStats 时 usage 仍可解析（additive 兼容）", () => {
+    const legacyUsage = sessionUsageStateSchema.parse({
+      contextWindow: null,
+      cumulative: {
+        inputTokens: 1_000,
+        outputTokens: 200,
+        cacheReadTokens: 600,
+        cacheWriteTokens: 100,
+      },
+    });
+    // 缺席 = 旧发送端未发布整会话统计（unknown≠0），客户端回退已加载窗口口径。
+    expect(legacyUsage.sessionStats).toBeUndefined();
+  });
+
+  it("transcript 合成历史缺少逐请求事件时，不发布残缺的整会话统计", () => {
+    const log = new EventLog();
+    const turnId = "turn-hydrate-stats";
+    log.push(SessionEventType.SessionCreated, SESSION_CREATED);
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "历史轮", messageId: "user-hydrate-stats" },
+      { turnId },
+    );
+    // 真实冷恢复从 transcript 合成 ModelComplete；逐请求 ModelNetworkStatus 已被内存淘汰。
+    const synthesized = log.push(
+      SessionEventType.ModelComplete,
+      {
+        content: "",
+        stopReason: "end_turn",
+        querySource: "main_turn",
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+      { turnId },
+    );
+    synthesized.traceId = HYDRATION_TRACE_ID as TraceId;
+    // 即便内存尾部还残留一条完成事件，残缺历史也不能被当成整会话读数。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({ requestId: "request-hydrate-stats", durationMs: 1_000, outputTokens: 300 }),
+      { turnId },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 300, toolCallCount: 0, duration: 1_200, resultType: "success" },
+      { turnId },
+    );
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    // 残缺事件重放出的 1 轮/1 步不能冒充整会话读数；缺席让客户端回退已加载窗口统计。
+    expect(snapshot.usage.sessionStats).toBeUndefined();
+  });
+
+  it("只有合成 SessionCreated 的空历史仍按 live 事件累计（新会话首次订阅不误伤）", () => {
+    const log = new EventLog();
+    const turnId = "turn-empty-hydrate";
+    const created = log.push(SessionEventType.SessionCreated, SESSION_CREATED);
+    // 空会话首次订阅也会重放一条合成 SessionCreated；它本身不隐藏任何历史。
+    created.traceId = HYDRATION_TRACE_ID as TraceId;
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "新会话", messageId: "user-empty-hydrate" },
+      { turnId },
+    );
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({ requestId: "request-empty-hydrate", durationMs: 500, outputTokens: 100 }),
+      { turnId },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 100, toolCallCount: 0, duration: 700, resultType: "success" },
+      { turnId },
+    );
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    expect(snapshot.usage.sessionStats).toEqual({
+      turns: 1,
+      steps: 1,
+      decodeMs: 0,
+      decodeTokens: 0,
+      llmMs: 500,
+      toolMs: 0,
+      ttftMs: 0,
+      ttftSteps: 0,
+    });
   });
 });
 

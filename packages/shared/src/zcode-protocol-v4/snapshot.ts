@@ -204,6 +204,31 @@ export type SessionMetaState = z.infer<typeof sessionMetaStateSchema>;
 export type { SharedContextImportState } from "./shared-context-import.js";
 
 // ── usage。conflation：值未变不下发──
+/**
+ * 整会话统计（与已加载 rows.window 无关）：从权威事件日志累计的轮数/模型步数与墙钟工时。
+ * additive-optional：缺席 = 尚无可信的整会话读数（旧发送端，或历史逐请求事件已不可重建），
+ * 客户端回退已加载窗口统计；显式对象才是整会话读数，分页与压缩不会改变它。
+ */
+export const sessionUsageStatsSchema = z.object({
+  /** 至少有一个成功完成主会话 model step 的唯一 turnId 数。 */
+  turns: z.number().int().nonnegative(),
+  /** 成功完成的主会话 model step 数；toolCall 不是 step。 */
+  steps: z.number().int().nonnegative(),
+  /** first token → 请求完成的解码墙钟时间总和（只覆盖同一批既有 timing 又有 output 的请求）。 */
+  decodeMs: z.number().nonnegative(),
+  /** 与 decodeMs 同一批请求的 provider output tokens 总和。 */
+  decodeTokens: z.number().nonnegative(),
+  /** 主会话模型请求墙钟时间总和。 */
+  llmMs: z.number().nonnegative(),
+  /** 工具执行时间总和（ToolCallStarted → 结果/错误）。 */
+  toolMs: z.number().nonnegative(),
+  /** first token 延迟总和，覆盖 ttftSteps 个请求。 */
+  ttftMs: z.number().nonnegative(),
+  /** 有 first token 时间的请求数。 */
+  ttftSteps: z.number().int().nonnegative(),
+});
+export type SessionUsageStats = z.infer<typeof sessionUsageStatsSchema>;
+
 export const sessionUsageStateSchema = z.object({
   contextWindow: z
     .object({
@@ -220,6 +245,8 @@ export const sessionUsageStateSchema = z.object({
     cacheReadTokens: z.number(),
     cacheWriteTokens: z.number(),
   }),
+  // additive-optional：缺席 = 旧事件日志尚未发布整会话统计，UI 不得把缺席当成 0。
+  sessionStats: sessionUsageStatsSchema.optional(),
 });
 export type SessionUsageState = z.infer<typeof sessionUsageStateSchema>;
 

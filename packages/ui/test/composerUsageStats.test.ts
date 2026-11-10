@@ -40,6 +40,24 @@ const USAGE: SessionUsageState = {
   },
 };
 
+// 整会话统计（对齐 dsh sessionStats）：与下方 ROWS 窗口无关；
+// decodeMs=1,000s、decodeTokens=218,000 → 218 tok/s。
+const SESSION_STATS = {
+  turns: 1_328,
+  steps: 11_659,
+  decodeMs: 1_000_000,
+  decodeTokens: 218_000,
+  llmMs: 1_500_000,
+  toolMs: 300_000,
+  ttftMs: 132_800,
+  ttftSteps: 1_328,
+};
+
+const SESSION_STATS_USAGE: SessionUsageState = {
+  ...USAGE,
+  sessionStats: SESSION_STATS,
+};
+
 function turnHeaderRow(rowId: number, overrides: Partial<TurnHeaderRow> = {}): TurnHeaderRow {
   return {
     rowId,
@@ -209,6 +227,41 @@ describe("buildComposerUsageStats", () => {
     expect(stats.partialWindow).toBe(false);
   });
 
+  it("优先消费 usage.sessionStats：整会话轮/模型步/工时与 decode 速度，窗口口径失效", () => {
+    // 传入 partialWindow=true 也会被整会话读数压掉：rows 只有 2 轮，不能冒充 1328 轮。
+    const stats = buildComposerUsageStats(SESSION_STATS_USAGE, ROWS, true);
+
+    expect(stats).not.toBeNull();
+    if (!stats) return;
+    expect(stats.turns).toBe(1_328);
+    // steps 是 model step，不是 ROWS 里的 3 个 toolCall。
+    expect(stats.steps).toBe(11_659);
+    expect(stats.modelDurationMs).toBe(1_500_000);
+    expect(stats.toolDurationMs).toBe(300_000);
+    // tok/s = decodeTokens / (decodeMs / 1000)，只认同一批 decode 事实。
+    expect(stats.tokensPerSecond).toBeCloseTo(218);
+    // 整会话口径没有窗口完整性概念，调用方传入的 partialWindow 不能生效。
+    expect(stats.partialWindow).toBe(false);
+    // 不再按窗口行统计工时覆盖，避免「0/1328 轮」的伪覆盖。
+    expect(stats.timedTurns).toBe(1_328);
+  });
+
+  it("sessionStats 没有 decode timing 时不伪造 tok/s", () => {
+    const stats = buildComposerUsageStats(
+      {
+        ...SESSION_STATS_USAGE,
+        sessionStats: {
+          ...SESSION_STATS,
+          decodeMs: 0,
+          decodeTokens: 218_000,
+        },
+      },
+      ROWS,
+    );
+
+    expect(stats?.tokensPerSecond).toBeNull();
+  });
+
   it("工时 optional 缺失时返回 null 而不是 0，输出速度只用同一批带工时行", () => {
     const rows: ConversationRow[] = [
       turnHeaderRow(1, { modelDurationMs: 4_000, outputTokens: 100 }),
@@ -335,8 +388,11 @@ describe("ComposerUsageStatsFooter", () => {
     expect(ariaLabel).toContain("2 轮");
     expect(ariaLabel).toContain("3 步");
     expect(ariaLabel).toContain("20 tok/s");
-    // Token pill 的可见 label 仍在，继续作为原生可访问名的一部分。
-    expect(usagePill(container, "Token 用量").textContent).toContain("Token 用量");
+    // Token pill 的可见 label 仍在，继续作为原生可访问名的一部分；累计缓存命中率
+    // 与面板累计行同口径（cache.hitRate 的 83.1%），折叠读数不能退回最新值或消失。
+    const tokenPill = usagePill(container, "Token 用量");
+    expect(tokenPill.textContent).toContain("Token 用量");
+    expect(tokenPill.textContent).toContain("83.1%");
     expect(container.textContent).not.toContain("上下文");
     expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
   });
@@ -371,16 +427,15 @@ describe("ComposerUsageStatsFooter", () => {
     const tokenPanel = panel("token");
     expect(tokenPanel).not.toBeNull();
     expect(tokenPanel?.getAttribute("aria-label")).toBe("Token 用量");
+    if (!tokenPanel) return;
     // 本轮读数来自 contextWindow.cache：最近一次主轮请求的命中率与 input 口径。
-    expect(tokenPanel?.textContent).toContain("本轮缓存命中");
-    expect(tokenPanel?.textContent).toContain("99%");
+    expect(panelRowValue(tokenPanel, "本轮缓存命中")).toBe("99%");
     // 累计读数是 provider 的 token 加权 hitRate，并明示参与平均的请求次数。
-    expect(tokenPanel?.textContent).toContain("累计缓存命中（296 次请求）");
-    expect(tokenPanel?.textContent).toContain("83.1%");
-    expect(tokenPanel?.textContent).toContain("本轮输入");
-    expect(tokenPanel?.textContent).toContain("1,000 tok");
-    expect(tokenPanel?.textContent).toContain("本轮未缓存输入");
-    expect(tokenPanel?.textContent).toContain("400 tok");
+    expect(panelRowValue(tokenPanel, "累计缓存命中（296 次请求）")).toBe("83.1%");
+    expect(panelRowValue(tokenPanel, "本轮输入")).toBe("1,000 tok");
+    // 本轮未缓存输入 = 本轮 input - 本轮 cache read，必须按行断言，不能只靠整块
+    // textContent 命中，否则行显示成别的口径也会被放过。
+    expect(panelRowValue(tokenPanel, "本轮未缓存输入")).toBe("400 tok");
 
     await click(pill);
     expect(panel("token")).toBeNull();
@@ -406,6 +461,39 @@ describe("ComposerUsageStatsFooter", () => {
     expect(tokenPanel?.textContent).toContain("累计缓存命中");
     // 累计值退回 cumulative token 口径：600 / 1,000 = 60%。
     expect(tokenPanel?.textContent).toContain("60%");
+  });
+
+  it("cache.hitRate 缺失时累计行用 token 推算，不拼 provider 请求数", async () => {
+    const container = await renderFooter({
+      usage: {
+        contextWindow: {
+          usedTokens: 3_000,
+          maxTokens: 8_000,
+          autoCompactThresholdTokens: null,
+          // hitRate 缺失但 hitRateRequestCount 有值：请求数只属于 hitRate 口径，
+          // token 推算出来的累计行不能借用它。
+          cache: {
+            inputTokens: 1_000,
+            cacheReadTokens: 600,
+            cacheWriteTokens: 100,
+            latestHitRate: 0.99,
+            hitRate: null,
+            hitRateRequestCount: 296,
+          },
+        },
+        cumulative: USAGE.cumulative,
+      },
+    });
+
+    await click(usagePill(container, "Token 用量"));
+    const tokenPanel = panel("token");
+    expect(tokenPanel).not.toBeNull();
+    if (!tokenPanel) return;
+    // 回退 cumulative token 推算：600 / 1,000 = 60%，按无请求数文案展示。
+    expect(panelRowValue(tokenPanel, "累计缓存命中")).toBe("60%");
+    expect(tokenPanel.textContent).not.toContain("296 次请求");
+    // 本轮行仍来自 cache.latestHitRate，不受累计口径回退影响。
+    expect(panelRowValue(tokenPanel, "本轮缓存命中")).toBe("99%");
   });
 
   it("打开 Token 用量时会话统计自动关闭，同一时间只开一个面板", async () => {
@@ -467,6 +555,33 @@ describe("ComposerUsageStatsFooter", () => {
 
     await click(usagePill(container, "2 轮"));
     expect(panel("session")?.textContent).toContain("数据范围：已加载窗口");
+  });
+
+  it("有整会话统计时显示 1328 轮/11659 步/218 tok/s，且不再标注已加载窗口", async () => {
+    // 调用方仍会按 rows.window 传 partialWindow=true；整会话读数必须压掉窗口口径。
+    const container = await renderFooter({
+      usage: SESSION_STATS_USAGE,
+      partialWindow: true,
+    });
+
+    expect(container.textContent).toContain("1328 轮 · 11659 步 · 218 tok/s");
+    expect(container.textContent).not.toContain("已加载窗口");
+    // 可访问名跟随折叠读数，读屏拿到的也是整会话数字而不是窗口行数。
+    expect(sessionAriaLabel(container)).toContain("1328 轮");
+    expect(sessionAriaLabel(container)).toContain("11659 步");
+    expect(sessionAriaLabel(container)).toContain("218 tok/s");
+    expect(sessionAriaLabel(container)).not.toContain("已加载窗口");
+
+    await click(sessionPill(container));
+    const sessionPanel = panel("session");
+    expect(sessionPanel).not.toBeNull();
+    if (!sessionPanel) return;
+    // 工时与速度都来自整会话统计：1500s = 25 分 0 秒，300s = 5 分 0 秒。
+    expect(panelRowValue(sessionPanel, "模型用时")).toBe("25 分 0 秒");
+    expect(panelRowValue(sessionPanel, "工具调用用时")).toBe("5 分 0 秒");
+    expect(panelRowValue(sessionPanel, "输出速度")).toBe("218 tok/s");
+    expect(sessionPanel.textContent).not.toContain("数据范围：已加载窗口");
+    expect(sessionPanel.textContent).not.toContain("模型+工具工时齐全");
   });
 
   it("面板宽度用响应式上限，窄屏不会溢出", async () => {

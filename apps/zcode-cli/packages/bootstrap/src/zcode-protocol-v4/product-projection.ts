@@ -430,6 +430,21 @@ function nonNegativeInteger(value: number, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
+/** 非负有限毫秒；缺失/非法返回 undefined，不能拿 0 冒充已计时。 */
+function nonNegativeMs(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.max(0, value)
+    : undefined;
+}
+
+/** provider 上报的 completion tokens；缺失/非法返回 undefined（0 是合法读数）。 */
+function usageOutputTokens(usage: ModelUsage | undefined): number | undefined {
+  const value = usage?.outputTokens;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.max(0, value)
+    : undefined;
+}
+
 /** 蜂群读数按字段比较；optional 缺席与显式值都参与比较，避免无变化时多产一条 state.updated。 */
 function sameSwarmActivity(
   current: SwarmActivityState | undefined,
@@ -536,6 +551,9 @@ interface HighspeedToolInterval {
   endedAt?: number;
 }
 
+/** 整会话统计的累计读数；唯一权威副本在 snapshot.usage.sessionStats。 */
+type SessionUsageStatsState = NonNullable<SessionUsageState["sessionStats"]>;
+
 type TurnModelBaseline =
   | { kind: "silentInitial" }
   | { kind: "sourceLess" }
@@ -606,6 +624,17 @@ export class ProductProjection {
   // Highspeed 分享需要的真实耗时由 CLI 事件聚合，避免 renderer 离场后丢失拆分数据。
   private highspeedModelDurationByTurnId = new Map<string, number>();
   private highspeedToolIntervalsByTurnId = new Map<string, Map<string, HighspeedToolInterval>>();
+  // 整会话统计的 turn 去重键：同一 turn 的多个 model step 只算一轮（不能按 step 计轮）。
+  private sessionStatsTurnIds = new Set<string>();
+  // ToolCallStarted 的真实开始时间，结果/错误到达时消费一次；不依赖可能已滑出 rows.window 的工具行。
+  // turn 收口时清掉未落结果的调用，避免取消轮把孤儿计时永久留在侧表。
+  private sessionStatsToolStartedAtByCallId = new Map<
+    string,
+    { turnId: string; startedAt: number }
+  >();
+  // transcript 合成冷恢复没有逐请求的 model_request_completed（瞬态事件重启即丢），
+  // 用残缺事件算出的计数不能冒充整会话读数：保持缺席，让客户端回退已加载窗口口径。
+  private sessionStatsEventLogComplete = true;
   // 投递语义侧表：TurnSteerQueued 时按事件 payload（或 followupMode 兜底）记录，
   // drain 时决定切轮 vs 内联；账本落地后以账本为准。
   private deliveryByPendingInputId = new Map<string, "guide" | "queue">();
@@ -848,6 +877,8 @@ export class ProductProjection {
               }
             : null,
           cumulative,
+          // 整会话统计来自事件重放；种子只补 token 水位，不能丢掉已重放出的计数。
+          ...(current.sessionStats ? { sessionStats: current.sessionStats } : {}),
         },
       };
       return;
@@ -870,6 +901,7 @@ export class ProductProjection {
             ? null
             : { ...seededContextWindow, maxTokens: seededContextWindow.maxTokens },
         cumulative,
+        ...(current.sessionStats ? { sessionStats: current.sessionStats } : {}),
       },
     };
   }
@@ -1379,6 +1411,14 @@ export class ProductProjection {
         new Map([...intervals].map(([toolCallId, interval]) => [toolCallId, { ...interval }])),
       ]),
     );
+    clone.sessionStatsTurnIds = new Set(this.sessionStatsTurnIds);
+    clone.sessionStatsToolStartedAtByCallId = new Map(
+      [...this.sessionStatsToolStartedAtByCallId].map(([toolCallId, started]) => [
+        toolCallId,
+        { ...started },
+      ]),
+    );
+    clone.sessionStatsEventLogComplete = this.sessionStatsEventLogComplete;
     clone.deliveryByPendingInputId = new Map(this.deliveryByPendingInputId);
     clone.queueAttachmentByPendingInputId = new Map(this.queueAttachmentByPendingInputId);
     clone.currentTurnId = this.currentTurnId;
@@ -1428,6 +1468,9 @@ export class ProductProjection {
     this.currentProductTurnStartedAtMs = candidate.currentProductTurnStartedAtMs;
     this.highspeedModelDurationByTurnId = candidate.highspeedModelDurationByTurnId;
     this.highspeedToolIntervalsByTurnId = candidate.highspeedToolIntervalsByTurnId;
+    this.sessionStatsTurnIds = candidate.sessionStatsTurnIds;
+    this.sessionStatsToolStartedAtByCallId = candidate.sessionStatsToolStartedAtByCallId;
+    this.sessionStatsEventLogComplete = candidate.sessionStatsEventLogComplete;
     this.deliveryByPendingInputId = candidate.deliveryByPendingInputId;
     this.queueAttachmentByPendingInputId = candidate.queueAttachmentByPendingInputId;
     this.currentTurnId = candidate.currentTurnId;
@@ -2566,6 +2609,7 @@ export class ProductProjection {
 
   private onTurnComplete(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as TurnCompletePayload;
+    this.discardUnsettledSessionToolStarts(this.turnIdOf(event));
     this.outputContinuationTextRowId = null;
     const headerState = mapTurnResultToHeaderState(payload.resultType);
     const header = this.turnHeaderForEvent(event);
@@ -2684,6 +2728,7 @@ export class ProductProjection {
 
   private onTurnError(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as TurnErrorPayload;
+    this.discardUnsettledSessionToolStarts(this.turnIdOf(event));
     this.outputContinuationTextRowId = null;
     if (this.turnHeaderForEvent(event)?.executionKind === "controlOnly") {
       const deltas = [
@@ -2758,8 +2803,11 @@ export class ProductProjection {
   // ── 流式输出 ──
 
   private onModelNetworkStatus(event: SessionEvent): ConversationDelta[] {
-    if (!this.acceptsActiveModelEvent(event)) return [];
     const payload = event.payload as ModelNetworkStatusPayload;
+    // 会话统计是整会话的持久事实：迟到完成仍发生在这个会话里，不能与「是否当前 turn」
+    // 的 API 重试 UI 门控耦合；否则冷重放结束/切换 turn 后的完成事件会被漏计。
+    const sessionStatsDeltas = this.accumulateSessionStats(event, payload);
+    if (!this.acceptsActiveModelEvent(event)) return sessionStatsDeltas;
     if (
       (payload.querySource === undefined || payload.querySource === "main_turn") &&
       (payload.type === "model_request_completed" || payload.type === "model_request_failed") &&
@@ -2808,7 +2856,8 @@ export class ProductProjection {
         // 保持当前状态，等首个有效 text/reasoning/tool 进展再清理，避免标签闪退。
         return positiveInteger(payload.attempt, 1) <= 1 ? this.setApiRetry(null) : [];
       case "model_request_completed":
-        return this.setApiRetry(null);
+        // 同一条完成事件同时推进整会话统计与 API 重试态；统计只在此类型非空。
+        return [...sessionStatsDeltas, ...this.setApiRetry(null)];
       case "model_request_failed":
         return payload.retryable ? [] : this.setApiRetry(null);
       case "model_stream_stalled":
@@ -2821,6 +2870,114 @@ export class ProductProjection {
       case "model_request_admitted":
       case "model_request_observation":
         return [];
+    }
+  }
+
+  /**
+   * 把成功完成的主会话 model step 累计进 usage.sessionStats。
+   *
+   * 只认 model_request_completed（不是 ModelComplete，也不是 toolCall）：一次请求 = 一个
+   * model step；同一 turn 的多个 step 用 turnId 去重只计一轮。decode 必须在同一批
+   * 「既有 timing 又有 output」的请求上配对，禁止跨请求混合分母/分子。冷重放与 live
+   * 走同一条归约路径，每个事件只记一次，所以恢复不会双计。
+   */
+  private accumulateSessionStats(
+    event: SessionEvent,
+    payload: ModelNetworkStatusPayload,
+  ): ConversationDelta[] {
+    if (!this.sessionStatsEventLogComplete) return [];
+    if (payload.type !== "model_request_completed") return [];
+    // querySource=subagent/compact/session_title 等旁路请求不是主会话 model step。
+    if (payload.querySource !== undefined && payload.querySource !== "main_turn") return [];
+    const turnId = this.turnIdOf(event);
+    const previous = this.snapshot.usage.sessionStats;
+    const next: SessionUsageStatsState = {
+      turns: previous?.turns ?? 0,
+      steps: (previous?.steps ?? 0) + 1,
+      decodeMs: previous?.decodeMs ?? 0,
+      decodeTokens: previous?.decodeTokens ?? 0,
+      llmMs: previous?.llmMs ?? 0,
+      toolMs: previous?.toolMs ?? 0,
+      ttftMs: previous?.ttftMs ?? 0,
+      ttftSteps: previous?.ttftSteps ?? 0,
+    };
+    if (!this.sessionStatsTurnIds.has(turnId)) {
+      this.sessionStatsTurnIds.add(turnId);
+      next.turns += 1;
+    }
+    const durationMs = nonNegativeMs(payload.durationMs);
+    const ttftMs = nonNegativeMs(payload.timeToFirstTextMs);
+    const outputTokens = usageOutputTokens(payload.usage);
+    if (durationMs !== undefined) next.llmMs += durationMs;
+    if (ttftMs !== undefined) {
+      next.ttftMs += ttftMs;
+      next.ttftSteps += 1;
+    }
+    if (durationMs !== undefined && ttftMs !== undefined && outputTokens !== undefined) {
+      next.decodeMs += Math.max(0, durationMs - ttftMs);
+      next.decodeTokens += outputTokens;
+    }
+    return [
+      {
+        op: "state.updated",
+        patch: { usage: { ...this.snapshot.usage, sessionStats: next } },
+      },
+    ];
+  }
+
+  /**
+   * 记录工具真实开始时间。真实 startedAt 优先；缺失时退回事件时间（live 事件时间同样真实）。
+   * subagent 镜像工具属于 child session，不进父会话统计。
+   */
+  private recordSessionToolStarted(
+    event: SessionEvent,
+    payload: ToolCallStartedPayload,
+  ): void {
+    if (this.isMirroredSubagentToolEvent(event)) return;
+    const toolCallId = String(payload.toolCallId);
+    if (this.sessionStatsToolStartedAtByCallId.has(toolCallId)) return;
+    const startedAt =
+      payload.startedAt instanceof Date ? payload.startedAt.getTime() : Number(payload.startedAt);
+    this.sessionStatsToolStartedAtByCallId.set(toolCallId, {
+      turnId: this.turnIdOf(event),
+      startedAt: Number.isFinite(startedAt) ? Math.max(0, startedAt) : this.ms(event),
+    });
+  }
+
+  /**
+   * 工具执行时间：ToolCallStarted 记录真实开始时间，结果/错误到达时消费一次。
+   * 优先用执行器上报的真实 duration（冷恢复合成事件同样携带它），缺失时退回开始→终态事件时间差。
+   */
+  private accumulateToolSessionStats(
+    event: SessionEvent,
+    toolCallId: string,
+    durationMs: number | undefined,
+  ): ConversationDelta[] {
+    if (this.isMirroredSubagentToolEvent(event)) return [];
+    const started = this.sessionStatsToolStartedAtByCallId.get(toolCallId);
+    if (started === undefined) return [];
+    this.sessionStatsToolStartedAtByCallId.delete(toolCallId);
+    const stats = this.snapshot.usage.sessionStats;
+    // 还没有成功的主会话 model step = 尚未发布整会话统计；单个工具不成会话读数。
+    if (stats === undefined) return [];
+    const elapsed = nonNegativeMs(durationMs) ?? Math.max(0, this.ms(event) - started.startedAt);
+    return [
+      {
+        op: "state.updated",
+        patch: {
+          usage: {
+            ...this.snapshot.usage,
+            sessionStats: { ...stats, toolMs: stats.toolMs + elapsed },
+          },
+        },
+      },
+    ];
+  }
+
+  /** turn 收口时丢弃未落结果的工具计时：取消/失败轮的残尾不属于任何工具执行事实。 */
+  private discardUnsettledSessionToolStarts(turnId: string): void {
+    for (const [toolCallId, started] of this.sessionStatsToolStartedAtByCallId) {
+      if (started.turnId === turnId) this.sessionStatsToolStartedAtByCallId.delete(toolCallId);
     }
   }
 
@@ -3470,8 +3627,11 @@ export class ProductProjection {
   }
 
   private onToolCallActivity(event: SessionEvent): ConversationDelta[] {
-    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return [];
     const payload = event.payload as ToolCallStartedPayload;
+    if (!this.isMirroredSubagentToolEvent(event) && this.isRunning()) {
+      this.recordSessionToolStarted(event, payload);
+    }
+    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return [];
     this.recordHighspeedToolStarted(
       this.turnIdOf(event),
       String(payload.toolCallId),
@@ -3525,9 +3685,14 @@ export class ProductProjection {
   }
 
   private onToolCallResult(event: SessionEvent): ConversationDelta[] {
-    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return [];
     const payload = event.payload as ToolCallResultPayload;
     const toolCallId = String(payload.toolCallId);
+    const sessionStatsDeltas = this.accumulateToolSessionStats(
+      event,
+      toolCallId,
+      payload.duration,
+    );
+    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return sessionStatsDeltas;
     this.recordHighspeedToolEnded(
       this.turnIdOf(event),
       toolCallId,
@@ -3535,7 +3700,8 @@ export class ProductProjection {
       payload.duration,
     );
     const row = this.findToolRow(toolCallId);
-    if (!row) return [];
+    // 工具行可能已滑出 rows.window；整会话统计仍要记录这次真实执行。
+    if (!row) return sessionStatsDeltas;
     const success = payload.result.success;
     if (success && readOfficialCuaAction(row.toolName) === "list_apps") {
       // 摘要身份必须来自 Agent 已观察到的成功事实；失败结果不能清空旧快照。
@@ -3568,7 +3734,7 @@ export class ProductProjection {
           }),
         )
       : [];
-    return [{ op: "row.upserted", row: next }, ...planDeltas];
+    return [{ op: "row.upserted", row: next }, ...planDeltas, ...sessionStatsDeltas];
   }
 
   /**
@@ -3660,11 +3826,13 @@ export class ProductProjection {
   }
 
   private onToolCallError(event: SessionEvent): ConversationDelta[] {
-    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return [];
     const payload = event.payload as ToolCallErrorPayload;
-    this.recordHighspeedToolEnded(this.turnIdOf(event), String(payload.toolCallId), this.ms(event));
-    const row = this.findToolRow(String(payload.toolCallId));
-    if (!row) return [];
+    const toolCallId = String(payload.toolCallId);
+    const sessionStatsDeltas = this.accumulateToolSessionStats(event, toolCallId, undefined);
+    if (this.isMirroredSubagentToolEvent(event) || !this.isRunning()) return sessionStatsDeltas;
+    this.recordHighspeedToolEnded(this.turnIdOf(event), toolCallId, this.ms(event));
+    const row = this.findToolRow(toolCallId);
+    if (!row) return sessionStatsDeltas;
     const cancelled =
       payload.error.type === CoreErrorType.ToolCancelled || payload.error.code === "TOOL_CANCELLED";
     return [
@@ -3682,6 +3850,7 @@ export class ProductProjection {
           endedAt: this.ms(event),
         },
       },
+      ...sessionStatsDeltas,
     ];
   }
 
@@ -5523,6 +5692,11 @@ export class ProductProjection {
 
   private onModelComplete(event: SessionEvent): ConversationDelta[] {
     const payload = event.payload as ModelCompletePayload;
+    // durable transcript 合成的模型历史说明逐请求 ModelNetworkStatus 已随内存淘汰丢失；
+    // 整会话统计不能由残缺事件重建，保持缺席让客户端回退已加载窗口口径。
+    if (String(event.traceId) === HYDRATION_TRACE_ID) {
+      this.sessionStatsEventLogComplete = false;
+    }
     const retryClearDeltas = this.acceptsActiveModelEvent(event) ? this.setApiRetry(null) : [];
     // 与旧 reducer 同一裁决：只有主会话往返才能覆盖 context 水位。
     const isMainTurn =
@@ -5614,6 +5788,10 @@ export class ProductProjection {
             cacheReadTokens: cumulative.cacheReadTokens + (usage.cacheReadTokens ?? 0),
             cacheWriteTokens: cumulative.cacheWriteTokens + (usage.cacheWriteTokens ?? 0),
           },
+          // usage 是键级整体替换：缺这一项会在 ModelComplete 时抹掉已累计的整会话统计。
+          ...(this.snapshot.usage.sessionStats
+            ? { sessionStats: this.snapshot.usage.sessionStats }
+            : {}),
         },
       },
     });

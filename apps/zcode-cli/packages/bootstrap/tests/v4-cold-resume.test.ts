@@ -52,6 +52,7 @@ import type {
   SessionEvent,
   SessionId,
   TraceId,
+  TurnId,
   WorkspaceId,
 } from "@zcode/contracts";
 import {
@@ -166,11 +167,12 @@ function makeEvent(
   seq: number,
   type: SessionEvent["type"],
   payload: unknown,
+  turnId?: string,
 ): SessionEvent {
   return {
     id: `event-${seq}` as EventId,
     sessionId: sessionId as SessionId,
-    turnId: undefined,
+    turnId: turnId as TurnId | undefined,
     type,
     timestamp: new Date(1_700_000_000_000 + seq * 1000),
     traceId: "trace-cold" as TraceId,
@@ -786,6 +788,99 @@ describe("v4 冷恢复（gateway 单元）", () => {
         { source: "system_tool_schemas", chars: 57_600 },
       ],
     });
+  });
+
+  it("冷恢复重放 model_request_completed 不双计，usage seed 不抹掉整会话统计", async () => {
+    const host = makeColdHost();
+    const turnId = "turn-cold-stats";
+    host.persistedEvents.set("sess-cold", [
+      makeEvent("sess-cold", 1, SessionEventType.SessionCreated, {
+        mode: "default",
+        contextWindow: 200_000,
+      }),
+      makeEvent(
+        "sess-cold",
+        2,
+        SessionEventType.TurnStarted,
+        { turnNumber: 1, input: "历史轮", messageId: "user-cold-stats" },
+        turnId,
+      ),
+      // 持久事件日志里的成功 model step：统计只能由它累计一次。
+      makeEvent(
+        "sess-cold",
+        3,
+        SessionEventType.ModelNetworkStatus,
+        {
+          type: "model_request_completed",
+          timestamp: "2026-07-24T00:00:00.000Z",
+          traceId: "trace-cold",
+          requestId: "request-cold-stats",
+          providerId: "provider-1",
+          modelId: "model-1",
+          transport: "sse",
+          querySource: "main_turn",
+          attempt: 1,
+          maxAttempts: 1,
+          durationMs: 1_000,
+          timeToFirstTextMs: 200,
+          usage: { inputTokens: 100, outputTokens: 300 },
+        },
+        turnId,
+      ),
+      // transcript 形态的零用量 ModelComplete 不是第二个 model step，不得再累计一次。
+      makeEvent(
+        "sess-cold",
+        4,
+        SessionEventType.ModelComplete,
+        {
+          content: "",
+          stopReason: "end_turn",
+          querySource: "main_turn",
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+        turnId,
+      ),
+      makeEvent(
+        "sess-cold",
+        5,
+        SessionEventType.TurnComplete,
+        { response: "", tokenCount: 0, toolCallCount: 0, duration: 1_200, resultType: "success" },
+        turnId,
+      ),
+    ]);
+    // 持久 usage 种子补 token 水位；种子的写回不能丢掉事件重放出的 sessionStats。
+    host.usageSeeds.set("sess-cold", {
+      contextWindow: {
+        usedTokens: 16_727,
+        maxTokens: 1_000_000,
+        autoCompactThresholdTokens: null,
+      },
+      cumulative: {
+        inputTokens: 16_638,
+        outputTokens: 89,
+        cacheReadTokens: 1_408,
+        cacheWriteTokens: 0,
+      },
+    });
+    const gateway = makeColdGateway(host);
+
+    const result = await gateway.subscribe(subscribeParams("sess-cold"));
+    if (result.initialFrame?.payload.kind !== "snapshot") {
+      throw new Error("Expected snapshot initial frame");
+    }
+    const usage = result.initialFrame.payload.snapshot.usage;
+    expect(usage.sessionStats).toEqual({
+      turns: 1,
+      steps: 1,
+      decodeMs: 800,
+      decodeTokens: 300,
+      llmMs: 1_000,
+      toolMs: 0,
+      ttftMs: 200,
+      ttftSteps: 1,
+    });
+    // seed 覆盖的是 token 水位，不是事件计数：这两项不能互相翻倍或互相抹掉。
+    expect(usage.cumulative.outputTokens).toBe(89);
   });
 });
 

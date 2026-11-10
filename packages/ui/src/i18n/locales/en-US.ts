@@ -6145,7 +6145,7 @@ const enUS: Record<string, string> = {
   "chat.composerUsageStats.modelTime": "Model time",
   "chat.composerUsageStats.toolTime": "Tool time",
   "chat.composerUsageStats.outputSpeed": "Output speed",
-  "chat.composerUsageStats.cacheHit": "Cumulative cache hit ({count} requests)",
+  "chat.composerUsageStats.cacheHit": "Cumulative cache hit (provider requests: {count})",
   "chat.composerUsageStats.cacheHitWithoutCount": "Cumulative cache hit",
   "chat.composerUsageStats.cacheHitLatest": "This turn cache hit",
   "chat.composerUsageStats.latestInput": "This turn input",
