@@ -185,8 +185,8 @@ export function ComposerStatusChips({
   if (chips.length === 0) {
     return null;
   }
-  // 目标会话的 chip 行与 composer 直接相邻：只保留行自身 pb-1 的 4px，不再叠加外部 mb-2；
-  // 普通会话没有目标卡片，保持旧版 mb-2 间距，避免 chip 行贴住 composer。
+  // chip 行与 composer 直接相邻：只保留行自身 pb-1 的 4px，不再叠加外部 mb-2；
+  // 无目标会话的后台 Bash/当前进度等 chip 也走同一间距，不随目标卡片有无跳变。
   // 目标卡片/面板与 chip 行之间仍由根节点的 gap-2 分隔。
   const active = chips.find((chip) => chip.id === openChip && chip.panel) ?? null;
   const closeGoalCard = () => {
@@ -196,7 +196,7 @@ export function ComposerStatusChips({
   };
 
   return (
-    <div className={cn("flex flex-col gap-2", goal ? "mb-0" : "mb-2", className)}>
+    <div className={cn("flex flex-col gap-2 mb-0", className)}>
       {/* 展开面板与 chip 行同列、在行上方：用户视线不需要移动，composer 也不被顶走。 */}
       {goal && goalCardOpen ? (
         <GoalCard

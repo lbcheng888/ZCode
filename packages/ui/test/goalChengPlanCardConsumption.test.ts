@@ -45,7 +45,7 @@ function model(goal: GoalState): ConversationStatusPanelModel {
   };
 }
 
-/** 普通会话（无 goal）：chip 行仍需保留旧版 mb-2 间距。 */
+/** 普通会话（无 goal）：chip 行与 composer 同样只保留 4px。 */
 function modelWithoutGoal(): ConversationStatusPanelModel {
   const items: PlanItem[] = [{ id: "pending", status: "pending", content: "待办事项" }];
   return {
@@ -271,13 +271,13 @@ describe("Swarm activity indicator", () => {
     expect(html).not.toContain('class="flex flex-col gap-2 -mb-2"');
   });
 
-  it("无 goal 会话恢复旧版 mb-2 间距", () => {
+  it("无 goal 会话与 composer 同样只保留 4px", () => {
     const html = renderToStaticMarkup(
       createElement(ComposerStatusChips, { model: modelWithoutGoal() }),
     );
 
-    expect(html).toContain('class="flex flex-col gap-2 mb-2"');
-    expect(html).not.toContain("mb-0");
+    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(html).not.toContain('class="flex flex-col gap-2 mb-2"');
   });
 
   it("运行中失败的单元追加 failed 读数，不改变进行中文案", () => {
