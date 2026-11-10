@@ -17,8 +17,8 @@ export function MarkdownUnorderedList({
   return (
     <ul
       className={cn(
-        "my-3 list-outside list-disc space-y-1.5 pl-5 marker:text-foreground-subtlest",
-        "[&_ul]:my-1.5 [&_ol]:my-1.5",
+        "my-2 list-outside list-disc space-y-1 pl-5 marker:text-foreground-subtlest",
+        "[&_ul]:my-1 [&_ol]:my-1",
         className,
       )}
       data-markdown-list="unordered"
@@ -40,8 +40,8 @@ export function MarkdownOrderedList({
       className={cn(
         // 有序列表编号到两位/三位时，list-outside 会把 marker 向父容器外侧扩展；
         // 消息气泡外层有 overflow-hidden，固定 pl 缩进不足就会把编号左侧截断。
-        "my-3 list-inside list-decimal space-y-1.5 pl-0 marker:text-foreground-subtlest",
-        "[&_ul]:my-1.5 [&_ol]:my-1.5",
+        "my-2 list-inside list-decimal space-y-1 pl-0 marker:text-foreground-subtlest",
+        "[&_ul]:my-1 [&_ol]:my-1",
         className,
       )}
       data-markdown-list="ordered"

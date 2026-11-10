@@ -451,13 +451,14 @@ const messageFileLinkClassName =
   "inline-flex max-w-full items-baseline gap-1 align-baseline text-icon-blue text-ui-base no-underline decoration-dotted underline-offset-4 hover:underline";
 // Markdown 之前继承紧凑 UI 字号，正文、标题、链接和表格缺少独立的阅读层级。
 // 这里显式定义字号层级，并让标题跟随 UI 字号 Token 缩放，确保聊天、预览和工具面板复用 MessageResponse 时保持一致。
+// 标题外边距压到 16/8：Streamdown 根容器对每个块还会叠加 space-y，继续用 mt-6/mb-4 会把报告类输出拉成大片空白。
 const messageMarkdownHeadingClassNames = {
-  h1: "mt-6 mb-4 text-ui-xl font-semibold",
-  h2: "mt-6 mb-4 text-ui-lg font-semibold",
-  h3: "mt-6 mb-4 text-ui-base font-semibold",
-  h4: "mt-6 mb-4 text-ui-base font-semibold",
-  h5: "mt-6 mb-4 text-ui-base font-medium",
-  h6: "mt-6 mb-4 text-ui-base font-normal",
+  h1: "mt-5 mb-2 text-ui-xl font-semibold",
+  h2: "mt-5 mb-2 text-ui-lg font-semibold",
+  h3: "mt-4 mb-2 text-ui-base font-semibold",
+  h4: "mt-4 mb-2 text-ui-base font-semibold",
+  h5: "mt-4 mb-2 text-ui-base font-medium",
+  h6: "mt-4 mb-2 text-ui-base font-normal",
 } as const;
 const languageClassNamePattern = /(?:^|\s)language-([^\s]+)/;
 const fileUrlProtocolPattern = /^file:\/\//i;
@@ -1476,7 +1477,8 @@ export const MessageResponse = memo(
       [renderZCodeFileCitations, workspaceHomePath, workspacePath],
     );
     const responseClassName = cn(
-      "size-full text-ui-base leading-[1.75] tracking-wide [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+      // Streamdown 根节点自带 space-y-4；这里覆盖成 space-y-2 并收紧行高，避免长报告每块之间空出 16px。
+      "size-full space-y-2 text-ui-base leading-[1.6] tracking-wide [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
       className,
     );
     const fallbackClassName = cn(responseClassName, "whitespace-pre-wrap break-words");
