@@ -106,15 +106,26 @@ afterEach(async () => {
 describe("SwarmActivityPanel", () => {
   it("展开蜂群 chip 后按 units 顺序渲染每个 worker 的状态与描述", async () => {
     const container = await renderChips(swarmActivity());
+    expect(container.firstElementChild?.className).toBe("relative flex flex-col gap-2 mb-0");
     const chip = container.querySelector("button[aria-expanded]");
     expect(chip).not.toBeNull();
     if (!chip) return;
     expect(chip.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector('[data-composer-status-panel="swarm"]')).toBeNull();
+    // 收起态不渲染空浮层，chip 行仍直接参与文档流。
+    expect(container.querySelector('[data-composer-status-overlay="true"]')).toBeNull();
 
     await click(chip);
 
     expect(chip.getAttribute("aria-expanded")).toBe("true");
+    // 面板挂在绝对定位浮层里，chip 行不在浮层内：展开不改变行高与 composer 位置。
+    const overlay = container.querySelector('[data-composer-status-overlay="true"]');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.className).toBe(
+      "absolute bottom-full left-0 z-30 flex w-full flex-col gap-2 mb-2 pointer-events-auto",
+    );
+    expect(overlay?.querySelector('[data-composer-status-panel="swarm"]')).not.toBeNull();
+    expect(overlay?.querySelector("button[aria-expanded]")).toBeNull();
     expect(container.querySelector('[data-composer-status-panel="swarm"]')).not.toBeNull();
     const rows = [...container.querySelectorAll("[data-swarm-unit]")];
     expect(rows.map((row) => row.getAttribute("data-swarm-unit"))).toEqual(
@@ -137,10 +148,11 @@ describe("SwarmActivityPanel", () => {
       ).toBe(true);
     }
 
-    // 再点一次收起：同一位置的面板消失，chip 回到可展开态。
+    // 再点一次收起：浮层连同面板一起消失，chip 回到可展开态。
     await click(chip);
     expect(chip.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector('[data-composer-status-panel="swarm"]')).toBeNull();
+    expect(container.querySelector('[data-composer-status-overlay="true"]')).toBeNull();
   });
 
   it("failed/cancelled 行展示原始错误，done 行不带错误副行", async () => {

@@ -99,6 +99,12 @@ describe("ChengPlan card renderer consumption", () => {
     expect(html).toContain("fix_spec@p02_min2");
     expect(html).toContain('data-goal-cheng-run-id="run-1"');
     expect(html).toContain("settle_not_solved");
+    // 目标卡片与 chip 面板走浮层：根节点只承载在文档流中的 chip 行。
+    expect(html).toContain('class="relative flex flex-col gap-2 mb-0"');
+    expect(html).toContain('data-composer-status-overlay="true"');
+    expect(html).toContain(
+      'class="absolute bottom-full left-0 z-30 flex w-full flex-col gap-2 mb-2 pointer-events-auto"',
+    );
   });
 
   it("renders no ChengPlan card when the projection has no card", () => {
@@ -226,6 +232,44 @@ describe("ChengPlan card continue action（S4 一键接续）", () => {
     });
     expect(onContinueFromPlanCard).toHaveBeenCalledTimes(1);
   });
+
+  it("目标卡与 chip 面板同时展开时在浮层内纵向排列，chip 行仍在文档流", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(
+        createElement(ComposerStatusChips, {
+          model: model(goalWithCard()),
+          defaultGoalCardOpen: true,
+          defaultOpenChip: "swarm",
+          swarmActivity: {
+            activeUnits: 1,
+            completedUnits: 0,
+            totalUnits: 2,
+            units: [
+              { taskId: "unit-1", description: "浮层内运行中单元", status: "running" },
+              { taskId: "unit-2", description: "排队单元", status: "pending" },
+            ],
+          },
+        }),
+      );
+    });
+
+    const rootElement = container.firstElementChild as HTMLElement;
+    expect(rootElement.className).toBe("relative flex flex-col gap-2 mb-0");
+    // 根节点只有浮层与 chip 行两个子节点：面板不再参与文档流，chip 行高度不变。
+    expect(rootElement.children).toHaveLength(2);
+    const overlay = container.querySelector('[data-composer-status-overlay="true"]');
+    expect(overlay).not.toBeNull();
+    expect(rootElement.children[0]).toBe(overlay);
+    expect(overlay?.children).toHaveLength(2);
+    // 两个面板同处浮层、纵向排列；chip 行留在浮层之外。
+    expect(overlay?.querySelector('[data-composer-status-panel="goal"]')).not.toBeNull();
+    expect(overlay?.querySelector('[data-composer-status-panel="swarm"]')).not.toBeNull();
+    expect(overlay?.querySelector("button[aria-expanded]")).toBeNull();
+  });
 });
 
 describe("Swarm activity indicator", () => {
@@ -266,7 +310,7 @@ describe("Swarm activity indicator", () => {
     expect(html).toContain("&quot;completed&quot;:2");
     expect(html).toContain("&quot;total&quot;:4");
     // chip 行与 composer 相邻：goal 会话只保留行自身 pb-1 的 4px，不再叠加外部 mb-2。
-    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(html).toContain('class="relative flex flex-col gap-2 mb-0"');
     expect(html).not.toContain('class="flex flex-col gap-2 mb-2"');
     expect(html).not.toContain('class="flex flex-col gap-2 -mb-2"');
   });
@@ -276,7 +320,7 @@ describe("Swarm activity indicator", () => {
       createElement(ComposerStatusChips, { model: modelWithoutGoal() }),
     );
 
-    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(html).toContain('class="relative flex flex-col gap-2 mb-0"');
     expect(html).not.toContain('class="flex flex-col gap-2 mb-2"');
   });
 
@@ -333,7 +377,7 @@ describe("Swarm activity indicator", () => {
     expect(html).toContain("&quot;total&quot;:4");
     expect(html).toContain("chat.composerChips.swarmFailed:");
     expect(html).toContain("&quot;failed&quot;:1");
-    expect(html).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(html).toContain('class="relative flex flex-col gap-2 mb-0"');
     expect(html).not.toContain("-mb-2");
   });
 
@@ -352,7 +396,7 @@ describe("Swarm activity indicator", () => {
     );
     expect(idle).not.toContain("data-swarm-active");
     // 无运行中单元且未中断 → 整颗隐藏；goal 会话根节点保持 mb-0。
-    expect(idle).toContain('class="flex flex-col gap-2 mb-0"');
+    expect(idle).toContain('class="relative flex flex-col gap-2 mb-0"');
     expect(idle).not.toContain("mb-2");
 
     const empty = renderToStaticMarkup(

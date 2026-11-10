@@ -187,7 +187,7 @@ export function ComposerStatusChips({
   }
   // chip 行与 composer 直接相邻：只保留行自身 pb-1 的 4px，不再叠加外部 mb-2；
   // 无目标会话的后台 Bash/当前进度等 chip 也走同一间距，不随目标卡片有无跳变。
-  // 目标卡片/面板与 chip 行之间仍由根节点的 gap-2 分隔。
+  // 目标卡片/面板走绝对定位浮层，只有 chip 行参与文档流；根节点的 relative 是浮层定位锚点。
   const active = chips.find((chip) => chip.id === openChip && chip.panel) ?? null;
   const closeGoalCard = () => {
     if (!goal) return;
@@ -196,27 +196,35 @@ export function ComposerStatusChips({
   };
 
   return (
-    <div className={cn("flex flex-col gap-2 mb-0", className)}>
-      {/* 展开面板与 chip 行同列、在行上方：用户视线不需要移动，composer 也不被顶走。 */}
-      {goal && goalCardOpen ? (
-        <GoalCard
-          goal={goal}
-          elapsedSeconds={getConversationGoalElapsedSeconds(goal, now)}
-          liveOutputTokens={model.liveOutputTokens}
-          intl={intl}
-          onPauseGoal={onPauseGoal}
-          onResumeGoal={onResumeGoal}
-          onCancelGoal={onCancelGoal}
-          onContinueFromPlanCard={onContinueFromPlanCard}
-          onClose={closeGoalCard}
-        />
-      ) : null}
-      {active ? (
+    <div className={cn("relative flex flex-col gap-2 mb-0", className)}>
+      {/* 展开面板覆盖在 chip 行上方（bottom-full 锚定根节点顶部），不占文档流，
+          因此展开/收起都不挤动 chip 行高度与 composer；两个面板同时打开时在浮层内纵向排列。 */}
+      {goalCardOpen || active !== null ? (
         <div
-          data-composer-status-panel={active.id}
-          className="max-h-64 overflow-y-auto rounded-xl border border-card-border bg-card px-3 py-2"
+          data-composer-status-overlay="true"
+          className="absolute bottom-full left-0 z-30 flex w-full flex-col gap-2 mb-2 pointer-events-auto"
         >
-          {active.panel}
+          {goal && goalCardOpen ? (
+            <GoalCard
+              goal={goal}
+              elapsedSeconds={getConversationGoalElapsedSeconds(goal, now)}
+              liveOutputTokens={model.liveOutputTokens}
+              intl={intl}
+              onPauseGoal={onPauseGoal}
+              onResumeGoal={onResumeGoal}
+              onCancelGoal={onCancelGoal}
+              onContinueFromPlanCard={onContinueFromPlanCard}
+              onClose={closeGoalCard}
+            />
+          ) : null}
+          {active ? (
+            <div
+              data-composer-status-panel={active.id}
+              className="max-h-64 overflow-y-auto rounded-xl border border-card-border bg-card px-3 py-2"
+            >
+              {active.panel}
+            </div>
+          ) : null}
         </div>
       ) : null}
       <div className="flex gap-2 overflow-x-auto whitespace-nowrap pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
