@@ -51,6 +51,11 @@ export interface SwarmTask {
    *（那会把普通会话误变成路径狱）。
    */
   workspaceBoundary?: string;
+  /**
+   * 文件域 lane 的写白名单（绝对路径）。AgentSwarm 的 file_domains 编排写入；
+   * 普通 items 与 goal swarm 不设。只约束写工具，Bash 不在本层解析。
+   */
+  allowedWritePaths?: readonly string[];
   trace: TraceContext;
   callerCanReadOutputFile?: boolean;
 }

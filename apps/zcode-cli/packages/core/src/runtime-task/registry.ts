@@ -59,6 +59,8 @@ export interface RuntimeTaskSnapshot extends SubagentTaskSnapshot {
    * 必须以它为权威；发送方的 workingDirectory/workspaceRoot 不是原任务的执行边界。
    */
   workspaceBoundary?: string;
+  /** 文件域 lane 的写白名单；恢复终态任务时由原 snapshot 决定，发送方无权改写。 */
+  allowedWritePaths?: readonly string[];
   /**
    * workflow run 产物的序列化文本。TaskOutput 的投影只读得到 registry 条目（dwf 从不写
    * outputFile），所以产物必须在终态更新时就存到条目上。

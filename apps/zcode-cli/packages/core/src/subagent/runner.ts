@@ -106,6 +106,8 @@ export interface ExploreSubagentRuntimeRequest {
   workspaceRoot: string;
   /** swarm worker 的强制工作区边界（绝对路径）；非 swarm 请求缺席。 */
   workspaceBoundary?: string;
+  /** 文件域 lane 的写白名单（绝对路径）；只约束写工具，Bash 不在本层解析。 */
+  allowedWritePaths?: readonly string[];
   /**
    * child 每次模型回复成功后把正文交给父会话（runner 截断后发 SubagentMessage）。
    * 只做展示用途；回调不得阻塞或改变 child 的执行结果。
@@ -1155,6 +1157,7 @@ async function resumeTerminalAgentInBackground(
     workspaceRoot: task.workspaceRoot ?? request.workspaceRoot,
     // 恢复后的 child 仍是原 swarm worker：边界属于原任务，发送方 cwd 无权改写。
     ...(task.workspaceBoundary === undefined ? {} : { workspaceBoundary: task.workspaceBoundary }),
+    ...(task.allowedWritePaths === undefined ? {} : { allowedWritePaths: task.allowedWritePaths }),
     trace: request.trace,
   };
   const lifecycle = createSubagentLifecycleFromTask(options, resumeRequest, profile, task);
@@ -1350,6 +1353,9 @@ async function runAgentToCompletion(
       ...(request.workspaceBoundary === undefined
         ? {}
         : { workspaceBoundary: request.workspaceBoundary }),
+      ...(request.allowedWritePaths === undefined
+        ? {}
+        : { allowedWritePaths: request.allowedWritePaths }),
       onChildAssistantMessage: (text) => {
         pendingChildMessages.push(
           emitSubagentEvent(
@@ -1694,6 +1700,9 @@ function createRuntimeTaskSnapshot(input: {
     ...(input.request.workspaceBoundary === undefined
       ? {}
       : { workspaceBoundary: input.request.workspaceBoundary }),
+    ...(input.request.allowedWritePaths === undefined
+      ? {}
+      : { allowedWritePaths: input.request.allowedWritePaths }),
     startedAt: input.startedAt,
     status: input.status,
     taskType: "local_agent",

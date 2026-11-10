@@ -7,9 +7,12 @@ worktree 中执行，经 revision 合并闸门后把真实产出交回目标生�
 
 - **goal swarm**（`swarm-orchestrator.ts` / `target-continuation.ts`）：target 生命周期按轮推进，
   每个 worker 一棵 git worktree，revision 合并闸门后才回写基准树。
-- **AgentSwarm**（`agent-swarm.ts`，经 `index.ts` 导出给 `tool/handlers/agent.ts`）：模型可见的
+- **AgentSwarm**（`agent-swarm.ts` + `agent-swarm-file-domains.ts`，经 `index.ts` 导出给
+  `tool/handlers/agent.ts`）：模型可见的
   AgentSwarm 工具执行面。所有 worker **共享调用方 workspace**，不建 worktree、不做 merge，
-  也不给 `workspaceBoundary`；只允许相互独立、同形、不写同一文件的任务。它复用
+  也不给 `workspaceBoundary`。items 模式要求任务相互独立、同形、不写同一文件；
+  file_domains 模式把每个 lane 的精确文件写进 `allowedWritePaths`，由 Write/Edit/ApplyPatch
+  在 path-policy 拒绝域外目标。Bash 命令字符串仍不解析，不属于写域强制范围。它复用
   `SwarmWorker` 的执行与取消收口，但绝不进入 goal swarm 的隔离/合并路径。
 
 不变量：
@@ -25,3 +28,6 @@ worktree 中执行，经 revision 合并闸门后把真实产出交回目标生�
 - AgentSwarm 的取消权威方是调用方 `context.abortSignal`：每次启动排队任务前先判信号，
   abort 后不再启动新任务；已启动任务由 `SwarmWorker` / 端口按 signal 收口为 cancelled/failed，
   不把未发生的结果写成 completed。
+
+- AgentSwarm file_domains 在 spawn 前校验写域：文件路径必须在 workspaceRoot 内、跨 domain
+  两两不相交、不含换行/控制字符；任一违规都在启动子代理前 typed 拒绝，不留下半批 worker。

@@ -303,6 +303,7 @@ function resolvePatchPath(
     workingDirectory: context.workingDirectory,
     workspaceRoot: context.workspaceRoot,
     workspaceBoundary: context.workspaceBoundary,
+    allowedWritePaths: context.allowedWritePaths,
   });
 }
 

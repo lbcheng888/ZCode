@@ -285,6 +285,11 @@ export interface AgentRuntimeConfig {
    * 文件工具与显式 cwd 被限制在边界内；缺席 = 普通会话，行为不变。
    */
   workspaceBoundary?: string;
+  /**
+   * 文件域 lane 的写白名单（绝对路径）：只由 AgentSwarm file_domains 经 SubagentRunRequest
+   * 写入 child runtime。写工具在 path-policy 拒绝白名单外目标；读工具不受限。
+   */
+  allowedWritePaths?: readonly string[];
   /** 本次运行的附加目录，仅用于环境 prompt 展示，不参与配置发现或持久化。 */
   additionalDirectories?: readonly string[];
   /**

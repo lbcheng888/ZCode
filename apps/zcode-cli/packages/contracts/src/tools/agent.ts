@@ -40,7 +40,7 @@ export const AgentInputJsonSchema = toToolJsonSchema(AgentInputSchema);
 // AgentSwarm - 一个模板对多个输入的同形 fan-out
 // ============================================================
 
-/** 一次 AgentSwarm 调用的任务总数上限（items 条数 + resume_agent_ids 键数）。 */
+/** 一次 AgentSwarm 调用的任务总数上限（items 或 file_domains 条数 + resume_agent_ids 键数）。 */
 export const AGENT_SWARM_MAX_TASKS = 128;
 
 /** 聚合结果（含 <agent_swarm_result> 框架与属性）的 UTF-16 字符上限。 */
@@ -48,6 +48,18 @@ export const AGENT_SWARM_MAX_OUTPUT_CHARS = 200_000;
 
 /** items 模式下一段 prompt 里唯一的模板占位符。 */
 export const AGENT_SWARM_ITEM_PLACEHOLDER = "{{item}}";
+
+/** file_domains 模式可选的文件列表占位符；存在时由每个 domain 的文件列表替换。 */
+export const AGENT_SWARM_FILES_PLACEHOLDER = "{{files}}";
+
+/** file_domains 模式的 lane 数上限。 */
+export const AGENT_SWARM_MAX_FILE_DOMAINS = 128;
+
+/** 单个 file domain 的文件数上限。 */
+export const AGENT_SWARM_MAX_FILES_PER_DOMAIN = 128;
+
+/** 一次 AgentSwarm 调用里 file_domains 覆盖的文件总数上限。 */
+export const AGENT_SWARM_MAX_TOTAL_DOMAIN_FILES = 512;
 
 /**
  * resume_agent_ids 键（agentId）的字符上限；超长键在 schema 层就以 typed invalid input 拒绝。
@@ -57,6 +69,29 @@ export const AGENT_SWARM_MAX_RESUME_AGENT_ID_CHARS = 512;
 
 /** resume_agent_ids 值（续跑消息）的字符上限；超出同样在 schema 层拒绝。 */
 export const AGENT_SWARM_MAX_RESUME_PROMPT_CHARS = 20_000;
+
+/**
+ * 一个文件域 lane：files 是精确的 workspace 内文件路径；所有 lane 的文件必须两两不相交。
+ * description 只用于卡片/输出识别，不参与路径校验。
+ */
+export const AgentSwarmFileDomainSchema = z
+  .object({
+    description: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Optional short label for this file domain lane."),
+    files: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(AGENT_SWARM_MAX_FILES_PER_DOMAIN)
+      .describe(
+        "Exact workspace file paths this lane may modify. Files must be disjoint across file_domains.",
+      ),
+  })
+  .strict();
+
+export type AgentSwarmFileDomain = z.infer<typeof AgentSwarmFileDomainSchema>;
 
 export const AgentSwarmInputSchema = z
   .object({
@@ -69,7 +104,7 @@ export const AgentSwarmInputSchema = z
       .string()
       .optional()
       .describe(
-        `Template applied to every item; must contain the literal placeholder ${AGENT_SWARM_ITEM_PLACEHOLDER}. Required whenever items are provided.`,
+        `Shared task template. With items it must contain the literal placeholder ${AGENT_SWARM_ITEM_PLACEHOLDER}; with file_domains it is the lane task and may contain ${AGENT_SWARM_FILES_PLACEHOLDER}. Required whenever items or file_domains are provided.`,
       ),
     items: z
       .array(z.string())
@@ -77,6 +112,13 @@ export const AgentSwarmInputSchema = z
       .optional()
       .describe(
         `Independent inputs for one same-shape task; each is substituted into prompt_template. At least 2 are required unless resume_agent_ids is used.`,
+      ),
+    file_domains: z
+      .array(AgentSwarmFileDomainSchema)
+      .max(AGENT_SWARM_MAX_FILE_DOMAINS)
+      .optional()
+      .describe(
+        `File-boundary lanes: each domain launches one subagent with a disjoint set of workspace files. Files must not overlap across domains; Write/Edit/ApplyPatch outside the lane's files are rejected. Either items or file_domains, not both.`,
       ),
     resume_agent_ids: z
       .record(

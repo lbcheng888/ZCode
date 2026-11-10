@@ -565,6 +565,7 @@ async function executeToolCallImpl(
         workingDirectory: guardedWorkingDirectory ?? deps.getWorkingDirectory(),
         workspaceRoot: deps.getWorkspaceRoot(),
         workspaceBoundary: deps.getWorkspaceBoundary?.(),
+        allowedWritePaths: deps.getAllowedWritePaths?.(),
         workspaceIdentity: deps.workspaceIdentity,
         workspaceWriteLeaseAdmission: deps.workspaceWriteLeaseAdmission,
         writeLeaseOwnerRunId: deps.getWriteLeaseOwnerRunId?.(),

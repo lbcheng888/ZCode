@@ -4,20 +4,22 @@
 `agentSwarmToolEntry`（handler 经公开入口 `runtime/swarm/index.js` 按需导入 `runAgentSwarm`，
 见 `:396-406`），校验/执行/聚合在
 `apps/zcode-cli/packages/core/src/runtime/swarm/agent-swarm.ts`（`runAgentSwarm`，`:100-137`），
-输入/输出 schema 在 `apps/zcode-cli/packages/contracts/src/tools/agent.ts:61-91`。
+文件域 lane 的路径校验与 prompt 头在 `runtime/swarm/agent-swarm-file-domains.ts`。
+输入/输出 schema 在 `apps/zcode-cli/packages/contracts/src/tools/agent.ts:43-125`。
 本文只描述当前代码；未落地能力统一列在「明确未实现」。
 
 ## 定位：与 goal swarm、kimi Tower 的区别
 
 AgentSwarm 是**模型可见的并行派发工具**：一次调用把同一段 prompt 模板套到多个输入，为每个输入
-启动一个子代理，或按 `resume_agent_ids` 续跑已有子代理。所有子代理共享调用方的 workspace。
+启动一个子代理；也可以用 `file_domains` 按文件边界切互不重叠的 lane；或按
+`resume_agent_ids` 续跑已有子代理。所有子代理共享调用方的 workspace。
 
 三个相邻能力不是同一个执行器：
 
-| 能力 | 隔离单位 | 回写方式 | 生命周期 |
-| --- | --- | --- | --- |
-| AgentSwarm | 无；共享调用方 workspace | 子代理直接写共享目录，无 merge | 一次工具调用 |
-| goal swarm | 每个 worker 一棵 git worktree | revision CAS 后的串行 merge，journal 记录回合 | 目标回合 |
+| 能力       | 隔离单位                            | 回写方式                                           | 生命周期               |
+| ---------- | ----------------------------------- | -------------------------------------------------- | ---------------------- |
+| AgentSwarm | 无；共享调用方 workspace            | 子代理直接写共享目录，无 merge                     | 一次工具调用           |
+| goal swarm | 每个 worker 一棵 git worktree       | revision CAS 后的串行 merge，journal 记录回合      | 目标回合               |
 | kimi Tower | 每个 mission 独立 branch + worktree | 独立 review 通过后按依赖合并，`.tower/` 持久化状态 | 用户显式开启的协作模式 |
 
 goal swarm 的细节见 `apps/zcode-cli/docs/design/v2/goal-swarm.md`：它在回合内分解目标、
@@ -41,13 +43,13 @@ worktree、没有 merge/review、没有持久化回合状态，只有一次调�
 }
 ```
 
-| 字段 | 必填 | 语义 |
-| --- | --- | --- |
-| `description` | 是 | 整批任务的短描述；非空。 |
-| `subagent_type` | 否 | 只作用于 items 派生出的新子代理；缺省 `general-purpose`。resume 的子代理保留原类型。 |
-| `prompt_template` | items 在场时是 | 每个子代理的 prompt 模板；必须含字面占位符 `{{item}}`。 |
-| `items` | 否 | 同一段模板的输入值；每个字符串启动一个新子代理。 |
-| `resume_agent_ids` | 否 | `agentId → 续跑消息` 的映射；每个键续跑一个已有子代理。 |
+| 字段               | 必填           | 语义                                                                                 |
+| ------------------ | -------------- | ------------------------------------------------------------------------------------ |
+| `description`      | 是             | 整批任务的短描述；非空。                                                             |
+| `subagent_type`    | 否             | 只作用于 items 派生出的新子代理；缺省 `general-purpose`。resume 的子代理保留原类型。 |
+| `prompt_template`  | items 在场时是 | 每个子代理的 prompt 模板；必须含字面占位符 `{{item}}`。                              |
+| `items`            | 否             | 同一段模板的输入值；每个字符串启动一个新子代理。                                     |
+| `resume_agent_ids` | 否             | `agentId → 续跑消息` 的映射；每个键续跑一个已有子代理。                              |
 
 schema 是严格模式（`z.object(...).strict()`，`contracts/src/tools/agent.ts:61-91`），未知字段
 直接拒绝；没有 `fork`，也没有调用级 `model` 字段。`items` 的 schema 上限是 128
@@ -83,6 +85,42 @@ tool result。
 拒绝抛出 typed `ToolExecutionFailed`，不降级成「部分启动」。测试
 `apps/zcode-cli/packages/core/tests/agent-swarm-tool.test.ts` 对每组非法输入断言
 `SubagentPort.run` 与 `sendMessage` 调用数均为 0。
+
+## file_domains：按文件边界切 lane
+
+模型可以把一次改动按文件边界切成互不重叠的 lane；每个 domain 启动一个子代理，写域由 harness
+硬约束，而不是只靠 prompt 约定。
+
+```json
+{
+  "description": "repair five file domains",
+  "prompt_template": "Fix the regression in the files listed below.",
+  "file_domains": [
+    { "description": "parser", "files": ["src/parser/a.ts", "src/parser/b.ts"] },
+    { "description": "ui", "files": ["src/ui/c.ts"] },
+    { "files": ["src/runtime/d.ts"] }
+  ]
+}
+```
+
+- 每个 domain 一个 worker；`files` 必须是 workspaceRoot 内的精确文件路径，跨 domain 两两
+  不相交。路径按工具同一套 realpath 规则收敛，符号链接别名也按同一文件去重。同一文件的
+  多处修复必须合并成一个 domain，不能拆给两个 worker。
+- `prompt_template` 是共享任务模板。模板里可以用 `{{files}}` 让 harness 在该位置展开本 lane
+  的文件列表；不写占位符时，harness 在 prompt 头部注入列表。
+- harness 在每个 lane 的 prompt 前加一段固定头：`[AgentSwarm file domain i/n]`、允许修改的
+  文件、以及“不得创建/修改其它文件，读取不受限”。任务模板附在 `[Task]` 之后。
+- 校验在 spawn 前完成：`items` 与 `file_domains` 互斥；至少 2 个 domain（除非同时 resume）；
+  domain 数 ≤ 128、单 domain 文件数 ≤ 128、总文件数 ≤ 512；路径不得逃出 workspaceRoot；
+  不得含换行/控制字符；重复文件、重复 prompt 都 typed `SWARM_INVALID_INPUT` 拒绝。
+- 写域硬约束：每个 lane 的绝对文件路径写进 `SwarmTask.allowedWritePaths`，沿
+  `SubagentRunRequest → child runtime → ToolExecutionContext` 下传；`Write` / `Edit` /
+  `ApplyPatch` 在 `path-policy` 里按 realpath 比较，白名单外 fail-closed。`Read` / `Glob` /
+  `Grep` 不受限，worker 仍可读取领域外上下文。
+- Bash 命令字符串不在本层解析：worker 仍可能通过 shell 写域外文件。prompt 明确禁止，
+  但这不是命令级沙箱；需要完整隔离时用 goal swarm / Tower，而不是 file_domains。
+- 输出仍是一条 `<subagent>`：额外的 `domain="i"` 与 `files="a.ts, b.ts"` 属性把结果对回
+  lane；`item` 是 domain 的 description（缺省 `file domain i`）。
 
 ## 执行模型：共享 workspace，无 worktree/merge
 
@@ -189,9 +227,11 @@ AgentSwarm 不设边界，因此子代理的文件工具走普通会话语义，
 
 不适用/必须自行规避：
 
-- **不保证并发写安全**。所有 child 共享同一个 workspace，两个 child 同时改同一文件会互相
-  覆盖；没有 worktree、没有 merge 冲突检测、没有整轮回滚。需要文件级隔离时用 goal swarm
-  或 Tower，而不是 AgentSwarm。
+- **items 模式不保证并发写安全**。所有 child 共享同一个 workspace，两个 child 同时改同一
+  文件会互相覆盖；没有 worktree、没有 merge 冲突检测、没有整轮回滚。需要文件级硬约束时用
+  `file_domains`；需要完整命令级隔离时用 goal swarm 或 Tower。
+- **file_domains 只约束文件工具**。`Write` / `Edit` / `ApplyPatch` 拒绝域外目标；Bash
+  命令字符串不解析，仍可能通过 shell 写域外文件。lane 内应把 Bash 限制为只读或本域命令。
 - 一个 child 的副作用不会因另一个 child 失败而撤销；部分失败只体现在聚合结果里。
 - `workspaceBoundary` 缺席意味着没有路径狱；`Bash` 命令字符串也不做解析，AgentSwarm 不是
   命令级沙箱。
@@ -232,7 +272,10 @@ pnpm exec vitest run packages/core/tests/agent-swarm-tool.test.ts
 ```
 
 测试覆盖：3 items 的 prompt 填值与共享 workspace/无 boundary、每次请求的
-`parentToolCallId`、items 不足 2 / 缺模板 / 缺占位符 / 重复 prompt / 超 128 的零启动拒绝、
+`parentToolCallId`、file_domains 的 lane/写集/prompt 头/输出 domain 属性、items 与
+file_domains 互斥、单 domain 拒绝、跨 domain 重复文件/越界路径/换行路径的零启动拒绝、
+`allowedWritePaths` 沿 SwarmWorker → child runtime → path-policy 的写域拒绝与读放行、
+items 不足 2 / 缺模板 / 缺占位符 / 重复 prompt / 超 128 的零启动拒绝、
 `resume_agent_ids` 的 1..512 与 1..20_000 边界及超限 typed 拒绝、300k key 的有界错误、
 `sendMessage + waitForTask` 聚合、没有 `waitForTask` 时只回报 delivery 事实（无 delivery 记
 `send_accepted`）、正文/提示的标签注入不产生列零条目、提示 2k/8-id 限界、部分失败仍返回

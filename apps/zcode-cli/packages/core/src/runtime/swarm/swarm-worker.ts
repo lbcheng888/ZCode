@@ -281,6 +281,7 @@ function toSubagentRunRequest(task: SwarmTask): SubagentRunRequest {
     // 边界只由编排层显式写入；缺席即共享调用方 workspace（AgentSwarm 走这条），
     // 不得回退 workspaceRoot——那会把普通会话误变成路径狱。
     ...(task.workspaceBoundary === undefined ? {} : { workspaceBoundary: task.workspaceBoundary }),
+    ...(task.allowedWritePaths === undefined ? {} : { allowedWritePaths: task.allowedWritePaths }),
     trace: task.trace,
   };
 }

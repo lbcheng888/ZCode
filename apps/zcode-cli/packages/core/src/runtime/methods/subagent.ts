@@ -325,6 +325,9 @@ export function createDefaultSubagentPort(
             ...(request.workspaceBoundary === undefined
               ? {}
               : { workspaceBoundary: request.workspaceBoundary }),
+            ...(request.allowedWritePaths === undefined
+              ? {}
+              : { allowedWritePaths: request.allowedWritePaths }),
             // Bash cd 只改变执行 cwd；若丢失绑定身份，child 会落到另一个 workspace，重启后无法打开。
             workspacePath: this.config.workspacePath ?? request.workspaceRoot,
             workspaceIdentity:

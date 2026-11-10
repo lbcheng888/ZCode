@@ -2,9 +2,11 @@
 // AgentSwarm 执行面
 // ============================================================
 // 语义对齐 kimi-code：items + prompt_template（{{item}}）把同一份任务模板扇出到多个
-// 独立输入，或 resume_agent_ids 继续既有 agent。所有 worker 共享调用方 workspace，
-// 不建 worktree、不做 merge。tool entry 留在 tool/handlers/agent.ts 的 AgentSwarm 段
-// （约 :363-475）；handler 文件越过 oxlint max-lines 上限后，把校验、执行与聚合整体移到这里。
+// 独立输入，file_domains 按文件边界切互不重叠的 lane，或 resume_agent_ids 继续既有 agent。
+// 所有 worker 共享调用方 workspace，不建 worktree、不做 merge；file_domains 的写域由
+// allowedWritePaths 硬约束文件工具，Bash 仍不做命令解析。tool entry 留在
+// tool/handlers/agent.ts 的 AgentSwarm 段（约 :363-475）；handler 文件越过 oxlint
+// max-lines 上限后，把校验、执行与聚合整体移到这里。
 
 import {
   AGENT_SWARM_ITEM_PLACEHOLDER,
@@ -25,6 +27,11 @@ import {
   type TraceContext,
 } from "@zcode/contracts";
 import { AGENT_SWARM_TOOL_NAME } from "../../tool/compat.js";
+import {
+  planFileDomainLanes,
+  truncateValidationPathSegment,
+  type AgentSwarmFileDomainInfo,
+} from "./agent-swarm-file-domains.js";
 import type { ToolExecutionContext, ToolHandler } from "../../tool/types.js";
 import { SwarmWorker } from "./swarm-worker.js";
 import type { SwarmTask, SwarmTaskResult } from "./swarm-types.js";
@@ -55,7 +62,6 @@ const AGENT_SWARM_MAX_HINT_AGENT_IDS = 8;
  * 不能被原样拼进 typed 错误再进入 tool result。
  */
 const AGENT_SWARM_MAX_VALIDATION_MESSAGE_CHARS = 2_000;
-const AGENT_SWARM_MAX_VALIDATION_PATH_SEGMENT_CHARS = 80;
 
 /**
  * 信封内的报告框架：说明 <subagent> 正文是子代理模型输出而非用户输入，并声明 harness
@@ -71,7 +77,10 @@ const AGENT_SWARM_ENTRY_FIXED_CHARS = 2 + "</subagent>\n".length;
 interface AgentSwarmItemJob {
   kind: "item";
   index: number;
-  item: string;
+  /** items 模式的实际输入；file_domains 模式是 lane 的展示标签。 */
+  item?: string;
+  /** file_domains 模式的 lane 信息；items 模式缺席。 */
+  domain?: AgentSwarmFileDomainInfo;
   task: SwarmTask;
 }
 
@@ -87,6 +96,7 @@ type AgentSwarmJob = AgentSwarmItemJob | AgentSwarmResumeJob;
 interface AgentSwarmOutcome {
   index: number;
   item?: string;
+  domain?: AgentSwarmFileDomainInfo;
   agentId?: string;
   /**
    * completed / failed / cancelled；resume 且端口没有 waitForTask 时记录端口回报的
@@ -143,12 +153,16 @@ function planAgentSwarm(
   context: ToolExecutionContext,
 ): readonly AgentSwarmJob[] {
   const items = input.items ?? [];
+  const fileDomains = input.file_domains ?? [];
   const resumeEntries = Object.entries(input.resume_agent_ids ?? {});
-  const total = items.length + resumeEntries.length;
+  const total = items.length + fileDomains.length + resumeEntries.length;
 
+  if (items.length > 0 && fileDomains.length > 0) {
+    throw invalidAgentSwarmInput("AgentSwarm accepts either items or file_domains, not both");
+  }
   if (total === 0) {
     throw invalidAgentSwarmInput(
-      "AgentSwarm requires at least one input: provide items or resume_agent_ids",
+      "AgentSwarm requires at least one input: provide items, file_domains or resume_agent_ids",
     );
   }
   if (total > AGENT_SWARM_MAX_TASKS) {
@@ -156,14 +170,49 @@ function planAgentSwarm(
       `AgentSwarm accepts at most ${AGENT_SWARM_MAX_TASKS} tasks; received ${total}`,
     );
   }
-  if (resumeEntries.length === 0 && items.length < 2) {
+  if (resumeEntries.length === 0 && items.length + fileDomains.length < 2) {
     throw invalidAgentSwarmInput(
-      "AgentSwarm requires at least 2 items unless resume_agent_ids is provided; use Agent for a single task",
+      "AgentSwarm requires at least 2 items or file domains unless resume_agent_ids is provided; use Agent for a single task",
     );
   }
 
-  let filledItems: readonly { item: string; prompt: string }[] = [];
-  if (items.length > 0) {
+  const agentType = input.subagent_type ?? AgentType.GeneralPurpose;
+  const trace = resolveToolTraceContext(context);
+  const jobs: AgentSwarmJob[] = [];
+
+  if (fileDomains.length > 0) {
+    const lanes = planFileDomainLanes(
+      fileDomains,
+      input.prompt_template,
+      input.description,
+      context.workspaceRoot,
+      AGENT_SWARM_MAX_TASK_BODY_CHARS,
+      invalidAgentSwarmInput,
+    );
+    for (const lane of lanes) {
+      jobs.push({
+        kind: "item",
+        index: jobs.length,
+        item: lane.item,
+        domain: lane.domain,
+        task: {
+          taskId: `${context.toolCallId}:agent-swarm:${jobs.length + 1}`,
+          agentType,
+          description: lane.description,
+          prompt: lane.prompt,
+          status: "pending",
+          sessionId: context.sessionId,
+          ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
+          parentToolCallId: context.toolCallId,
+          workingDirectory: context.workingDirectory,
+          workspaceRoot: context.workspaceRoot,
+          // 共享调用方 workspace；文件域硬约束走 allowedWritePaths，不建 worktree。
+          allowedWritePaths: lane.allowedWritePaths,
+          trace,
+        },
+      });
+    }
+  } else if (items.length > 0) {
     const template = input.prompt_template;
     if (template === undefined || template.length === 0) {
       throw invalidAgentSwarmInput("prompt_template is required when items are provided");
@@ -173,7 +222,7 @@ function planAgentSwarm(
         `prompt_template must contain the literal placeholder ${AGENT_SWARM_ITEM_PLACEHOLDER}`,
       );
     }
-    filledItems = items.map((item) => ({
+    const filledItems = items.map((item) => ({
       item,
       prompt: template.split(AGENT_SWARM_ITEM_PLACEHOLDER).join(item),
     }));
@@ -185,32 +234,29 @@ function planAgentSwarm(
         "items must produce distinct prompts; duplicate inputs cannot fan out the same prompt",
       );
     }
+    for (const filled of filledItems) {
+      jobs.push({
+        kind: "item",
+        index: jobs.length,
+        item: filled.item,
+        task: {
+          taskId: `${context.toolCallId}:agent-swarm:${jobs.length + 1}`,
+          agentType,
+          description: input.description,
+          prompt: filled.prompt,
+          status: "pending",
+          sessionId: context.sessionId,
+          ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
+          parentToolCallId: context.toolCallId,
+          workingDirectory: context.workingDirectory,
+          workspaceRoot: context.workspaceRoot,
+          // 共享调用方 workspace：不设置 workspaceBoundary（缺席即不做路径狱）。
+          trace,
+        },
+      });
+    }
   }
 
-  const agentType = input.subagent_type ?? AgentType.GeneralPurpose;
-  const trace = resolveToolTraceContext(context);
-  const jobs: AgentSwarmJob[] = [];
-  for (const filled of filledItems) {
-    jobs.push({
-      kind: "item",
-      index: jobs.length,
-      item: filled.item,
-      task: {
-        taskId: `${context.toolCallId}:agent-swarm:${jobs.length + 1}`,
-        agentType,
-        description: input.description,
-        prompt: filled.prompt,
-        status: "pending",
-        sessionId: context.sessionId,
-        ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
-        parentToolCallId: context.toolCallId,
-        workingDirectory: context.workingDirectory,
-        workspaceRoot: context.workspaceRoot,
-        // 共享调用方 workspace：不设置 workspaceBoundary（缺席即不做路径狱）。
-        trace,
-      },
-    });
-  }
   for (const [agentId, prompt] of resumeEntries) {
     jobs.push({ kind: "resume", index: jobs.length, agentId, prompt });
   }
@@ -278,7 +324,8 @@ function toAgentSwarmItemOutcome(
     case "completed":
       return {
         index: job.index,
-        item: job.item,
+        ...(job.item === undefined ? {} : { item: job.item }),
+        ...(job.domain === undefined ? {} : { domain: job.domain }),
         agentId: result.agentId,
         outcome: "completed",
         body: reportBody(result.content.map((block) => block.text).join("\n")),
@@ -288,7 +335,8 @@ function toAgentSwarmItemOutcome(
       const agentId = extractAgentIdFromError(result.cause);
       return {
         index: job.index,
-        item: job.item,
+        ...(job.item === undefined ? {} : { item: job.item }),
+        ...(job.domain === undefined ? {} : { domain: job.domain }),
         ...(agentId === undefined ? {} : { agentId }),
         outcome: "failed",
         body: result.error,
@@ -297,7 +345,8 @@ function toAgentSwarmItemOutcome(
     case "cancelled":
       return {
         index: job.index,
-        item: job.item,
+        ...(job.item === undefined ? {} : { item: job.item }),
+        ...(job.domain === undefined ? {} : { domain: job.domain }),
         outcome: "cancelled",
         body: result.reason ?? "The swarm task was cancelled",
       };
@@ -461,9 +510,18 @@ function formatTaskIdSuffix(taskId: string | undefined): string {
 }
 
 function createAbortedOutcome(job: AgentSwarmJob, reason: unknown): AgentSwarmOutcome {
+  if (job.kind === "resume") {
+    return {
+      index: job.index,
+      agentId: job.agentId,
+      outcome: "cancelled",
+      body: `AgentSwarm was cancelled before this task started: ${describeAbortReason(reason)}`,
+    };
+  }
   return {
     index: job.index,
-    ...(job.kind === "item" ? { item: job.item } : { agentId: job.agentId }),
+    ...(job.item === undefined ? {} : { item: job.item }),
+    ...(job.domain === undefined ? {} : { domain: job.domain }),
     outcome: "cancelled",
     body: `AgentSwarm was cancelled before this task started: ${describeAbortReason(reason)}`,
   };
@@ -498,11 +556,6 @@ function formatAgentSwarmValidationIssues(
     .join("; ");
   if (message.length <= AGENT_SWARM_MAX_VALIDATION_MESSAGE_CHARS) return message;
   return `${dropTrailingHighSurrogate(message.slice(0, AGENT_SWARM_MAX_VALIDATION_MESSAGE_CHARS - 1))}…`;
-}
-
-function truncateValidationPathSegment(segment: string): string {
-  if (segment.length <= AGENT_SWARM_MAX_VALIDATION_PATH_SEGMENT_CHARS) return segment;
-  return `${dropTrailingHighSurrogate(segment.slice(0, AGENT_SWARM_MAX_VALIDATION_PATH_SEGMENT_CHARS - 1))}…`;
 }
 
 function createAgentSwarmSendMessageUnavailable(context: ToolExecutionContext): Error {
@@ -644,6 +697,10 @@ function formatAgentSwarmResult(outcomes: readonly AgentSwarmOutcome[]): string 
 
 function formatAgentSwarmAttributes(outcome: AgentSwarmOutcome): string {
   const attributes = [`index="${outcome.index + 1}"`];
+  if (outcome.domain !== undefined) {
+    attributes.push(`domain="${outcome.domain.index + 1}"`);
+    attributes.push(`files="${escapeAgentSwarmAttribute(outcome.domain.files.join(", "))}"`);
+  }
   if (outcome.item !== undefined) {
     attributes.push(`item="${escapeAgentSwarmAttribute(outcome.item)}"`);
   }

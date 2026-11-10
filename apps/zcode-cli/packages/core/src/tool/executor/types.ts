@@ -153,6 +153,8 @@ export interface ToolExecutorOptions {
   getWorkspaceRoot?: () => string;
   /** swarm worker 的强制工作区边界；缺席 = 普通会话。 */
   getWorkspaceBoundary?: () => string | undefined;
+  /** 文件域 lane 的写白名单；缺席 = 普通会话。 */
+  getAllowedWritePaths?: () => readonly string[] | undefined;
   getMemoryRoot?: () => string | undefined;
   traceContext?: TraceContext;
   mode?: CollaborationMode;
@@ -285,6 +287,8 @@ export interface ToolExecutorDeps {
   getWorkspaceRoot: () => string;
   /** swarm worker 的强制工作区边界；缺席 = 普通会话。 */
   getWorkspaceBoundary?: () => string | undefined;
+  /** 文件域 lane 的写白名单；缺席 = 普通会话。 */
+  getAllowedWritePaths?: () => readonly string[] | undefined;
   workspaceIdentity?: string;
   /** workspace 写工具 admission；缺省 = 未启用（feature flag 关）。 */
   workspaceWriteLeaseAdmission?: WorkspaceWriteLeaseAdmissionPort;

@@ -17,7 +17,17 @@ interface ToolWorkspacePathOptions {
    * 命令字符串级隔离不在本层做启发式拦截。
    */
   workspaceBoundary?: string;
+  /**
+   * 文件域 lane 的写白名单（绝对路径）。只由 Write/Edit/ApplyPatch 传入；读工具不传。
+   * 目标路径按 realpath 收敛后必须与白名单中的某个文件完全一致，否则 fail-closed。
+   */
+  allowedWritePaths?: readonly string[];
   operation: "read" | "write" | "execute";
+}
+
+/** 把绝对路径按工具同一套 realpath 规则收敛（含 dangling 尾段与符号链接）。 */
+export function canonicalizeWorkspaceFilePath(absolutePath: string): string {
+  return canonicalizePath(normalize(absolutePath));
 }
 
 export function resolveWorkspacePath(options: ToolWorkspacePathOptions): string {
@@ -41,18 +51,21 @@ export function resolveWorkspacePath(options: ToolWorkspacePathOptions): string 
     ? normalize(requestedPath)
     : resolve(workingDirectory, requestedPath);
 
-  if (options.workspaceBoundary === undefined) {
+  if (options.workspaceBoundary === undefined && options.allowedWritePaths === undefined) {
     // Current release intentionally does not hard-block paths outside workspaceRoot.
     // Cause: subagents may need to inspect user-requested sibling repos or external files
     // before the filesystem permission adapter grows explicit ask/deny rules for them.
     return resolvedPath;
   }
 
-  const boundary = resolveWorkspaceBoundary(options.workspaceBoundary);
+  const boundary =
+    options.workspaceBoundary === undefined
+      ? undefined
+      : resolveWorkspaceBoundary(options.workspaceBoundary);
   // 返回规范化后的路径：校验的是 realpath 结果，交给 FileSystemPort 的必须是同一份字节，
   // 否则校验与打开可能被同一棵目录树里的符号链接分化成两个目标。
   const canonicalPath = canonicalizePath(resolvedPath);
-  if (!isPathWithinBoundary(canonicalPath, boundary)) {
+  if (boundary !== undefined && !isPathWithinBoundary(canonicalPath, boundary)) {
     throw createCoreError(
       CoreErrorType.ToolExecutionFailed,
       `Tool path escapes the workspace boundary: path=${canonicalPath}, boundary=${boundary}`,
@@ -66,7 +79,60 @@ export function resolveWorkspacePath(options: ToolWorkspacePathOptions): string 
       },
     );
   }
+  if (options.allowedWritePaths !== undefined) {
+    const allowed = resolveAllowedWritePathSet(options.allowedWritePaths, options.workspaceRoot);
+    if (!allowed.has(canonicalPath)) {
+      const listed = [...allowed].slice(0, AGENT_SWARM_MAX_ERROR_ALLOWED_PATHS);
+      throw createCoreError(
+        CoreErrorType.ToolExecutionFailed,
+        `Tool path is outside the AgentSwarm file domain: path=${canonicalPath}, allowedCount=${allowed.size}`,
+        {
+          context: {
+            operation: options.operation,
+            path: canonicalPath,
+            allowedWritePaths: listed,
+            allowedWritePathCount: allowed.size,
+          },
+          recoverable: true,
+        },
+      );
+    }
+  }
   return canonicalPath;
+}
+
+/** 错误里最多列出的白名单条数；完整列表可能很长，不塞进 tool result。 */
+const AGENT_SWARM_MAX_ERROR_ALLOWED_PATHS = 4;
+
+/**
+ * 白名单与目标同一套 realpath 语义：相对项按 workspaceRoot 解析，符号链接收敛后再比较。
+ * 白名单本身逃出 workspaceRoot 时 fail-closed，不能把 linked out 的路径当成合法写域。
+ */
+function resolveAllowedWritePathSet(
+  allowedWritePaths: readonly string[],
+  workspaceRoot: string,
+): Set<string> {
+  const root = canonicalizePath(normalizeAbsoluteDirectory(workspaceRoot, "workspaceRoot"));
+  const allowed = new Set<string>();
+  for (const entry of allowedWritePaths) {
+    const absolute = isAbsolute(entry) ? normalize(entry) : resolve(root, entry);
+    const canonical = canonicalizePath(absolute);
+    if (!isPathWithinBoundary(canonical, root)) {
+      throw createCoreError(
+        CoreErrorType.ConfigurationError,
+        `AgentSwarm allowedWritePaths entry escapes workspaceRoot: path=${canonical}, workspaceRoot=${root}`,
+        {
+          context: {
+            path: canonical,
+            workspaceRoot: root,
+          },
+          recoverable: false,
+        },
+      );
+    }
+    allowed.add(canonical);
+  }
+  return allowed;
 }
 
 export function resolveToolWorkingDirectory(
@@ -218,9 +284,7 @@ function resolveSymlinkChain(
     }
     visitedLinks.add(candidate);
     const target = readlinkSync(candidate);
-    const targetPath = isAbsolute(target)
-      ? normalize(target)
-      : resolve(dirname(candidate), target);
+    const targetPath = isAbsolute(target) ? normalize(target) : resolve(dirname(candidate), target);
     const remainingSegments = segments.slice(index + 1);
     const resolvedTarget = resolveSymlinkChain(targetPath, depth + 1, visitedLinks);
     if (remainingSegments.length === 0) return resolvedTarget;

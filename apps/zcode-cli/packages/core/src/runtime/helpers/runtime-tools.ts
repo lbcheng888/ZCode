@@ -253,6 +253,7 @@ function createRuntimeToolExecutor(
     getWorkspaceRoot: () => runtime.workspaceRoot,
     // swarm child 的强制工作区边界由构造配置冻结；普通会话为 undefined，path-policy 保持原语义。
     getWorkspaceBoundary: () => runtime.config.workspaceBoundary,
+    getAllowedWritePaths: () => runtime.config.allowedWritePaths,
     workspaceIdentity: runtime.config.workspaceIdentity?.toString(),
     workspaceWriteLeaseAdmission: deps.workspaceWriteLeaseAdmission,
     getWriteLeaseOwnerRunId: () => runtime.config.writeLeaseOwnerRunId,

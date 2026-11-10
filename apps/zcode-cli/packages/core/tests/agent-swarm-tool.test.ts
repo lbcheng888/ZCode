@@ -306,6 +306,7 @@ describe("AgentSwarm tool", () => {
       expect(call.request.workspaceRoot).toBe(WORKSPACE_ROOT);
       // 共享调用方 workspace：不创建 worktree，也不把 workspaceRoot 当强制边界。
       expect(call.request.workspaceBoundary).toBeUndefined();
+      expect(call.request.allowedWritePaths).toBeUndefined();
       expect(call.options?.signal).toBe(toolContext.abortSignal);
     }
 
@@ -315,6 +316,157 @@ describe("AgentSwarm tool", () => {
     for (let index = 1; index <= 3; index += 1) {
       expect(output).toContain(`agent-${index}`);
       expect(output).toContain('outcome="completed"');
+    }
+  });
+
+  it("splits file_domains into disjoint lanes with write allowlists", async () => {
+    const harness = createPortHarness(async (request, index) =>
+      completedOutput(request, index, `done: ${request.description}`),
+    );
+    const toolContext = context(harness.port);
+
+    const output = await callSwarm(
+      {
+        description: "repair lanes",
+        prompt_template: "Fix the regression in the files listed below.",
+        file_domains: [
+          { description: "parser", files: ["src/parser/a.ts", "src/parser/b.ts"] },
+          { files: ["src/ui/c.ts"] },
+        ],
+      },
+      toolContext,
+    );
+
+    expect(harness.runCalls).toHaveLength(2);
+    const parserCall = harness.runCalls.find(
+      (call) => call.request.allowedWritePaths?.[1] === "/repo/src/parser/b.ts",
+    );
+    const uiCall = harness.runCalls.find(
+      (call) => call.request.allowedWritePaths?.[0] === "/repo/src/ui/c.ts",
+    );
+    expect(parserCall).toBeDefined();
+    expect(uiCall).toBeDefined();
+
+    expect(parserCall?.request.allowedWritePaths).toEqual([
+      "/repo/src/parser/a.ts",
+      "/repo/src/parser/b.ts",
+    ]);
+    expect(uiCall?.request.allowedWritePaths).toEqual(["/repo/src/ui/c.ts"]);
+    expect(parserCall?.request.workspaceBoundary).toBeUndefined();
+    expect(uiCall?.request.workspaceBoundary).toBeUndefined();
+    expect(parserCall?.request.prompt).toContain("[AgentSwarm file domain 1/2]");
+    expect(parserCall?.request.prompt).toContain("Only modify these files:");
+    expect(parserCall?.request.prompt).toContain("- src/parser/a.ts");
+    expect(parserCall?.request.prompt).toContain("- src/parser/b.ts");
+    expect(parserCall?.request.prompt).toContain("Do not create or modify any other file.");
+    expect(parserCall?.request.prompt).toContain("Fix the regression in the files listed below.");
+    expect(uiCall?.request.prompt).toContain("[AgentSwarm file domain 2/2]");
+    expect(uiCall?.request.prompt).toContain("- src/ui/c.ts");
+
+    expect(output).toContain('domain="1"');
+    expect(output).toContain('files="src/parser/a.ts, src/parser/b.ts"');
+    expect(output).toContain('item="parser"');
+    expect(output).toContain('domain="2"');
+    expect(output).toContain('files="src/ui/c.ts"');
+  });
+
+  it("expands {{files}} in a file-domain template instead of duplicating the list", async () => {
+    const harness = createPortHarness(async (request, index) =>
+      completedOutput(request, index, `done: ${request.description}`),
+    );
+
+    await callSwarm(
+      {
+        description: "template files",
+        prompt_template: "Files to fix:\n{{files}}\nKeep each change local.",
+        file_domains: [{ files: ["src/a.ts"] }, { files: ["src/b.ts"] }],
+      },
+      context(harness.port),
+    );
+
+    const first = harness.runCalls.find(
+      (call) => call.request.allowedWritePaths?.[0] === "/repo/src/a.ts",
+    );
+    expect(first?.request.prompt).toContain("Files to fix:\n- src/a.ts");
+    expect(first?.request.prompt.match(/- src\/a\.ts/g)).toHaveLength(1);
+    expect(first?.request.prompt).not.toContain("Only modify these files:");
+  });
+
+  it("rejects overlapping file domains before spawning any worker", async () => {
+    const harness = createPortHarness(async () => {
+      throw new Error("overlapping file domains must not spawn");
+    });
+
+    const error = await captureRejection(
+      callSwarm(
+        {
+          description: "overlap",
+          prompt_template: "Fix them.",
+          file_domains: [{ files: ["src/a.ts"] }, { files: ["./src/a.ts"] }],
+        },
+        context(harness.port),
+      ).then((value) => value),
+    );
+    expectSwarmInvalidInput(error);
+    expect(harness.runCalls).toHaveLength(0);
+  });
+
+  it("rejects items and file_domains together", async () => {
+    const harness = createPortHarness(async () => {
+      throw new Error("mixed modes must not spawn");
+    });
+
+    const error = await captureRejection(
+      callSwarm(
+        {
+          description: "mixed",
+          prompt_template: "Do {{item}}.",
+          items: ["one", "two"],
+          file_domains: [{ files: ["src/a.ts"] }, { files: ["src/b.ts"] }],
+        },
+        context(harness.port),
+      ),
+    );
+    expectSwarmInvalidInput(error);
+    expect(harness.runCalls).toHaveLength(0);
+  });
+
+  it("rejects a single file domain without resume", async () => {
+    const harness = createPortHarness(async () => {
+      throw new Error("single file domain must not spawn");
+    });
+
+    const error = await captureRejection(
+      callSwarm(
+        {
+          description: "single",
+          prompt_template: "Fix it.",
+          file_domains: [{ files: ["src/a.ts"] }],
+        },
+        context(harness.port),
+      ),
+    );
+    expectSwarmInvalidInput(error);
+    expect(harness.runCalls).toHaveLength(0);
+  });
+
+  it("rejects file-domain paths outside the workspace or with line breaks", async () => {
+    for (const badPath of ["../outside.ts", "/etc/passwd", "src/a.ts\nrm -rf /"]) {
+      const harness = createPortHarness(async () => {
+        throw new Error("invalid file domain must not spawn");
+      });
+      const error = await captureRejection(
+        callSwarm(
+          {
+            description: "bad path",
+            prompt_template: "Fix it.",
+            file_domains: [{ files: [badPath] }, { files: ["src/ok.ts"] }],
+          },
+          context(harness.port),
+        ),
+      );
+      expectSwarmInvalidInput(error);
+      expect(harness.runCalls).toHaveLength(0);
     }
   });
 

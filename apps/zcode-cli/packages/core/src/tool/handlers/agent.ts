@@ -3,6 +3,7 @@
 // ============================================================
 
 import {
+  AGENT_SWARM_FILES_PLACEHOLDER,
   AGENT_SWARM_ITEM_PLACEHOLDER,
   AGENT_SWARM_MAX_OUTPUT_CHARS,
   AGENT_SWARM_MAX_RESUME_AGENT_ID_CHARS,
@@ -364,8 +365,10 @@ export function createTaskToolEntry(
 // AgentSwarm
 // ============================================================
 // 语义对齐 kimi-code：items + prompt_template（{{item}}）把同一份任务模板扇出到多个
-// 独立输入，或 resume_agent_ids 继续既有 agent。所有 worker 共享调用方 workspace，
-// 不建 worktree、不做 merge；失败逐任务回报，不把任何失败折叠成整体成功。
+// 独立输入，file_domains 按文件边界切互不重叠的 lane，或 resume_agent_ids 继续既有 agent。
+// 所有 worker 共享调用方 workspace，不建 worktree、不做 merge；file_domains 的写域由
+// allowedWritePaths 硬约束文件工具，Bash 仍不做命令解析。失败逐任务回报，不把任何失败
+// 折叠成整体成功。
 
 const AGENT_SWARM_PROVIDER_DESCRIPTION = [
   "# AgentSwarm",
@@ -376,11 +379,13 @@ const AGENT_SWARM_PROVIDER_DESCRIPTION = [
   "",
   "## Input",
   `- \`items\` + \`prompt_template\`: every ${AGENT_SWARM_ITEM_PLACEHOLDER} in the template is replaced with one item. At least 2 items are required unless resuming. Filled prompts must be distinct.`,
+  `- \`file_domains\` + \`prompt_template\`: one file-boundary lane per domain. Each domain lists exact workspace files; the files must be disjoint across domains. One subagent runs per domain and may only write its own files (Write/Edit/ApplyPatch outside the lane are rejected). The template is the shared task; use ${AGENT_SWARM_FILES_PLACEHOLDER} to place the file list, otherwise the harness injects it. Either items or file_domains, not both. At least 2 domains are required unless resuming.`,
   `- \`resume_agent_ids\`: continue existing agents by id. Each key is an \`agent_id\` from a previous Agent/AgentSwarm result (1-${AGENT_SWARM_MAX_RESUME_AGENT_ID_CHARS} characters); each value is the message to send (1-${AGENT_SWARM_MAX_RESUME_PROMPT_CHARS} characters). Resumed agents keep their context.`,
-  `- \`description\` (3-5 words) and optional \`subagent_type\` apply to the whole call. At most ${AGENT_SWARM_MAX_TASKS} tasks in total (items plus resume_agent_ids keys).`,
+  `- \`description\` (3-5 words) and optional \`subagent_type\` apply to the whole call. At most ${AGENT_SWARM_MAX_TASKS} tasks in total (items or file_domains plus resume_agent_ids keys).`,
   "",
   "## Contract",
   "- All workers share the caller's workspace: no worktree isolation and no merge. Tasks must be independent and must not write the same files.",
+  "- file_domains enforces that rule for Write/Edit/ApplyPatch through a per-lane write allowlist. Bash command strings are not path-parsed: keep shell writes inside the lane; full command isolation still belongs to goal swarm/Tower.",
   "- Workers run concurrently (up to 8 at a time). For resumed tasks, this call waits for the task's terminal state when the port supports `waitForTask`; otherwise it reports accepted delivery and the background result is not available in this response. An item that returns `async_launched` is settled here instead: `waitForTask` yields its terminal state; without `waitForTask` the harness stops it via `stopTask` and reports cancelled; when both are missing it reports failed. Results are returned per task in <agent_swarm_result>; a failed task with an `agent_id` can be resumed later with `resume_agent_ids`.",
   "- Do not use AgentSwarm to re-run work already delegated in this turn.",
 ].join("\n");
@@ -411,7 +416,7 @@ function formatAgentSwarmOutputForModel(output: unknown): string {
 
 export const agentSwarmToolEntry: ToolEntry = {
   capability:
-    "Fan out one subagent task template over independent inputs in the caller's shared workspace",
+    "Fan out one subagent task template over independent inputs, or split work into disjoint file-domain lanes, in the caller's shared workspace",
   metadata: {
     name: AGENT_SWARM_TOOL_NAME,
     description: AGENT_SWARM_PROVIDER_DESCRIPTION,

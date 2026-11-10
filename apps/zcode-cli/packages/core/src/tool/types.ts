@@ -235,6 +235,8 @@ export interface ToolExecutionContext {
   workspaceRoot: string;
   /** swarm worker 的强制工作区边界；缺席 = 普通会话，path-policy 不做路径狱。 */
   workspaceBoundary?: string;
+  /** 文件域 lane 的写白名单（绝对路径）；只约束写工具，读与 Bash 不在本层解析。 */
+  allowedWritePaths?: readonly string[];
   workspaceIdentity?: string;
   remoteSessionId?: string;
   clientMode?: "desktop-continuous" | "web-remote-replayable";

@@ -25,6 +25,12 @@ export interface SubagentRunRequest {
    * 的文件工具与显式 cwd 被限制在该目录内；非 swarm 请求不设。
    */
   workspaceBoundary?: string;
+  /**
+   * 文件域 lane 的写白名单（绝对路径）。只在写工具（Write/Edit/ApplyPatch）上生效：
+   * path-policy 拒绝白名单外的目标；读、glob、grep 不受限。Bash 命令字符串不解析，
+   * 不在本字段的强制范围内。
+   */
+  allowedWritePaths?: readonly string[];
   trace: TraceContext;
 }
 

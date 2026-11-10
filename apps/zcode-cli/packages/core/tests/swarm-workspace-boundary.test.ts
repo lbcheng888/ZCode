@@ -71,6 +71,7 @@ function contextWith(
     workingDirectory?: string;
     workspaceBoundary?: string;
     workspaceRoot?: string;
+    allowedWritePaths?: readonly string[];
   } = {},
 ): ToolExecutionContext {
   return {
@@ -85,6 +86,7 @@ function contextWith(
     workingDirectory: options.workingDirectory ?? fixture.project,
     workspaceRoot: options.workspaceRoot ?? fixture.boundary,
     workspaceBoundary: options.workspaceBoundary,
+    allowedWritePaths: options.allowedWritePaths,
     sessionId: "sess_swarm_boundary",
     turnId: "turn_swarm_boundary",
   };
@@ -131,6 +133,37 @@ describe("swarm workspace boundary", () => {
     );
     expect(writeOutput).toMatchObject({ type: "create" });
     expect(fileSystemPort.files[join(fixture.project, "created.txt")]).toBe("created\n");
+  });
+
+  it("enforces a file-domain write allowlist without restricting reads", async () => {
+    const allowed = join(fixture.project, "allowed-new.txt");
+    const other = join(fixture.project, "other.txt");
+    const fileSystemPort = new MemoryFileSystem({
+      [other]: "other\n",
+    });
+    const context = contextWith({
+      fileSystemPort,
+      allowedWritePaths: [allowed],
+    });
+
+    const writeAllowed = await writeHandler({ file_path: allowed, content: "updated\n" }, context);
+    expect(writeAllowed).toMatchObject({ type: "create" });
+    expect(fileSystemPort.files[allowed]).toBe("updated\n");
+
+    const writeOutside = await captureAsyncError(() =>
+      writeHandler({ file_path: other, content: "nope\n" }, context),
+    );
+    expect(writeOutside).toMatchObject({
+      type: CoreErrorType.ToolExecutionFailed,
+      recoverable: true,
+      context: { allowedWritePathCount: 1 },
+    });
+    expect(writeOutside.message).toContain("outside the AgentSwarm file domain");
+    expect(fileSystemPort.files[other]).toBe("other\n");
+
+    // 读不受写域限制：worker 需要读取领域外的上下文。
+    const readOutside = await readHandler({ file_path: other }, context);
+    expect(readOutside).toMatchObject({ type: "text", filePath: other });
   });
 
   it("rejects `../` escapes from the working directory", async () => {
@@ -526,6 +559,7 @@ describe("swarm workspace boundary", () => {
       workspaceRoot: fixture.boundary,
       // 编排层建好隔离树后显式写入边界；worker 不再从 workspaceRoot 推导。
       workspaceBoundary: fixture.boundary,
+      allowedWritePaths: [join(fixture.project, "lane.ts")],
       trace: { traceId: createTraceId(), sessionId: parentSessionId },
     };
 
@@ -533,6 +567,7 @@ describe("swarm workspace boundary", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.workspaceBoundary).toBe(fixture.boundary);
+    expect(requests[0]?.allowedWritePaths).toEqual([join(fixture.project, "lane.ts")]);
     expect(requests[0]?.workingDirectory).toBe(fixture.project);
   });
 
@@ -562,6 +597,7 @@ describe("swarm workspace boundary", () => {
       workingDirectory: fixture.project,
       workspaceRoot: fixture.project,
       workspaceBoundary: fixture.boundary,
+      allowedWritePaths: [join(fixture.project, "resume-lane.ts")],
       trace,
     });
     if (first.status !== "completed") throw new Error("expected the first run to complete");
@@ -581,6 +617,7 @@ describe("swarm workspace boundary", () => {
 
     expect(requests).toHaveLength(2);
     expect(requests[1]?.workspaceBoundary).toBe(fixture.boundary);
+    expect(requests[1]?.allowedWritePaths).toEqual([join(fixture.project, "resume-lane.ts")]);
     // 恢复沿用原任务 cwd，而不是发送方故意放在界外的 cwd。
     expect(requests[1]?.workingDirectory).toBe(fixture.project);
     await port.close();
@@ -711,6 +748,49 @@ describe("swarm workspace boundary", () => {
     expect(fileSystemPort.files[escapedFile]).toBeUndefined();
   });
 
+  it("wires AgentRuntimeConfig.allowedWritePaths through runtime-tools into Write", async () => {
+    const sessionId = createSessionId("file-domain-runtime-config");
+    const traceContext = createRootTraceContext({ sessionId });
+    const fileSystemPort = new MemoryFileSystem({});
+    const allowed = join(fixture.project, "allowed.ts");
+    const outside = join(fixture.project, "outside.ts");
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "yolo",
+        workingDirectory: fixture.project,
+        allowedWritePaths: [allowed],
+      },
+      {
+        eventStore: createTestSessionEventStore(),
+        fileSystemPort,
+      },
+    );
+    const outsideCall = {
+      id: createToolCallId("runtime-file-domain-outside"),
+      name: "Write",
+      input: { file_path: outside, content: "nope\n" },
+    };
+    const schedule = await runtime.scheduleTools([outsideCall]);
+    const execution = await runtime.executeTools([outsideCall], schedule, { traceContext });
+
+    expect(execution.results[0]?.success).toBe(false);
+    expect(execution.results[0]?.error?.type).toBe(CoreErrorType.ToolExecutionFailed);
+    expect(fileSystemPort.files[outside]).toBeUndefined();
+
+    const allowedCall = {
+      id: createToolCallId("runtime-file-domain-allowed"),
+      name: "Write",
+      input: { file_path: allowed, content: "ok\n" },
+    };
+    const allowedSchedule = await runtime.scheduleTools([allowedCall]);
+    const allowedExecution = await runtime.executeTools([allowedCall], allowedSchedule, {
+      traceContext,
+    });
+    expect(allowedExecution.results[0]?.success).toBe(true);
+    expect(fileSystemPort.files[allowed]).toBe("ok\n");
+  });
+
   it("wires SubagentRunRequest.workspaceBoundary into the child runtime config", async () => {
     const sessionId = createSessionId("boundary-child-runtime");
     const traceContext = createRootTraceContext({ sessionId });
@@ -773,6 +853,74 @@ describe("swarm workspace boundary", () => {
     // 边界沿 child runtime 生效：Write 在 MemoryFileSystem 上也没有落到边界外。
     expect(fileSystemPort.files[escapedFile]).toBeUndefined();
     // 还必须是「真的尝试过并被拒绝」，而不是模型根本没发起 Write。
+    const childTask = await subagentPort.getTask?.(result.agentId);
+    const childEvents = childTask?.childSessionId
+      ? await eventStore.getEvents(childTask.childSessionId)
+      : [];
+    expect(childEvents.some((event) => event.type === SessionEventType.ToolCallError)).toBe(true);
+  });
+
+  it("wires SubagentRunRequest.allowedWritePaths into the child runtime config", async () => {
+    const sessionId = createSessionId("file-domain-child-runtime");
+    const traceContext = createRootTraceContext({ sessionId });
+    const allowedFile = join(fixture.project, "child-allowed.ts");
+    const escapedFile = join(fixture.project, "child-outside.ts");
+    const fileSystemPort = new MemoryFileSystem({});
+    const eventStore = createTestSessionEventStore();
+    const runtime = createTestAgentRuntime(
+      sessionId,
+      {
+        mode: "yolo",
+        workingDirectory: fixture.project,
+        subagents: { enabled: true },
+      },
+      {
+        eventStore,
+        fileSystemPort,
+        modelFactory: createTestModelFactory({
+          async generateText(request) {
+            const hasToolResult = request.messages.some((message) => message.role === "tool");
+            if (!hasToolResult) {
+              return {
+                finishReason: "tool-calls",
+                providerMetadata: undefined,
+                text: "",
+                toolCalls: [
+                  {
+                    id: "child-write-outside-domain",
+                    name: "Write",
+                    input: { file_path: escapedFile, content: "nope\n" },
+                  },
+                ],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+              };
+            }
+            return {
+              finishReason: "stop",
+              providerMetadata: undefined,
+              text: "done",
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            };
+          },
+        }),
+      },
+    );
+    const subagentPort = (runtime as unknown as { subagentPort: SubagentPort }).subagentPort;
+
+    const result = await subagentPort.run({
+      sessionId,
+      agentType: "general-purpose",
+      description: "child file domain",
+      parentToolCallId: "child-file-domain",
+      prompt: "write outside the file domain",
+      workingDirectory: fixture.project,
+      workspaceRoot: fixture.project,
+      allowedWritePaths: [allowedFile],
+      trace: traceContext,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(fileSystemPort.files[escapedFile]).toBeUndefined();
     const childTask = await subagentPort.getTask?.(result.agentId);
     const childEvents = childTask?.childSessionId
       ? await eventStore.getEvents(childTask.childSessionId)
