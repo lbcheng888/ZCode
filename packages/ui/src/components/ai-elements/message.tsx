@@ -1673,7 +1673,7 @@ export const MessageResponse = memo(
 
           return (
             <CodeBlock
-              className="my-4 border border-border bg-card"
+              className="my-3 border border-border bg-card"
               code={codeText}
               // 流式消息里的代码围栏会被 Streamdown 反复拆分/重挂载。
               // 高亮等消息完成后再启动，避免 async highlighter 和消息流更新叠加触发 React #185。
