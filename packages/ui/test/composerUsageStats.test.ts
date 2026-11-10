@@ -13,7 +13,6 @@ import type {
 import {
   ComposerUsageStatsFooter,
   buildComposerUsageStats,
-  formatContextPercent,
 } from "../src/chat-input-toolbar/contextUsage.js";
 import enUS from "../src/i18n/locales/en-US.js";
 import zhCN from "../src/i18n/locales/zh-CN.js";
@@ -23,6 +22,15 @@ const USAGE: SessionUsageState = {
     usedTokens: 3_000,
     maxTokens: 8_000,
     autoCompactThresholdTokens: null,
+    // 协议字段 hitRateRequestCount 就是参与累计平均的主轮请求数（296 次）。
+    cache: {
+      inputTokens: 1_000,
+      cacheReadTokens: 600,
+      cacheWriteTokens: 100,
+      latestHitRate: 0.99,
+      hitRate: 0.831,
+      hitRateRequestCount: 296,
+    },
   },
   cumulative: {
     inputTokens: 1_000,
@@ -144,7 +152,7 @@ function usagePill(container: HTMLElement, text: string): HTMLButtonElement {
   return button;
 }
 
-function panel(key: "session" | "token" | "context"): Element | null {
+function panel(key: "session" | "token"): Element | null {
   return document.querySelector(`[data-composer-usage-stats-panel="${key}"]`);
 }
 
@@ -172,28 +180,24 @@ function panelRowValue(element: Element, label: string): string | null {
   return null;
 }
 
-/** 裸“0%”指独立读数就是 0%，不是 20%/60% 这类更大百分比的一部分。 */
-function bareZeroPercentElements(container: HTMLElement): Element[] {
-  return [...container.querySelectorAll("*")].filter(
-    (element) => (element.textContent ?? "").trim() === "0%",
-  );
-}
-
 describe("buildComposerUsageStats", () => {
-  it("从真实 usage 与 turnHeader/toolCall 行汇总 token、缓存、上下文和加权工时", () => {
+  it("从真实 usage 与 turnHeader/toolCall 行汇总 token、缓存和加权工时", () => {
     const stats = buildComposerUsageStats(USAGE, ROWS);
 
     expect(stats).not.toBeNull();
     if (!stats) return;
     expect(stats.totalTokens).toBe(1_200);
     expect(stats.cacheHitRate).toBeCloseTo(0.6);
+    // contextWindow.cache 是最近一次主轮请求 + provider 累计加权口径，二者不能互相替代。
+    expect(stats.latestCacheHitRate).toBeCloseTo(0.99);
+    expect(stats.cumulativeCacheHitRate).toBeCloseTo(0.831);
+    expect(stats.cacheRequestCount).toBe(296);
+    expect(stats.latestInputTokens).toBe(1_000);
+    expect(stats.latestUncachedInputTokens).toBe(400);
     expect(stats.uncachedInputTokens).toBe(400);
     expect(stats.cacheReadTokens).toBe(600);
     expect(stats.cacheWriteTokens).toBe(100);
     expect(stats.outputTokens).toBe(200);
-    expect(stats.contextUsedTokens).toBe(3_000);
-    expect(stats.contextMaxTokens).toBe(8_000);
-    expect(stats.contextPercent).toBeCloseTo(0.375);
     expect(stats.turns).toBe(2);
     expect(stats.steps).toBe(3);
     expect(stats.modelDurationMs).toBe(10_000);
@@ -299,28 +303,7 @@ describe("buildComposerUsageStats", () => {
   });
 });
 
-describe("formatContextPercent", () => {
-  const belowPointOnePercentLabel = "低于 0.1%";
-
-  it("null 与 0 不被改写成下限文案，恰好 0.1% 仍由 Intl 格式化", () => {
-    expect(formatContextPercent(null, "zh-CN", { belowPointOnePercentLabel })).toBeNull();
-    // 0 是真实的零占用；不能因为四舍五入成 0% 就改写成「低于 0.1%」。
-    expect(formatContextPercent(0, "zh-CN", { belowPointOnePercentLabel })).toBe("0%");
-    // 0.001 是阈值本身，Intl 输出 0.1%；判定必须严格小于才走下限文案。
-    expect(formatContextPercent(0.001, "zh-CN", { belowPointOnePercentLabel })).toBe("0.1%");
-    expect(formatContextPercent(0.0016, "zh-CN", { belowPointOnePercentLabel })).toBe("0.2%");
-    expect(formatContextPercent(0.375, "zh-CN", { belowPointOnePercentLabel })).toBe("37.5%");
-  });
-
-  it("非零且低于 0.1% 返回调用方传入的本地化下限文案", () => {
-    expect(formatContextPercent(0.0004, "zh-CN", { belowPointOnePercentLabel })).toBe("低于 0.1%");
-    expect(
-      formatContextPercent(0.0001, "en-US", {
-        belowPointOnePercentLabel: enUS["chat.composerUsageStats.belowPointOnePercent"] ?? "",
-      }),
-    ).toBe("below 0.1%");
-  });
-
+describe("统计条文案键", () => {
   it("zh-CN 与 en-US 的统计条文案键完整对齐", () => {
     const namespace = "chat.composerUsageStats.";
     const zhKeys = Object.keys(zhCN)
@@ -340,11 +323,11 @@ describe("formatContextPercent", () => {
 });
 
 describe("ComposerUsageStatsFooter", () => {
-  it("默认折叠：渲染三颗读数，但不挂载 PopoverContent", async () => {
+  it("默认折叠：渲染两颗读数，但不挂载 PopoverContent", async () => {
     const container = await renderFooter();
 
     expect(container.querySelector("[data-composer-usage-stats]")).not.toBeNull();
-    expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(3);
+    expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(2);
     expect(container.textContent).toContain("2 轮 · 3 步 · 20 tok/s");
     // 会话 pill 不能只有数值文本；可访问名必须同时给出“会话统计”和折叠读数。
     const ariaLabel = sessionAriaLabel(container);
@@ -352,9 +335,9 @@ describe("ComposerUsageStatsFooter", () => {
     expect(ariaLabel).toContain("2 轮");
     expect(ariaLabel).toContain("3 步");
     expect(ariaLabel).toContain("20 tok/s");
-    // Token/Context pill 的可见 label 仍在，继续作为原生可访问名的一部分。
+    // Token pill 的可见 label 仍在，继续作为原生可访问名的一部分。
     expect(usagePill(container, "Token 用量").textContent).toContain("Token 用量");
-    expect(usagePill(container, "上下文").textContent).toContain("上下文");
+    expect(container.textContent).not.toContain("上下文");
     expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
   });
 
@@ -380,7 +363,7 @@ describe("ComposerUsageStatsFooter", () => {
     expect(pill.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("点击 Token 用量 pill 展开缓存命中/未缓存输入/缓存读取/输出，再点一次收起", async () => {
+  it("点击 Token 用量 pill 展开本轮/累计缓存与本轮输入，再点一次收起", async () => {
     const container = await renderFooter();
     const pill = usagePill(container, "Token 用量");
 
@@ -388,35 +371,41 @@ describe("ComposerUsageStatsFooter", () => {
     const tokenPanel = panel("token");
     expect(tokenPanel).not.toBeNull();
     expect(tokenPanel?.getAttribute("aria-label")).toBe("Token 用量");
-    expect(tokenPanel?.textContent).toContain("缓存命中");
-    expect(tokenPanel?.textContent).toContain("60%");
-    expect(tokenPanel?.textContent).toContain("未缓存输入");
+    // 本轮读数来自 contextWindow.cache：最近一次主轮请求的命中率与 input 口径。
+    expect(tokenPanel?.textContent).toContain("本轮缓存命中");
+    expect(tokenPanel?.textContent).toContain("99%");
+    // 累计读数是 provider 的 token 加权 hitRate，并明示参与平均的请求次数。
+    expect(tokenPanel?.textContent).toContain("累计缓存命中（296 次请求）");
+    expect(tokenPanel?.textContent).toContain("83.1%");
+    expect(tokenPanel?.textContent).toContain("本轮输入");
+    expect(tokenPanel?.textContent).toContain("1,000 tok");
+    expect(tokenPanel?.textContent).toContain("本轮未缓存输入");
     expect(tokenPanel?.textContent).toContain("400 tok");
-    expect(tokenPanel?.textContent).toContain("缓存读取");
-    expect(tokenPanel?.textContent).toContain("600 tok");
-    expect(tokenPanel?.textContent).toContain("输出");
-    expect(tokenPanel?.textContent).toContain("200 tok");
 
     await click(pill);
     expect(panel("token")).toBeNull();
   });
 
-  it("点击上下文 pill 展开 used/max、百分比与缓存命中，再点一次收起", async () => {
-    const container = await renderFooter();
-    const pill = usagePill(container, "上下文");
+  it("旧快照没有 contextWindow.cache 时不显示本轮行，累计缓存行仍然保留", async () => {
+    const container = await renderFooter({
+      usage: {
+        contextWindow: {
+          usedTokens: 3_000,
+          maxTokens: 8_000,
+          autoCompactThresholdTokens: null,
+        },
+        cumulative: USAGE.cumulative,
+      },
+    });
 
-    await click(pill);
-    const contextPanel = panel("context");
-    expect(contextPanel).not.toBeNull();
-    expect(contextPanel?.getAttribute("aria-label")).toBe("上下文");
-    expect(contextPanel?.textContent).toContain("3,000 / 8,000");
-    // 百分比保留一位小数：37.5% 不能四舍五入成 38%。
-    expect(contextPanel?.textContent).toContain("37.5%");
-    expect(contextPanel?.textContent).toContain("缓存命中");
-    expect(contextPanel?.textContent).toContain("60%");
-
-    await click(pill);
-    expect(panel("context")).toBeNull();
+    await click(usagePill(container, "Token 用量"));
+    const tokenPanel = panel("token");
+    expect(tokenPanel).not.toBeNull();
+    // 没有 cache 快照就没有“最近一次主轮请求”的事实，不能补零或复用累计值冒充本轮。
+    expect(tokenPanel?.textContent).not.toContain("本轮");
+    expect(tokenPanel?.textContent).toContain("累计缓存命中");
+    // 累计值退回 cumulative token 口径：600 / 1,000 = 60%。
+    expect(tokenPanel?.textContent).toContain("60%");
   });
 
   it("打开 Token 用量时会话统计自动关闭，同一时间只开一个面板", async () => {
@@ -590,10 +579,14 @@ describe("ComposerUsageStatsFooter", () => {
     expect(panelRowValue(sessionPanel, "输出速度")).toBe("—");
   });
 
-  it("totalTokens<=0 时不渲染 Token pill，但保留有效的 Context pill", async () => {
+  it("totalTokens<=0 时 footer 整体不渲染（context 事实不再单独成条）", async () => {
     const container = await renderFooter({
       usage: {
-        ...USAGE,
+        contextWindow: {
+          usedTokens: 3_000,
+          maxTokens: 8_000,
+          autoCompactThresholdTokens: null,
+        },
         cumulative: {
           inputTokens: 0,
           outputTokens: 0,
@@ -603,13 +596,11 @@ describe("ComposerUsageStatsFooter", () => {
       },
     });
 
-    expect(container.querySelector("[data-composer-usage-stats]")).not.toBeNull();
-    expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(2);
-    expect(container.textContent).not.toContain("Token 用量");
-    expect(container.textContent).toContain("上下文");
+    expect(container.querySelector("[data-composer-usage-stats]")).toBeNull();
+    expect(container.querySelectorAll("button")).toHaveLength(0);
   });
 
-  it("上下文 used/max 为 0 时不渲染 Context pill（保留 Token pill），也不出现裸 0%", async () => {
+  it("统计条不渲染上下文 pill；Token 面板保留缓存命中/未缓存/缓存读取/输出", async () => {
     const container = await renderFooter({
       usage: {
         ...USAGE,
@@ -623,9 +614,14 @@ describe("ComposerUsageStatsFooter", () => {
 
     expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(2);
     expect(container.textContent).not.toContain("上下文");
-    expect(container.textContent).toContain("Token 用量");
-    // 0% 是不该出现的读数；Token pill 里的 60% 等数字不算裸 0%。
-    expect(bareZeroPercentElements(container)).toHaveLength(0);
+    await click(usagePill(container, "Token 用量"));
+    const tokenPanel = panel("token");
+    expect(tokenPanel).not.toBeNull();
+    expect(tokenPanel?.textContent).toContain("缓存命中");
+    expect(tokenPanel?.textContent).toContain("60%");
+    expect(tokenPanel?.textContent).toContain("未缓存输入");
+    expect(tokenPanel?.textContent).toContain("缓存读取");
+    expect(tokenPanel?.textContent).toContain("输出");
   });
 
   it("只有 token 事实时只渲染 Token pill", async () => {
@@ -645,112 +641,6 @@ describe("ComposerUsageStatsFooter", () => {
     expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(1);
     expect(container.textContent).toContain("Token 用量");
     expect(container.textContent).not.toContain("上下文");
-  });
-
-  it("只有 context 事实时只渲染 Context pill", async () => {
-    const container = await renderFooter({
-      usage: {
-        contextWindow: {
-          usedTokens: 3_000,
-          maxTokens: 8_000,
-          autoCompactThresholdTokens: null,
-        },
-        cumulative: {
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        },
-      },
-      rows: [],
-    });
-
-    expect(container.querySelectorAll("[data-composer-usage-stats] button")).toHaveLength(1);
-    expect(container.textContent).toContain("上下文");
-    expect(container.textContent).not.toContain("Token 用量");
-  });
-
-  it("cumulative 为 0 且 context used 为 0 时 footer 整体不渲染", async () => {
-    const container = await renderFooter({
-      usage: {
-        contextWindow: {
-          usedTokens: 0,
-          maxTokens: 8_000,
-          autoCompactThresholdTokens: null,
-        },
-        cumulative: {
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        },
-      },
-    });
-
-    expect(container.querySelector("[data-composer-usage-stats]")).toBeNull();
-    expect(container.querySelectorAll("button")).toHaveLength(0);
-  });
-
-  it("Token 与 Context 都无意义时 footer 返回 null", async () => {
-    const container = await renderFooter({
-      usage: {
-        contextWindow: {
-          usedTokens: 0,
-          maxTokens: 0,
-          autoCompactThresholdTokens: null,
-        },
-        cumulative: {
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-        },
-      },
-    });
-
-    expect(container.querySelector("[data-composer-usage-stats]")).toBeNull();
-    expect(container.querySelectorAll("button")).toHaveLength(0);
-  });
-
-  it("0.2% 保留一位小数，不显示成 0%", async () => {
-    const container = await renderFooter({
-      usage: {
-        ...USAGE,
-        contextWindow: {
-          usedTokens: 16,
-          maxTokens: 8_000,
-          autoCompactThresholdTokens: null,
-        },
-      },
-    });
-
-    expect(usagePill(container, "上下文").textContent).toContain("0.2%");
-    expect(bareZeroPercentElements(container)).toHaveLength(0);
-  });
-
-  // >0 但四舍五入会变成 0.0% 的占比必须显示明确下限，不能让人误读成上下文完全未占用。
-  async function expectBelowPointOnePercent(usedTokens: number, maxTokens: number): Promise<void> {
-    const container = await renderFooter({
-      usage: {
-        ...USAGE,
-        contextWindow: {
-          usedTokens,
-          maxTokens,
-          autoCompactThresholdTokens: null,
-        },
-      },
-    });
-
-    expect(usagePill(container, "上下文").textContent).toContain("低于 0.1%");
-    expect(bareZeroPercentElements(container)).toHaveLength(0);
-  }
-
-  it("0.04% 显示“低于 0.1%”，不显示成裸 0%", async () => {
-    await expectBelowPointOnePercent(10, 25_000);
-  });
-
-  it("0.01% 显示“低于 0.1%”，不显示成裸 0%", async () => {
-    await expectBelowPointOnePercent(1, 10_000);
   });
 });
 

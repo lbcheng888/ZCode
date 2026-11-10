@@ -16,7 +16,7 @@ import {
 } from "@zcode/shared";
 import type { ConversationRow, SessionUsageState } from "@zcode/shared/zcode-protocol-v4";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover.js";
-import { CircleGauge, Database, Gauge } from "lucide-react";
+import { Database, Gauge } from "lucide-react";
 import { TID_CHAT_CONTEXT_USAGE_TRIGGER } from "@zcode/shared/test-ids";
 import {
   Context,
@@ -85,8 +85,6 @@ const CONTEXT_PROGRESS_TONE_COLORS = [
 ] as const;
 const PERCENT_MAX = 100;
 const CACHE_HIT_RATE_DISPLAY_THRESHOLD = 0.78;
-// 0.1% = 0.001；低于它的非零占比不能交给 Intl 四舍五入，否则会显示成 0%。
-const BELOW_POINT_ONE_PERCENT_RATIO = 0.001;
 
 export function formatContextUsageTokenCount(
   value: number,
@@ -118,27 +116,6 @@ export function formatContextUsageSummary({
       maximumFractionDigits: 0,
     },
   )} (${percentageFormatter.format(percent)})`;
-}
-
-/**
- * 统计条上下文百分比：>0 且 <0.1% 时显示明确的「低于 0.1%」，避免四舍五入成 0% 后
- * 被误读为上下文完全未占用；其余仍最多 1 位小数。文案由调用方解析，helper 保持纯函数。
- */
-export function formatContextPercent(
-  percent: number | null,
-  locale: string,
-  options: { belowPointOnePercentLabel: string },
-): string | null {
-  if (percent === null) {
-    return null;
-  }
-  if (percent > 0 && percent < BELOW_POINT_ONE_PERCENT_RATIO) {
-    return options.belowPointOnePercentLabel;
-  }
-  return new Intl.NumberFormat(locale, {
-    maximumFractionDigits: 1,
-    style: "percent",
-  }).format(Math.max(0, percent));
 }
 
 export function formatContextCacheHitRateLabel(
@@ -1136,10 +1113,18 @@ export interface ComposerUsageStats {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   outputTokens: number;
+  /** 由累计 token 计数推算的命中率；cache 缺失时仍保留该累计口径。 */
   cacheHitRate: number | null;
-  contextUsedTokens: number | null;
-  contextMaxTokens: number | null;
-  contextPercent: number | null;
+  /** 最近一次主轮请求的命中率；旧快照没有 contextWindow.cache 时为 null。 */
+  latestCacheHitRate: number | null;
+  /** Agent 归一化的主轮累计平均命中率；cache.hitRate 缺失时为 null，展示时回退 cacheHitRate。 */
+  cumulativeCacheHitRate: number | null;
+  /** 参与累计平均的主轮请求数；没有 cache 或字段缺失时为 null。 */
+  cacheRequestCount: number | null;
+  /** 最近一次主轮请求的输入 token 数；没有 cache 时为 null。 */
+  latestInputTokens: number | null;
+  /** 最近一次主轮请求未命中缓存的输入 token 数；没有 cache 时为 null。 */
+  latestUncachedInputTokens: number | null;
   /** 已加载窗口内的轮数/步数；窗口不完整时调用方传 partialWindow=true。 */
   turns: number;
   steps: number;
@@ -1163,6 +1148,13 @@ function isUsableDurationMs(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value > 0;
 }
 
+/** provider 命中率按比例归一化；缺失/null 保持 null，不拿 0 冒充事实。 */
+function normalizeCacheHitRate(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
+    : null;
+}
+
 export function buildComposerUsageStats(
   usage: SessionUsageState | null | undefined,
   rows: readonly ConversationRow[],
@@ -1174,8 +1166,7 @@ export function buildComposerUsageStats(
   const cacheReadTokens = Math.max(0, usage.cumulative.cacheReadTokens);
   const cacheWriteTokens = Math.max(0, usage.cumulative.cacheWriteTokens);
   const totalTokens = inputTokens + outputTokens;
-  const contextWindow = usage.contextWindow;
-  if (totalTokens <= 0 && contextWindow === null) return null;
+  if (totalTokens <= 0) return null;
 
   const turnRows = rows.filter((row) => row.kind === "turnHeader");
   const steps = rows.reduce((count, row) => count + (row.kind === "toolCall" ? 1 : 0), 0);
@@ -1216,19 +1207,25 @@ export function buildComposerUsageStats(
   );
   const cacheHitRate =
     inputTokens > 0 ? Math.min(1, Math.max(0, cacheReadTokens / inputTokens)) : null;
-  // 与 getRenderableTaskUsage 同一判定：used>0 且 size>0 才是可展示的上下文占用，
-  // 初始化/异常兜底的 0 值不得渲染成 0%。
-  const renderableContextWindow = contextWindow
-    ? getRenderableTaskUsage({
-        used: contextWindow.usedTokens,
-        size: contextWindow.maxTokens,
-      })
+  // contextWindow.cache 是「最近一次主轮请求 + 累计平均」的 provider 读数；
+  // 旧快照没有该对象时全部为 null，不能拿 cumulative 冒充本轮。
+  const cache = usage.contextWindow?.cache;
+  const latestCacheHitRate = cache
+    ? normalizeCacheHitRate(cache.latestHitRate)
     : null;
-  const contextPercent = renderableContextWindow
-    ? Math.min(
-        1,
-        Math.max(0, renderableContextWindow.used / renderableContextWindow.size),
-      )
+  const cumulativeCacheHitRate = cache
+    ? normalizeCacheHitRate(cache.hitRate)
+    : null;
+  const cacheRequestCountValue = cache?.hitRateRequestCount;
+  const cacheRequestCount =
+    cacheRequestCountValue !== undefined &&
+    Number.isFinite(cacheRequestCountValue) &&
+    cacheRequestCountValue >= 0
+      ? cacheRequestCountValue
+      : null;
+  const latestInputTokens = cache ? Math.max(0, cache.inputTokens) : null;
+  const latestUncachedInputTokens = cache
+    ? Math.max(0, cache.inputTokens - cache.cacheReadTokens)
     : null;
   return {
     totalTokens,
@@ -1237,9 +1234,11 @@ export function buildComposerUsageStats(
     cacheWriteTokens,
     outputTokens,
     cacheHitRate,
-    contextUsedTokens: renderableContextWindow?.used ?? null,
-    contextMaxTokens: renderableContextWindow?.size ?? null,
-    contextPercent,
+    latestCacheHitRate,
+    cumulativeCacheHitRate,
+    cacheRequestCount,
+    latestInputTokens,
+    latestUncachedInputTokens,
     turns: turnRows.length,
     steps,
     modelDurationMs,
@@ -1272,7 +1271,7 @@ type ComposerUsageStatsIntl = {
   ) => string;
 };
 
-type ComposerUsageStatsPanelKey = "session" | "token" | "context";
+type ComposerUsageStatsPanelKey = "session" | "token";
 
 function UsageStatsPill({
   panelKey,
@@ -1343,7 +1342,7 @@ function UsageStatsPanelHeader({ title, value }: { title: string; value: string 
 }
 
 /**
- * composer 下方统计条：会话统计、Token 用量、上下文三颗读数。
+ * composer 下方统计条：会话统计与 Token 用量两颗读数；上下文容量由工具栏原有 ContextUsage 承担。
  * 对齐 dsh 的信息层次，但只使用 ZCode 快照里已有的事实；窗口不完整时明确标注。
  */
 export function ComposerUsageStatsFooter({
@@ -1365,28 +1364,22 @@ export function ComposerUsageStatsFooter({
     () => buildComposerUsageStats(usage, rows, partialWindow),
     [usage, rows, partialWindow],
   );
-  // 三颗 pill 共用一个受控 key：初始折叠，点击才展开；打开任一 pill 时自动收起其他。
+  // 两颗 pill 共用一个受控 key：初始折叠，点击才展开；打开任一 pill 时自动收起其他。
   const [openPanel, setOpenPanel] = useState<ComposerUsageStatsPanelKey | null>(null);
   const hasSessionPill =
     stats !== null &&
     (stats.turns > 0 || stats.steps > 0 || stats.tokensPerSecond !== null);
-  // 0 值不是事实：totalTokens<=0 不渲染 Token pill；上下文 used/size 任一 <=0 不渲染 Context pill。
+  // 0 值不是事实：totalTokens<=0 不渲染 Token pill。
   const hasTokenPill = stats !== null && stats.totalTokens > 0;
-  const hasContextPill =
-    stats !== null &&
-    stats.contextPercent !== null &&
-    stats.contextUsedTokens !== null &&
-    stats.contextMaxTokens !== null;
   // 读数消失 pills 会卸载但 Radix 不会回调关闭；清掉失效 key，等读数恢复时保持折叠。
   useEffect(() => {
     setOpenPanel((current) => {
       if (current === null) return current;
       if (current === "session" && !hasSessionPill) return null;
-      if (current === "context" && !hasContextPill) return null;
       if (current === "token" && !hasTokenPill) return null;
       return current;
     });
-  }, [hasContextPill, hasSessionPill, hasTokenPill]);
+  }, [hasSessionPill, hasTokenPill]);
   const handlePanelOpenChange = useCallback(
     (panelKey: ComposerUsageStatsPanelKey, open: boolean) => {
       // 关闭事件只允许清空自己的 key：相邻 pill 的 outside-close 可能先于新 pill 的 open
@@ -1398,25 +1391,32 @@ export function ComposerUsageStatsFooter({
     [],
   );
   if (!stats) return null;
-  // Token 与 Context 都无意义时整条统计条返回 null，不留下只有空壳的 footer。
-  if (!hasTokenPill && !hasContextPill) return null;
+  // Token 无意义时整条统计条返回 null，不留下只有空壳的 footer。
+  if (!hasTokenPill) return null;
 
   const compactTotal = formatCompactTokenNumber(locale, stats.totalTokens);
+  // 折叠 pill 与面板累计行共用同一口径：优先 Agent 归一化的 cache.hitRate，
+  // 旧快照没有该字段时回退 cumulative 计数推算，避免把两种累计值显示成两个数。
+  const cumulativeCacheHitRate = stats.cumulativeCacheHitRate ?? stats.cacheHitRate;
   const cacheHitLabel =
-    stats.cacheHitRate === null
+    cumulativeCacheHitRate === null
       ? null
-      : formatContextCacheHitRateLabel(stats.cacheHitRate, locale, {
+      : formatContextCacheHitRateLabel(cumulativeCacheHitRate, locale, {
           showBelowThreshold: true,
         });
-  const contextPercentLabel = formatContextPercent(
-    stats.contextPercent,
-    locale,
-    {
-      belowPointOnePercentLabel: intl.formatMessage({
-        id: "chat.composerUsageStats.belowPointOnePercent",
-      }),
-    },
-  );
+  const cacheHitLabelText =
+    stats.cacheRequestCount === null
+      ? intl.formatMessage({ id: "chat.composerUsageStats.cacheHitWithoutCount" })
+      : intl.formatMessage(
+          { id: "chat.composerUsageStats.cacheHit" },
+          { count: stats.cacheRequestCount },
+        );
+  const latestCacheHitLabel =
+    stats.latestCacheHitRate === null
+      ? null
+      : formatContextCacheHitRateLabel(stats.latestCacheHitRate, locale, {
+          showBelowThreshold: true,
+        });
   // 折叠态只拿得到已加载窗口的 turns/steps/速度，必须显式标注窗口口径。
   const partialShortLabel = stats.partialWindow
     ? intl.formatMessage({ id: "chat.composerUsageStats.partialShort" })
@@ -1458,7 +1458,6 @@ export function ComposerUsageStatsFooter({
   const tokenUsageTitle = intl.formatMessage({
     id: "chat.composerUsageStats.tokenUsage",
   });
-  const contextTitle = intl.formatMessage({ id: "chat.composerUsageStats.context" });
 
   return (
     <div
@@ -1527,8 +1526,32 @@ export function ComposerUsageStatsFooter({
               />
               {cacheHitLabel === null ? null : (
                 <UsageStatsPanelRow
-                  label={intl.formatMessage({ id: "chat.composerUsageStats.cacheHit" })}
+                  label={cacheHitLabelText}
                   value={cacheHitLabel}
+                />
+              )}
+              {latestCacheHitLabel === null ? null : (
+                <UsageStatsPanelRow
+                  label={intl.formatMessage({
+                    id: "chat.composerUsageStats.cacheHitLatest",
+                  })}
+                  value={latestCacheHitLabel}
+                />
+              )}
+              {stats.latestInputTokens === null ? null : (
+                <UsageStatsPanelRow
+                  label={intl.formatMessage({
+                    id: "chat.composerUsageStats.latestInput",
+                  })}
+                  value={`${fullNumber.format(stats.latestInputTokens)} tok`}
+                />
+              )}
+              {stats.latestUncachedInputTokens === null ? null : (
+                <UsageStatsPanelRow
+                  label={intl.formatMessage({
+                    id: "chat.composerUsageStats.latestUncachedInput",
+                  })}
+                  value={`${fullNumber.format(stats.latestUncachedInputTokens)} tok`}
                 />
               )}
               <UsageStatsPanelRow
@@ -1543,35 +1566,6 @@ export function ComposerUsageStatsFooter({
                 label={intl.formatMessage({ id: "chat.composerUsageStats.output" })}
                 value={`${fullNumber.format(stats.outputTokens)} tok`}
               />
-            </div>
-          }
-        />
-      ) : null}
-
-      {stats.contextPercent !== null &&
-      stats.contextUsedTokens !== null &&
-      stats.contextMaxTokens !== null ? (
-        <UsageStatsPill
-          panelKey="context"
-          panelTitle={contextTitle}
-          open={openPanel === "context"}
-          onOpenChange={(open) => handlePanelOpenChange("context", open)}
-          icon={<CircleGauge aria-hidden className="size-3.5 shrink-0" />}
-          label={contextTitle}
-          value={contextPercentLabel ?? ""}
-          panel={
-            <div className="space-y-2">
-              <UsageStatsPanelHeader
-                title={contextTitle}
-                value={`${fullNumber.format(stats.contextUsedTokens)} / ${fullNumber.format(stats.contextMaxTokens)}`}
-              />
-              <UsageStatsPanelRow label="%" value={contextPercentLabel ?? "—"} />
-              {cacheHitLabel === null ? null : (
-                <UsageStatsPanelRow
-                  label={intl.formatMessage({ id: "chat.composerUsageStats.cacheHit" })}
-                  value={cacheHitLabel}
-                />
-              )}
             </div>
           }
         />
