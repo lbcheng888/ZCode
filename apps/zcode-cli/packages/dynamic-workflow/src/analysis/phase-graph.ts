@@ -81,33 +81,47 @@ function headPhasesOf(claiming: readonly string[], toPhases: ReadonlySet<string>
  * issue」换成「该阶段的 issue」——共享 helper 在 preflight（顶层）与 gate（循环+分支内）
  * 各一份拷贝时，两份的 certainty 因此可以不同，这正是拷贝要单独推导的理由。
  *
- * **车道拷贝的认领**从 `actor` 事件读：每个前缀它真实出生所在阶段的 may-set 车道，只有在
- * 这些阶段里才可能是该站点这次发出的车道。不这么做，`projectPhaseGraph` 只能拿同一站点的
- * 全部认领去复制每份车道拷贝，三相位并行脚本里每条车道都会被广播进每一列（3 phase ×
- * 6 张卡，真实 actor 只有 6 个实例）。出生在 `unphased` 的车道不设限：它从脚本开头就存在，
- * 在哪个认领阶段都可能被选中。
+ * **车道拷贝的认领**从 `actor` 事件读，按车道的形态分两种：
+ *
+ * - **车道家族**（`agent()` 在 fan-out/loop 内创建，`families` 非空）：每个元素是那次迭代
+ *   的新 actor，家族的出生阶段就是它参与的阶段。若不区分，这些拷贝会被广播到站点的全部
+ *   认领阶段，三相位并行脚本里每条车道都会被复制进每一列（3 phase × 6 张卡，真实 actor
+ *   只有 6 个）。
+ * - **单例 actor**：一个对象从出生起持续存在，所以出生阶段之后的每个认领阶段都可能被选中。
+ *   只按出生阶段归属会漏掉“早期创建、后期复用”的那份拷贝；这里用首次 `actor` 事件的时钟
+ *   做下界，允许阶段内最后一次 issue 晚于出生的拷贝。
+ *
+ * 单例 actor 的“后期阶段也可能被选中”是分析器上下文无关并集的必然结果：issue 事件不携带
+ * 车道，站点 receiver 的 actor 集合是全部调用点的并集（docs/analysis.md「The call oracle」
+ * 明确 caller-context precision 不在范围内）。因此这里不裁掉“实际没传它”的阶段——那需要
+ * 调用点精度；只保证不隐藏真实参与者。出生在 `unphased` 的车道从脚本开头就存在，不设限。
  */
 export function collectPhaseClaims(
   events: readonly OrderEvent[],
   steps: ReadonlySet<string>,
   certainChain: (chain: readonly string[]) => boolean,
   controlled: ReadonlySet<string>,
+  familyLanes: ReadonlySet<string>,
 ): PhaseClaims {
   const bySite = new Map<string, string[]>();
   const position = new Map<string, number>();
   const firstIssue = new Map<string, number>();
   const lastIssue = new Map<string, number>();
   const certainSeen = new Set<string>();
-  /** 有事件的车道（actor 事件即出生时刻）。 */
+  /** 有事件的车道（`actor` 事件即出生时刻）。 */
   const lanes = new Set<string>();
-  /** 车道 -> 它出生所在的阶段；`unphased` 出生的车道不进表（不设限）。 */
+  /** 车道家族 -> 它出生所在的阶段；`unphased` 出生的车道不进表（不设限）。 */
   const laneBirth = new Map<string, Set<string>>();
+  /** 单例车道的首次出生时钟：阶段内最后一次 issue 不早于它，才可能被选中。 */
+  const laneBornAt = new Map<string, number>();
   const bornBeforePhases = new Set<string>();
   // 与 causality-graph.ts 同一个时钟：每个 issue 事件走一格，不论它是否落在图里的 step 上。
   let clock = 0;
   for (const event of events) {
     if (event.at === "actor") {
       lanes.add(event.actor);
+      const bornAt = laneBornAt.get(event.actor);
+      if (bornAt === undefined || clock < bornAt) laneBornAt.set(event.actor, clock);
       if (event.phase === UNPHASED_ID) bornBeforePhases.add(event.actor);
       else {
         const phases = laneBirth.get(event.actor) ?? new Set<string>();
@@ -140,14 +154,21 @@ export function collectPhaseClaims(
   for (const [site, claiming] of bySite) {
     for (const phase of claiming) certainty.set(`${site}|${phase}`, certaintyAt(site, phase));
   }
-  // 车道拷贝的认领：同一份拷贝只归它自己存在过的阶段。车道在站点发出过的任何阶段都还不
-  // 存在时（静态 may-set 与实际发出矛盾），保留站点的认领——抹掉一份参与者比多画一格更
-  // 坏，与 `admits` 的「全被拦下 → 退回全展开」同一个姿态。
+  // 车道拷贝的认领：家族只归它自己出生的阶段；单例 actor 从出生起在所有后续认领阶段都
+  // 可能被选中。车道在站点发出过的任何阶段都还不存在时（静态 may-set 与实际发出矛盾），
+  // 保留站点的认领——抹掉一份参与者比多画一格更坏，与 `admits` 的「全被拦下 → 退回全展开」
+  // 同一个姿态。
   const copies = new Map<string, string[]>();
   for (const [site, claiming] of bySite) {
     for (const lane of lanes) {
       const born = laneBirth.get(lane);
-      const narrowed = born === undefined ? claiming : claiming.filter((phase) => born.has(phase));
+      const isFamily = familyLanes.has(lane) && born !== undefined;
+      const bornAt = laneBornAt.get(lane) ?? 0;
+      const narrowed = claiming.filter((phase) =>
+        isFamily
+          ? born.has(phase)
+          : (lastIssue.get(`${site}|${phase}`) ?? -1) >= bornAt,
+      );
       copies.set(`${site}${COPY_SEPARATOR}${lane}`, narrowed.length > 0 ? narrowed : claiming);
     }
   }

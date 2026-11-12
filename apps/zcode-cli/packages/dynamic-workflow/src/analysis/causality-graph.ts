@@ -573,10 +573,14 @@ export function projectCausalityGraph(core: AnalysisCore, site: SiteGraph): Caus
   });
   // 阶段投影最后跑：它对成品图做机械改写（跨阶段拷贝 + 商图），并且在零标记脚本上是恒等
   // 函数——既有快照的回归钉就是这一条。
+  const familyLanes = new Set<string>();
+  for (const actorId of actorRegions.keys()) {
+    if (familiesOf(actorId).length > 0) familyLanes.add(actorId);
+  }
   return projectPhaseGraph(
     expanded,
     trace.phases,
-    collectPhaseClaims(trace.events, stepIds, chainIsCertain, controlled),
+    collectPhaseClaims(trace.events, stepIds, chainIsCertain, controlled, familyLanes),
     phaseFacts,
     sharesIteration,
   );

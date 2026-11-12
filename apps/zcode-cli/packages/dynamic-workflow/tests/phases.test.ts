@@ -281,8 +281,8 @@ describe("phase claims for may-set lane copies", () => {
     return causality.steps.map((step) => `${step.id}@${step.phase}`);
   };
 
-  it("homes each lane copy in the phase where its lane is born", () => {
-    // 一份站点、三份车道拷贝，各自落在车道的出生相位；没有第二轮 `~phase` 复制。
+  it("homes each family lane copy in the phase where its lane is born", () => {
+    // 一份站点、三份车道拷贝，各自落在家族的出生相位；没有第二轮 `~phase` 复制。
     expect(stepsOf(parallelPhases)).toEqual([
       "ask#1~actor#1@phase#1",
       "ask#1~actor#2@phase#2",
@@ -290,9 +290,36 @@ describe("phase claims for may-set lane copies", () => {
     ]);
   });
 
+  it("keeps a singleton lane available from its birth onward", () => {
+    // 单例 actor 不是 fan-out 家族：出生前不可能出现在 issue 上，出生后的每个认领阶段都
+    // 可能被选中。c 在 phase#1 的 ask 之后才创建，所以 phase#1 没有它的拷贝，phase#2 有。
+    expect(
+      stepsOf(`
+        const a = agent("a");
+        const b = agent("b");
+        async function work(who: Agent, q: string): Promise<string> {
+          return await who.ask<string>(q);
+        }
+        phase("p1");
+        const x = await work(a, "one");
+        phase("p2");
+        const c = agent("c");
+        const flag = Math.random() > 0.5;
+        const y = await work(flag ? b : c, "two");
+        return x + y;
+      `),
+    ).toEqual([
+      "ask#1~actor#1~phase#1@phase#1",
+      "ask#1~actor#1~phase#2@phase#2",
+      "ask#1~actor#2~phase#1@phase#1",
+      "ask#1~actor#2~phase#2@phase#2",
+      "ask#1~actor#3@phase#2",
+    ]);
+  });
+
   it("still copies a site that genuinely runs in every claiming phase", () => {
     // 对照：两个 actor 都出生在标记之前（`unphased`），车道全程存在，站点的两份认领都成立，
-    // 每份车道拷贝照旧一阶段一份——收窄只按车道自己的出生相位发生。
+    // 每份车道拷贝照旧一阶段一份——收窄只按车道自己的出生阶段/出生时刻发生。
     expect(
       stepsOf(`
         const a = agent("a");
