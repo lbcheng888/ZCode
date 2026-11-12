@@ -1,6 +1,7 @@
-// lane W：create-app 装配面的 flag 开关语义（spec super-agent-trigger-subsystem-spec
-// §5.4 kill-switch + §7-7 里程碑 A）。flag 关 = 完全不构造控制面（零行为变化）；
-// flag 开 = 控制面在场且 leader，app.close 对称 stop 后 sink 回纯转发。
+// lane W：create-app 装配面的能力门语义（spec super-agent-trigger-subsystem-spec
+// §7-7 里程碑 A）。控制面在场与否只看宿主是否注入 options.superAgent
+//（handleCommand + autoReplyGuard）：前台/协议宿主注入 ⇒ 默认构造，不再要求用户
+// 配置 features.eventRouter；headless 不注入 ⇒ 能力缺席，不构造也不抛错。
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,10 @@ import { createRootTraceContext, createToolCallId, createTurnId } from "@zcode/c
 import type { CommandAck, CommandEnvelope } from "@zcode/shared/zcode-protocol-v4";
 
 import { CommandInbox } from "../../src/zcode-protocol-v4/command-inbox.js";
-import type { SuperAgentCommandHandle } from "../../src/app/super-agent-control-plane.js";
+import type {
+  SuperAgentCommandHandle,
+  SuperAgentControlPlane,
+} from "../../src/app/super-agent-control-plane.js";
 import type { ZCodeApp } from "../../src/app/types.js";
 import type { SpecFenceContract } from "../../src/super-agent/spec-lane/index.js";
 import { SqliteBackgroundRunStore } from "../../src/super-agent/storage/background-run-store.js";
@@ -51,61 +55,89 @@ function makeInboxHandle(): {
   return { handleCommand, envelopes };
 }
 
-async function createApp(options: {
-  eventRouter: boolean;
-  specEgressFence?: boolean;
-  specWriteLease?: boolean;
-  mode?: "build" | "edit" | "yolo";
-  specFenceFactory?: () => SpecFenceContract;
-}): Promise<{ app: ZCodeApp; root: string; handleCommand: SuperAgentCommandHandle }> {
+/** 真实决策行 + 事件行，用于验证收件箱读面（不是 mock：走 plane.contracts.decisionLog）。 */
+function seedWouldAcceptCard(plane: SuperAgentControlPlane, workspaceIdentity: string): void {
+  const now = 1_796_000_000_000;
+  plane.database
+    .prepare(
+      `insert into trigger_events (
+        id, workspace_identity, source, thread_key, actor_kind, actor_id, payload,
+        payload_digest, taint, provider, provider_message_id, fast_path,
+        adjudication_status, created_at, updated_at
+      ) values (?, ?, 'im', ?, 'human', 'u1', '{"text":"发布状态怎么样？"}', 'digest', 1,
+        'feishu', ?, 'unowned_candidate', 'record_only', ?, ?)`,
+    )
+    .run(
+      "trigger-live",
+      workspaceIdentity,
+      `${workspaceIdentity}|bot:live+u1`,
+      "pm-live",
+      now,
+      now,
+    );
+  plane.contracts.decisionLog.record({
+    workspaceIdentity,
+    triggerId: "trigger-live",
+    origin: "adjudication",
+    disposition: "would_accept",
+    reason: "值得处理",
+    createdAt: now,
+  });
+}
+
+async function createApp(
+  options: {
+    /** 是否注入宿主能力面（= 前台/协议宿主）；false 模拟 headless 无 host。 */
+    host?: boolean;
+    features?: Record<string, boolean>;
+    mode?: "build" | "edit" | "yolo";
+    specFenceFactory?: () => SpecFenceContract;
+  } = {},
+): Promise<{ app: ZCodeApp; root: string; handleCommand: SuperAgentCommandHandle }> {
   const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-"));
   roots.push(root);
   const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
   const { handleCommand } = makeInboxHandle();
   const userConfigPath = join(root, "config.json");
-  const features = {
-    ...(options.eventRouter ? { eventRouter: true } : {}),
-    ...(options.specEgressFence ? { specEgressFence: true } : {}),
-    ...(options.specWriteLease ? { specWriteLease: true } : {}),
-  };
+  const features = options.features ?? {};
   if (Object.keys(features).length > 0) {
     await writeFile(userConfigPath, JSON.stringify({ features }));
   }
   const app = await createZCodeApp({
-    env: {},
+    // eventRouter=true 的用例仍会装配 workflow 后台行 registry：数据根指到临时目录，
+    // 避免测试读写真实 HOME 下的 super-agent 库。
+    env: { ZCODE_DATA_BASE_DIR: root },
     runtimeConfig: {
       workingDirectory: root,
+      // 控制面装配用例不验证 MCP：关掉适配器，避免会话启动时的 server/discover
+      // 协商与 app.close 竞态在 teardown 留下 SDK 的 unhandled rejection。
+      mcp: { enabled: false },
       ...(options.mode === undefined ? {} : { mode: options.mode }),
     },
     sessionStore,
     userConfigPath,
-    ...(options.eventRouter
-      ? {
+    ...(options.host === false
+      ? {}
+      : {
           superAgent: {
             handleCommand,
             autoReplyGuard: { admit: async () => true },
             superAgentDatabasePath: join(root, "super-agent.sqlite"),
           },
-        }
-      : {}),
+        }),
     ...(options.specFenceFactory ? { specFenceFactory: options.specFenceFactory } : {}),
   });
   apps.push(app);
   return { app, root, handleCommand };
 }
 
-describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () => {
-  it("flag 关（缺省）：不构造控制面，app.superAgentControlPlane 缺席 = legacy 直路", async () => {
-    const { app } = await createApp({ eventRouter: false });
-    expect(app.superAgentControlPlane).toBeUndefined();
-  });
-
-  it("flag 开 + 注入端口：控制面在场且 leader；close 对称 stop 后 sink 纯转发", async () => {
-    const { app } = await createApp({ eventRouter: true });
+describe("create-app × options.superAgent（能力门，不再是 features.eventRouter）", () => {
+  it("有 host、无任何 feature flag：控制面默认在场且 leader；close 后 sink 纯转发", async () => {
+    const { app } = await createApp();
     const plane = app.superAgentControlPlane;
     expect(plane).toBeDefined();
     expect(plane!.isLeader()).toBe(true);
-    // flag 开时域库已按注入路径打开（装配证据，不是 mock）。
+    // 域库已按注入路径打开（装配证据，不是 mock）。
     const row = plane!.database
       .prepare("select count(*) as n from trigger_events")
       .get() as { n: number };
@@ -127,10 +159,20 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     expect(outcome).toEqual({ handled: false });
   });
 
-  it("快照投影：控制面在场 → pendingWouldAccept/backgroundRuns 键在场为数组；缺席 → 键不发布（unknown≠0）", async () => {
+  it("无 host（headless）：即使 features.eventRouter=true 也不构造控制面，capability absent 不抛错", async () => {
+    const { app } = await createApp({ host: false, features: { eventRouter: true } });
+    expect(app.superAgentControlPlane).toBeUndefined();
+  });
+
+  it("旧 kill-switch features.eventRouter=false 不再是否决条件：host 在场即构造", async () => {
+    const { app } = await createApp({ features: { eventRouter: false } });
+    expect(app.superAgentControlPlane).toBeDefined();
+  });
+
+  it("快照投影：有 host → pendingWouldAccept/backgroundRuns 键在场并携带真实卡；无 host → 键不发布（unknown≠0）", async () => {
     // mapper 级接线回归（spec §5.5 / 00-tool-change-chain.md「验证见 control-plane-*」）：
-    // 键缺席（旧发送端/flag 关）≠ 空数组（已发布零卡片），UI 不得把缺席渲染成空收件箱。
-    const off = await createApp({ eventRouter: false });
+    // 键缺席（旧发送端/无控制面）≠ 空数组（已发布零卡片），UI 不得把缺席渲染成空收件箱。
+    const off = await createApp({ host: false });
     const offSnapshot = await buildSessionSnapshot({
       app: off.app,
       eventSeq: 0,
@@ -141,7 +183,7 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     expect("pendingWouldAccept" in offSnapshot).toBe(false);
     expect("backgroundRuns" in offSnapshot).toBe(false);
 
-    const on = await createApp({ eventRouter: true });
+    const on = await createApp();
     const onSnapshot = await buildSessionSnapshot({
       app: on.app,
       eventSeq: 0,
@@ -156,6 +198,24 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     );
     expect(onSnapshot.pendingWouldAccept).toEqual([]);
     expect(onSnapshot.backgroundRuns).toEqual([]);
+
+    // 真实决策行 → 默认路径（mandateGate 缺省关）也能产出并发布卡片。
+    seedWouldAcceptCard(on.app.superAgentControlPlane!, on.root);
+    const cards = on.app.superAgentControlPlane!.listPendingWouldAccept();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      source: "im",
+      suggestedTier: "record_only",
+      summary: "发布状态怎么样？",
+    });
+    const withCard = await buildSessionSnapshot({
+      app: on.app,
+      eventSeq: 0,
+      messages: [],
+      stateRevision: 1,
+      workspace: { workspacePath: on.root, workspaceKey: on.root },
+    });
+    expect(withCard.pendingWouldAccept).toEqual(cards);
 
     // 真实 registry 写入 → 同一控制面读面 → 下次快照（running cheng job 必须可见）。
     const registry = new BackgroundRunRegistry(
@@ -181,7 +241,7 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     ]);
   });
 
-  it("features.specEgressFence=true 依赖 eventRouter=true：单独开启启动期拒绝", async () => {
+  it("features.specEgressFence=true 需要宿主能力：无 host 启动期拒绝", async () => {
     const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-fence-"));
     roots.push(root);
     const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
@@ -194,7 +254,7 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
         sessionStore,
         userConfigPath,
       }),
-    ).rejects.toThrow(/features\.specEgressFence=true/);
+    ).rejects.toThrow(/features\.specEgressFence=true 需要宿主注入 options\.superAgent/);
     sessionStore.close();
   });
 
@@ -218,7 +278,7 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     sessionStore.close();
   });
 
-  it("features.specWriteLease=true 依赖 eventRouter=true；联合开启后控制面持有租约仓储", async () => {
+  it("features.specWriteLease=true 需要宿主能力；有 host 时控制面持有租约仓储（无须 eventRouter）", async () => {
     const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-lease-"));
     roots.push(root);
     const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
@@ -231,10 +291,10 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
         sessionStore,
         userConfigPath,
       }),
-    ).rejects.toThrow(/features\.specWriteLease=true/);
+    ).rejects.toThrow(/features\.specWriteLease=true 需要宿主注入 options\.superAgent/);
     sessionStore.close();
 
-    const on = await createApp({ eventRouter: true, specWriteLease: true });
+    const on = await createApp({ features: { specWriteLease: true } });
     expect(on.app.superAgentControlPlane).toBeDefined();
     // dispatcher 的 late-bound 端口与 sweep 使用同一仓储实例。
     expect(on.app.superAgentControlPlane!.contracts.writeLeases.getActive("ws-none")).toEqual([]);
@@ -242,8 +302,7 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
 
   it("spec run 持租约时，手动 session 的 Write 在工具入口被拒绝", async () => {
     const { app, root } = await createApp({
-      eventRouter: true,
-      specWriteLease: true,
+      features: { specWriteLease: true },
       mode: "yolo",
     });
     const leases = app.superAgentControlPlane!.contracts.writeLeases;
@@ -314,36 +373,17 @@ describe("create-app × features.eventRouter（spec §5.4 kill-switch）", () =>
     };
     // flag on：工厂仅在装配 dispatcher 的 fence dep 时调用（删掉接线行 => 断言失败）。
     const on = await createApp({
-      eventRouter: true,
-      specEgressFence: true,
+      features: { specEgressFence: true },
       specFenceFactory: fenceFactory,
     });
     expect(on.app.superAgentControlPlane).toBeDefined();
     expect(factoryCalls).toBe(1);
     // flag off：dispatcher 不构造围栏，工厂零调用（flag-off 字节兼容）。
     const off = await createApp({
-      eventRouter: true,
-      specEgressFence: false,
+      features: { specEgressFence: false },
       specFenceFactory: fenceFactory,
     });
     expect(off.app.superAgentControlPlane).toBeDefined();
     expect(factoryCalls).toBe(1);
-  });
-
-  it("flag 开但宿主未注入 superAgent：启动期响亮失败（不静默降级 legacy）", async () => {
-    const root = await mkdtemp(join(tmpdir(), "zcode-sa-app-missing-"));
-    roots.push(root);
-    const sessionStore = await createSqliteSessionStore({ dbPath: ":memory:" });
-    const userConfigPath = join(root, "config.json");
-    await writeFile(userConfigPath, JSON.stringify({ features: { eventRouter: true } }));
-    await expect(
-      createZCodeApp({
-        env: {},
-        runtimeConfig: { workingDirectory: root },
-        sessionStore,
-        userConfigPath,
-      }),
-    ).rejects.toThrow(/features\.eventRouter=true/);
-    sessionStore.close();
   });
 });

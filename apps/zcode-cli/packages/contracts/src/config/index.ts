@@ -245,7 +245,11 @@ export interface RuntimeConfig {
     skill: boolean;
     mcp: boolean;
     goalLayer: boolean;
-    // super-agent 触发子系统（spec §5.4）：缺省全 false/undefined = legacy 直路；按灰度逐个开启。
+    // super-agent 触发子系统（spec §5.4）。控制面在场与否是宿主能力门：create-app
+    // 拿到 options.superAgent（handleCommand + autoReplyGuard）就构造，headless 入口
+    // 不注入即能力缺席——这里任何 flag 都不决定控制面构造。eventRouter 保留其剩余
+    // 灰度面（workflow 后台行投影）；mandateGate/specWriteLease/specEgressFence 只在
+    // 控制面内生效，缺能力却显式开启 = 启动期响亮失败（不静默 no-op）。
     // optional：DefaultRuntimeConfig 播种 false，adapters ConfigPort.getAll 的既有字面量不回填
     // 这些键时为 undefined——读取方一律按 `=== true` 判开（与 goalLayerEnabled 同款显式开语义）。
     eventRouter?: boolean;
@@ -351,8 +355,9 @@ export const DefaultRuntimeConfig: RuntimeConfig = {
     mcp: true,
     // goal layer 已转正（设计 M11 / Phase 1）：默认开启，--goal-layer off / features.goalLayer=false 仍可关闭。
     goalLayer: true,
-    // super-agent Phase 2 开关缺省关（spec §5.4）：eventRouter=false = TriggerSink 注入 no-op 直通
-    // （legacy bots 直路 = kill-switch）；mandateGate/specWriteLease 分别等 Phase 3/5 接线；
+    // super-agent：控制面本身由宿主注入 options.superAgent 决定（能力门），不再看
+    // 这些 flag；eventRouter=false 只关闭 workflow 后台行投影等剩余灰度，
+    // mandateGate/specWriteLease 等只在控制面在场时生效（缺能力 + 显式开启 = 启动期响亮失败）。
     // durableSchedulerDispatch=false = dispatchPolicy 缺省 in-window。
     eventRouter: false,
     mandateGate: false,

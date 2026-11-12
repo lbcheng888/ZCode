@@ -3,6 +3,9 @@
 // → 宿主 sendText（带 triggerSource）→ input-facade 按 commandId 取出 resolution
 // → Core prompt admission → 真工具权限门。
 //
+// 控制面按宿主能力装配：只要注入 options.superAgent 就在场，不再要求
+// features.eventRouter。mandateGate 仍决定 M4 包装是否安装。
+//
 // 只替身测试域内的模型（脚本化生成，不联网）与会话存储；控制面/域库/权限管线全部真实。
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -104,15 +107,15 @@ function rejectedAck(commandId: string, reason: string): CommandAck {
 }
 
 async function createApp(options: {
-  eventRouter: boolean;
   mandateGate: boolean;
+  /** false = headless（不注入 options.superAgent）；缺省 true = 前台/协议宿主。 */
+  host?: boolean;
   steps?: (root: string) => ModelResult[];
 }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "zcode-sa-admission-chain-"));
   roots.push(root);
   const userConfigPath = join(root, "config.json");
   const features: Record<string, boolean> = {};
-  if (options.eventRouter) features.eventRouter = true;
   if (options.mandateGate) features.mandateGate = true;
   await writeFile(userConfigPath, JSON.stringify({ features }));
 
@@ -148,13 +151,19 @@ async function createApp(options: {
   const app = await createZCodeApp({
     env: {},
     modelExecutor: scriptedExecutor(options.steps?.(root) ?? []),
-    runtimeConfig: { workingDirectory: root },
+    // 准入链用例不验证 MCP：关掉适配器，避免会话启动时的 server/discover
+    // 协商与 app.close 竞态在 teardown 留下 SDK 的 unhandled rejection。
+    runtimeConfig: { workingDirectory: root, mcp: { enabled: false } },
     sessionStore,
-    superAgent: {
-      handleCommand,
-      autoReplyGuard: { admit: async () => true },
-      superAgentDatabasePath: join(root, "super-agent.sqlite"),
-    },
+    ...(options.host === false
+      ? {}
+      : {
+          superAgent: {
+            handleCommand,
+            autoReplyGuard: { admit: async () => true },
+            superAgentDatabasePath: join(root, "super-agent.sqlite"),
+          },
+        }),
     userConfigPath,
   });
   appRef = app;
@@ -203,9 +212,10 @@ async function awaitStartedReceipt(harness: Harness, index = 0): Promise<void> {
 
 describe("create-app 装配链 × M4 mandateFacts", () => {
   it("human-explicit：免 Mandate，Core 收到 user-origin（无 facts / 无 triggerSource）", async () => {
-    const harness = await createApp({ eventRouter: true, mandateGate: true });
+    // 无 features.eventRouter：控制面靠宿主注入在场（旧 flag 不再是前提）。
+    const harness = await createApp({ mandateGate: true });
     const plane = harness.app.superAgentControlPlane;
-    if (!plane) throw new Error("eventRouter=true 未装配控制面");
+    if (!plane) throw new Error("宿主注入 superAgent 未装配控制面");
     const outcome = await plane.triggerSink.ingest({
       actor: { id: "u1", kind: "human" },
       payload: { botId: "human-bot", chatType: "private", text: "人类显式消息" },
@@ -226,12 +236,11 @@ describe("create-app 装配链 × M4 mandateFacts", () => {
 
   it("owned 事件：隐式 record_only facts 进 Core，写工具被 mandate 门 deny", async () => {
     const harness = await createApp({
-      eventRouter: true,
       mandateGate: true,
       steps: (root) => [writeCallResult({ filePath: join(root, "probe.txt") })],
     });
     const plane = harness.app.superAgentControlPlane;
-    if (!plane) throw new Error("eventRouter=true 未装配控制面");
+    if (!plane) throw new Error("宿主注入 superAgent 未装配控制面");
     const threadKey = `${harness.root}|bot:env-bot+u2`;
     plane.contracts.trigger.upsertSubscription({
       lane: "followup",
@@ -269,12 +278,13 @@ describe("create-app 装配链 × M4 mandateFacts", () => {
     });
   });
 
-  it("flag 关（eventRouter=false）：Core 收到的 options 不含 mandateFacts / triggerSource", async () => {
-    const harness = await createApp({ eventRouter: false, mandateGate: false });
-    expect(harness.app.superAgentControlPlane).toBeUndefined();
+  it("缺省 mandateGate（false）：控制面仍在场（无 flag），普通输入不含 mandateFacts / triggerSource", async () => {
+    const harness = await createApp({ mandateGate: false });
+    // 旧 features.eventRouter=false 不再是否决条件：宿主注入即构造。
+    expect(harness.app.superAgentControlPlane).toBeDefined();
     const ack = await harness.handleCommand({
       clientId: "cli",
-      commandId: "cmd-user-flag-off",
+      commandId: "cmd-user-default-gate",
       payload: { requestedDelivery: "startNow", text: "普通用户输入" },
       sessionId: harness.app.sessionId,
       type: "sendText",
@@ -286,7 +296,24 @@ describe("create-app 装配链 × M4 mandateFacts", () => {
     await awaitStartedReceipt(harness);
   });
 
-  it("mandateGate 单独打开（eventRouter 关）：启动期响亮失败，不静默失效", async () => {
+  it("无 host（headless）：不构造控制面，capability absent 不抛错", async () => {
+    const harness = await createApp({ host: false, mandateGate: false });
+    expect(harness.app.superAgentControlPlane).toBeUndefined();
+    const ack = await harness.handleCommand({
+      clientId: "cli",
+      commandId: "cmd-user-headless",
+      payload: { requestedDelivery: "startNow", text: "headless 输入" },
+      sessionId: harness.app.sessionId,
+      type: "sendText",
+    });
+    expect(ack.status).toBe("accepted");
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.calls[0]?.mandateFacts).toBeUndefined();
+    expect(harness.calls[0]?.triggerSource).toBeUndefined();
+    await awaitStartedReceipt(harness);
+  });
+
+  it("mandateGate 单独打开且宿主未注入能力：启动期响亮失败，不静默失效", async () => {
     const root = await mkdtemp(join(tmpdir(), "zcode-sa-admission-gate-only-"));
     roots.push(root);
     const userConfigPath = join(root, "config.json");
@@ -299,7 +326,7 @@ describe("create-app 装配链 × M4 mandateFacts", () => {
         sessionStore,
         userConfigPath,
       }),
-    ).rejects.toThrow(/features\.mandateGate=true 依赖 features\.eventRouter=true/);
+    ).rejects.toThrow(/features\.mandateGate=true 需要宿主注入 options\.superAgent/);
     sessionStore.close();
   });
 });

@@ -177,14 +177,17 @@ describe("协议宿主 super-agent 准入接线（spec §8-10①）", () => {
     expect(row?.n).toBe(0);
   });
 
-  it("flag-off：session/create 照常成功且控制面缺席（注入字段被忽略，零行为变化）", async () => {
+  it("host-injected：eventRouter 不再否决控制面，session/create 后控制面在场且 leader", async () => {
     const { server, last } = await makeServer({ eventRouter: false });
 
     await createSession(server);
 
     expect(last.app).toBeDefined();
-    expect(last.app?.superAgentControlPlane).toBeUndefined();
-    // 注入本身零 I/O、flag-off 不被读取；字段在场不影响装配结果。
+    // 控制面是宿主能力门：options.superAgent 在场即构造，features.eventRouter
+    // 不再决定它是否存在；该 flag 只剩 workflow 后台行投影等剩余灰度。
+    const plane = last.app?.superAgentControlPlane;
+    expect(plane).toBeDefined();
+    expect(plane?.isLeader()).toBe(true);
     expect(typeof last.options?.superAgent?.handleCommand).toBe("function");
   });
 });

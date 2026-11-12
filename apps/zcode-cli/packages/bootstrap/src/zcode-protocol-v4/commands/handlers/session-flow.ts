@@ -463,9 +463,9 @@ export async function preemptActiveTurnAndWait(
 /**
  * would-accept 批转 auto：桌面/Web 收件箱经 v4 命令面调用控制面 promoteWouldAccept。
  *
- * 控制面是 create-app 的 flag-on 产物；缺席（features.eventRouter=false 或宿主未注入
- * options.superAgent）时命令本不该出现在 UI（快照不发布 pendingWouldAccept），这里仍
- * 响亮拒绝而不是静默 noop，避免把「未启用」伪装成「已批转」。
+ * 控制面是 create-app 的宿主能力门产物；缺席（宿主未注入 options.superAgent）时命令
+ * 本不该出现在 UI（快照不发布 pendingWouldAccept），这里仍响亮拒绝而不是静默 noop，
+ * 避免把「未启用」伪装成「已批转」。
  */
 async function promoteWouldAccept(
   host: V4CommandCoreHost,
@@ -476,7 +476,7 @@ async function promoteWouldAccept(
   if (!plane) {
     throw new V4InputAdmissionRejectedError(
       "superagent.controlPlaneUnavailable",
-      "would-accept promote requires features.eventRouter=true and a host-injected superAgent control plane",
+      "would-accept promote requires a host-injected superAgent control plane",
     );
   }
   const payload = envelope.payload as CommandPayloadMap["promoteWouldAccept"];

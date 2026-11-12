@@ -325,33 +325,26 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     }),
     options,
   );
-  // M4 门只在事件路由控制面内生效：mandateGate 单独打开时控制面不构造，门会静默失效，
-  // 运维却以为门已开。启动期显式拒绝该组合（kill-switch 只认 eventRouter=false）。
-  if (
-    configResult.config.features.mandateGate === true &&
-    configResult.config.features.eventRouter !== true
-  ) {
+  // 控制面是能力门，不是用户 flag：宿主注入 options.superAgent（handleCommand +
+  // autoReplyGuard）就构造；headless 入口不注入 = 能力缺席，不构造、不伪造、不抛错。
+  // 下面三个显式门只在控制面内生效，缺能力时开启会让运维误以为门已开而实际是 no-op，
+  // 所以启动期响亮拒绝该组合（这是 flag 误配，不是「无 host」本身的错误）。
+  const superAgentHost = options.superAgent;
+  if (configResult.config.features.mandateGate === true && !superAgentHost) {
     throw new Error(
-      "features.mandateGate=true 依赖 features.eventRouter=true（mandate 门只在事件路由控制面内生效，spec §5.4）",
+      "features.mandateGate=true 需要宿主注入 options.superAgent（mandate 门只在 super-agent 控制面内生效，spec §5.4）",
     );
   }
-  // P6 围栏只在 spec run（eventRouter 控制面）内生效；单独开启会让运维误以为
-  // 硬围栏已生效。启动期显式拒绝该组合（与 mandateGate 同款 fail-loud）。
-  if (
-    configResult.config.features.specEgressFence === true &&
-    configResult.config.features.eventRouter !== true
-  ) {
+  // P6 围栏只在 spec run 内生效，而 spec run dispatcher 随控制面装配。
+  if (configResult.config.features.specEgressFence === true && !superAgentHost) {
     throw new Error(
-      "features.specEgressFence=true 依赖 features.eventRouter=true（围栏只在 spec run 内生效，P6 §3.6）",
+      "features.specEgressFence=true 需要宿主注入 options.superAgent（围栏只在 spec run 内生效，P6 §3.6）",
     );
   }
-  // S1 写租约同样只挂在 spec run dispatcher 上；单独开启不生效，启动期拒绝。
-  if (
-    configResult.config.features.specWriteLease === true &&
-    configResult.config.features.eventRouter !== true
-  ) {
+  // S1 写租约同样只挂在 spec run dispatcher 上；缺控制面时开启不生效，启动期拒绝。
+  if (configResult.config.features.specWriteLease === true && !superAgentHost) {
     throw new Error(
-      "features.specWriteLease=true 依赖 features.eventRouter=true（租约只在 spec run 内生效，S1）",
+      "features.specWriteLease=true 需要宿主注入 options.superAgent（租约只在 spec run 内生效，S1）",
     );
   }
   // S1 egress 白名单：repo 配置在启动期完成形状校验（与 eventRouter 是否开启无关），
@@ -393,8 +386,9 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   let nodeReplBrowserBroker: NodeReplBrowserBroker | undefined;
   let ownedNodeReplBrowserBroker: NodeReplBrowserBroker | undefined;
   let providerModelRuntime: ApiProviderModelRuntime | undefined;
-  // super-agent 控制面（Phase 2 里程碑 A）：只在 features.eventRouter=true 时构造；
-  // 声明提到 try 前，启动中途失败时外层 catch 能对称 stop 关库不泄漏。
+  // super-agent 控制面（Phase 2 里程碑 A）：宿主注入 options.superAgent 即构造
+  //（能力门，不再看 features.eventRouter）；声明提到 try 前，启动中途失败时外层
+  // catch 能对称 stop 关库不泄漏。
   let superAgentControlPlane: SuperAgentControlPlane | undefined;
   let backgroundRunDb: Awaited<ReturnType<typeof openSuperAgentDatabase>> | undefined;
   let chengWatchdog: SuperAgentWatchdogContract | undefined;
@@ -402,7 +396,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
   // M4：事件回合 mandate 结论的 admission 交接面（按 wire commandId 登记/取出）。
   // 必须是进程级共享表：leader app 登记、目标 session app 的 input-facade 读取（协议
   // 宿主每个 session 一个 app，各持一份表会让跨 session 投递静默丢 facts）。
-  // flag 关时恒空；input-facade 读不到结论 = 保持 user-origin 字节兼容。
+  // 未登记时读不到结论 = 保持 user-origin 字节兼容。
   const admissionMandateFacts = processSuperAgentAdmissionMandateFacts;
   try {
     const storageRoot = resolvePath(configResult.config.storage.dir);
@@ -1461,7 +1455,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       revalidateAdmissionMandateFacts: (triggerId) => {
         if (!superAgentControlPlane) {
           throw new Error(
-            `事件回合 mandateFacts 重新解析时控制面缺席: triggerId=${triggerId}（flag-on 装配错误）`,
+            `事件回合 mandateFacts 重新解析时控制面缺席: triggerId=${triggerId}（宿主未注入 options.superAgent）`,
           );
         }
         return superAgentControlPlane.resolveAdmissionMandateFacts(triggerId);
@@ -1574,21 +1568,16 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     });
 
     // super-agent 控制面装配（spec super-agent-trigger-subsystem-spec §7-7 里程碑 A）：
-    // flag 关（缺省）= 完全不构造，零行为变化（spec §5.4 kill-switch）；flag 开 = 宿主
-    // 必须注入 handleCommand（CommandInbox 在线投递）与 autoReplyGuard（bots 互答守卫），
-    // 缺站启动期响亮失败——不静默回 legacy（静默降级会把 flag 语义变成谎言）。
-    if (configResult.config.features.eventRouter === true) {
-      const superAgentHost = options.superAgent;
-      if (!superAgentHost) {
-        throw new Error(
-          "features.eventRouter=true 需要宿主注入 options.superAgent（handleCommand + autoReplyGuard，spec §2.2 组合根注入）",
-        );
-      }
+    // 能力门 = 宿主注入 options.superAgent（handleCommand + autoReplyGuard，spec §2.2
+    // 组合根注入）。前台/协议宿主恒注入 ⇒ would-accept 实时卡默认可用，不再要求用户
+    // 配置 features.eventRouter/mandateGate；headless 入口不注入 ⇒ 能力缺席，不构造，
+    // 也不拿 flag 伪造一个控制面。
+    if (superAgentHost) {
       superAgentAbort = new AbortController();
       // M4：mandateGate 开时，所有带 triggerId 的 sendText 信封在唯一 admission 入口前
       // 解析本回合 mandate 结论，并按 commandId 交给 input-facade。解析失败/缺结论
       // 一律响亮失败——绝不让事件回合静默退回 user-origin（那会让 M4 门假死）。
-      // flag 关或信封无 triggerId 时原样直通，零行为变化。
+      // mandateGate 关或信封无 triggerId 时原样直通，零行为变化。
       const mandateGate = configResult.config.features.mandateGate === true;
       const superAgentControlPlaneHostPorts = mandateGate
         ? {
