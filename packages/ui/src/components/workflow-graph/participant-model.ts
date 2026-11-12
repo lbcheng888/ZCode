@@ -1,5 +1,5 @@
 import type { WorkflowRunState } from "@zcode/shared/zcode-protocol-v4";
-import { phaseBinder } from "./instance-phases.js";
+import { phaseBinder, runHasPhaseVocabulary } from "./instance-phases.js";
 import { aggregateRunStatuses, statusOfRunNode } from "./run-status.js";
 import {
   IMPLICIT_PHASE_ID,
@@ -232,6 +232,24 @@ export function liveParticipantView(
     new Set(participant.steps.map((id) => siteOf.get(id) ?? id));
   const index = runIndex(run);
   /**
+   * 有阶段词汇的 run：一条车道在某一站只有「出生在这里的实例」或「落在这里的节点」才算
+   * 这一站的参与者；分析器为 may-set 在每个认领阶段复制出的静态影子不画。车道还没有任何
+   * 实例时保留静态卡（计划中的子代理不能被藏起来）。出生与节点取并集：跨阶段 actor 在它
+   * 真正出现过的每一站都留一张；出生戳被并发 phase 游标盖到别站的 actor 也留在出生站。
+   * 成员卡认的是**自己那个序号**的实例（引擎按 `member.index + 1` 发号），不是整条车道。
+   */
+  const vocabulary = runHasPhaseVocabulary(run);
+  const lanesInRun = new Set(run.actors.map((actor) => actor.siteId));
+  const bornHere = (participant: WorkflowParticipantData): boolean => {
+    const ordinal =
+      participant.member === undefined ? undefined : participant.member.index + 1;
+    return (index.actorsBySite.get(participant.lane) ?? []).some(
+      (actor) =>
+        (ordinal === undefined || actor.ordinal === ordinal) &&
+        binder.has(participant.phase, actor.phaseName),
+    );
+  };
+  /**
    * 这张卡名下的实例：车道上在**这张卡的站点**留下过节点、且该节点的戳落在这张卡的阶段的
    * actor；在这些站点上还一个节点都没有的 actor（建了还没被 ask，或还没走到这一站）则按它
    * **自己的出生戳**归位。无戳的 run 里 `phasesOf` 恒是全部阶段，两条合起来正是今天的
@@ -278,8 +296,31 @@ export function liveParticipantView(
   for (const participant of graph.participants) {
     const sites = sitesOf(participant);
     const actors = instancesOfCard(participant, sites);
+    const memberOrdinal =
+      participant.member === undefined ? undefined : participant.member.index + 1;
+    const laneActors = index.actorsBySite.get(participant.lane) ?? [];
+    // 静态图把同一站点的车道拷贝进了 k 个认领阶段（分析器 may-set × 阶段拷贝）；live 视图
+    // 只画运行时真的在这站出现过的那一份，不把整条车道广播到每一列。成员卡只认自己的序号；
+    // 那个成员还没出生时保留计划卡。
+    const missingEvidence =
+      memberOrdinal === undefined
+        ? actors.length === 0
+        : !actors.some((actor) => actor.ordinal === memberOrdinal) &&
+          laneActors.some((actor) => actor.ordinal === memberOrdinal);
+    if (
+      vocabulary &&
+      lanesInRun.has(participant.lane) &&
+      missingEvidence &&
+      !bornHere(participant)
+    ) {
+      changed = true;
+      continue;
+    }
     if (participant.member !== undefined) {
-      const actor = actors[participant.member.index];
+      const actor =
+        memberOrdinal === undefined
+          ? undefined
+          : actors.find((candidate) => candidate.ordinal === memberOrdinal);
       participantStatuses[participant.id] =
         actor === undefined ? "pending" : statusFor(participant, actor.ordinal, sites);
       if (actor !== undefined) instances[participant.id] = boundInstance(participant.id, actor);
@@ -318,10 +359,16 @@ export function liveParticipantView(
   if (!changed) return { graph, instances, participantStatuses };
 
   const handoffs: WorkflowHandoffData[] = [];
+  const cardIds = new Set(participants.map((participant) => participant.id));
   for (const edge of graph.handoffs) {
     const froms = replacements.get(edge.from) ?? [edge.from];
     const tos = replacements.get(edge.to) ?? [edge.to];
-    for (const from of froms) for (const to of tos) handoffs.push({ ...edge, from, to });
+    for (const from of froms) {
+      for (const to of tos) {
+        // 被收窄掉的静态影子不再有卡：指向它的边是幽灵，不画。
+        if (cardIds.has(from) && cardIds.has(to)) handoffs.push({ ...edge, from, to });
+      }
+    }
   }
   return { graph: { ...graph, handoffs, participants }, instances, participantStatuses };
 }

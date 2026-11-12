@@ -162,6 +162,7 @@
   "packages/ui/test/goalChengPlanCardConsumption.test.ts",
   "packages/ui/test/goalEditSettingsMenu.test.ts",
   "packages/ui/test/swarmActivityPanel.test.ts",
+  "packages/ui/test/workflowParallelPhaseRoster.test.ts",
   "packages/web/test/viteConfigLoad.test.ts",
   "packages/zcode-server-cli/test/packaging.test.ts",
   "packages/zcode-server-cli/test/stageRemoteAssetsCli.test.ts",
