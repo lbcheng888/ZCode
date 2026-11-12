@@ -44,6 +44,8 @@ import { modelSelectionSchema } from "../model-selection.js";
 import { APP_USAGE_RANGES, appUsageSnapshotSchema } from "../usage-stats.js";
 import { DYNAMIC_WORKFLOW_MODES } from "../dynamic-workflow-feature.js";
 import { errorAttributionSchema } from "../zcode-protocol-v4/snapshot.js";
+import { pendingWouldAcceptCardSchema } from "../zcode-protocol-v4/would-accept.js";
+import { backgroundRunViewSchema } from "../zcode-protocol-v4/background-run-view.js";
 // 后台详情共享精简的只读响应 schema，不携带命令或计时元数据。
 export * from "../background-bash-output.js";
 export * from "../process-diagnostic.js";
@@ -1444,6 +1446,9 @@ export const zcodeSessionStateSnapshotSchema = z
     todos: z.array(zcodeSessionTodoItemSchema).optional(),
     todoGroups: z.array(zcodeSessionTodoGroupSchema).optional(),
     slashCommands: z.array(zcodeSlashCommandSchema).optional(),
+    // 控制面在场时 session-mapper 才发布这两个键；缺席 = 旧发送端未投影。
+    pendingWouldAccept: z.array(pendingWouldAcceptCardSchema).optional(),
+    backgroundRuns: z.array(backgroundRunViewSchema).optional(),
   })
   .strict();
 export type ZCodeSessionStateSnapshot = z.infer<typeof zcodeSessionStateSnapshotSchema>;
