@@ -136,6 +136,11 @@ interface ConversationTurnGroupProps {
   ) => Promise<CommandAck | boolean | void> | CommandAck | boolean | void;
   /** 会话首轮：顶部留白由 Timeline 的状态胶囊 inset 提供，本轮不再留顶部 padding。 */
   topClearedByTimeline?: boolean;
+  /**
+   * 上一轮以 assistant 轮尾操作栏收尾。操作栏即使不可见也净占 28px，
+   * 此时本轮轮顶只需补回剩余呼吸，避免两段 padding 再叠出 100px+ 的轮间空白。
+   */
+  followsAssistantTextActions?: boolean;
 }
 
 interface CronAutomationTurnCard {
@@ -1612,6 +1617,27 @@ function ConversationBackgroundResultWork({
   );
 }
 
+/**
+ * 该轮最后一个流内子节点是否是 assistant 轮尾操作栏。
+ *
+ * Bug 根因：操作栏即使 opacity:0 也占 24px；扣掉 `-mt-4`、加上轮内 gap-5 后仍净占 28px。
+ * 下一轮若照常吃满 `pt-14`(56px)，轮边界会叠成 `pb-5(20) + 28 + 56 = 104px` 的空白。
+ * 判据必须同时确认操作栏之后没有内置块（轮尾 boundary / Highspeed 页脚 / 未接受消息），
+ * 否则收紧轮顶会让下一轮贴到那些块上。运行中不成立：那一刻操作栏还没出现、下一轮保持
+ * pt-14；完成瞬间操作栏 +28 与轮顶 -28 相抵，轮间高度不跳。
+ */
+export function endsWithAssistantTextActions(
+  unit: ConversationTurnRenderUnit | undefined,
+): boolean {
+  if (!unit || unit.isRunning) return false;
+  return (
+    unit.latestAssistantTextRow?.state === "complete" &&
+    unit.assistantTailRows.length === 0 &&
+    unit.showHighspeedOutputFooter !== true &&
+    (unit.topicPreparations?.length ?? 0) === 0
+  );
+}
+
 function ConversationTurnGroupImpl({
   unit,
   nowMs = Date.now(),
@@ -1622,6 +1648,7 @@ function ConversationTurnGroupImpl({
   onFeedbackChange,
   onEdit,
   topClearedByTimeline = false,
+  followsAssistantTextActions = false,
 }: ConversationTurnGroupProps) {
   const isOfficeMode = useIsOfficeMode();
   const { intl } = useZCodeIntl();
@@ -1853,7 +1880,13 @@ function ConversationTurnGroupImpl({
       data-highspeed-gradient={showHighspeedAnimatedGradient ? "true" : undefined}
       className={cn(
         "relative mx-auto flex w-full flex-col gap-5 px-4 @md/conversation:px-6 pb-5",
-        startsWithoutUserBubble || topClearedByTimeline ? "pt-0" : "pt-14",
+        startsWithoutUserBubble || topClearedByTimeline
+          ? "pt-0"
+          : // 上一轮末尾的 hover 操作栏已净占 28px，这里只补其余呼吸：
+            // pb-5(20) + 操作栏(28) + pt-7(28) = 76px，恢复操作栏出现前的轮间距。
+            followsAssistantTextActions
+            ? "pt-7"
+            : "pt-14",
         showHighspeedAnimatedGradient && "highspeed-animated-gradient-text",
       )}
     >

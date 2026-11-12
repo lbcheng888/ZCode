@@ -34,7 +34,7 @@ import { runUserAction } from "@/lib/userActionTelemetry.js";
 import { Button } from "@/components/ui/button.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { logger } from "@/logger.js";
-import { ConversationTurnGroup } from "@/v4/ConversationTurnGroup.js";
+import { ConversationTurnGroup, endsWithAssistantTextActions } from "@/v4/ConversationTurnGroup.js";
 import {
   createLogicalUiInstancesSelector,
   getPluginUiDisclosureSnapshot,
@@ -2200,6 +2200,9 @@ function ConversationTimelineImpl({
                         onFeedbackChange={onFeedbackChange}
                         onEdit={onEdit}
                         topClearedByTimeline={clearsStatusPanel}
+                        followsAssistantTextActions={endsWithAssistantTextActions(
+                          virtualizedUnits[virtualRow.index - 1],
+                        )}
                       />
                     </div>
                   );
@@ -2234,6 +2237,9 @@ function ConversationTimelineImpl({
                     onFeedbackChange={onFeedbackChange}
                     onEdit={onEdit}
                     topClearedByTimeline={sessionStartAtTop && liveUnitIndex === 0}
+                    followsAssistantTextActions={endsWithAssistantTextActions(
+                      virtualizedUnits.at(-1),
+                    )}
                   />
                 </div>
               ) : null}

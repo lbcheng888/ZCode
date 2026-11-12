@@ -157,6 +157,7 @@
   "packages/server/test/tsupConfig.test.ts",
   "packages/services/test/automationRunProjection.test.ts",
   "packages/services/test/automationRunReconciler.test.ts",
+  "packages/ui/test/assistantTurnSpacing.test.ts",
   "packages/ui/test/composerUsageStats.test.ts",
   "packages/ui/test/goalChengPlanCardConsumption.test.ts",
   "packages/ui/test/goalEditSettingsMenu.test.ts",
