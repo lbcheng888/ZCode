@@ -1969,8 +1969,11 @@ function ConversationTurnGroupImpl({
               hookInvocations={unit.hookInvocations}
               turnId={unit.turnId}
               sourceCommandIds={deliverySourceCommandIds}
+              // 操作栏不是内容块，不参与 turn 容器的 gap-5 节奏：它贴着所操作的正文
+              // （行内同名操作栏是 mt-1），20px 的 gap 里只保留 4px。首个子节点不位移，
+              // 否则无正文轮会把操作栏顶进上一轮的 pb-5 里。
               className={cn(
-                "flex items-center gap-1",
+                "flex items-center gap-1 [&:not(:first-child)]:-mt-4",
                 context.compactForRemoteControl
                   ? "opacity-100"
                   : "opacity-0 transition-opacity group-hover/assistant-turn:opacity-100 focus-within:opacity-100 has-[[data-bot-group-delivery]]:opacity-100",
@@ -1979,8 +1982,10 @@ function ConversationTurnGroupImpl({
           ) : (hasHookActions || !unit.isRunning) && !canRenderAssistantActions ? (
             // 冲突合并曾把此兜底接到 Highspeed 页脚的 else，导致普通回复重复入口，
             // Highspeed 无正文轮又丢失入口；它只与普通操作栏互斥，页脚独立渲染。
+            // 间距口径与正文操作栏相同：贴着上一块内容留 4px，不占满 gap-5。
             <MessageActions
               className={cn(
+                "[&:not(:first-child)]:-mt-4",
                 context.compactForRemoteControl
                   ? "opacity-100"
                   : "opacity-0 transition-opacity group-hover/assistant-turn:opacity-100 focus-within:opacity-100 has-[[data-bot-group-delivery]]:opacity-100",
