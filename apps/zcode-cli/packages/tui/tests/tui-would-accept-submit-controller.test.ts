@@ -163,7 +163,7 @@ test("busy 时提交 /would-accept promote 同样短路：不排队不进模型�
     { content: "/would-accept promote card-42", role: "user" },
     {
       content:
-        "Promoted card-42: auto mandate row recorded (auto execution tier activates in a later phase).",
+        "Promoted card-42: auto mandate row recorded; best-plan execution authorized.",
       role: "agent",
     },
   ]);

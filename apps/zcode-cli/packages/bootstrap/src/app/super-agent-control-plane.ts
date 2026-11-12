@@ -582,12 +582,11 @@ export async function createSuperAgentControlPlane(
   const decisionLog = createDecisionLog(db);
   const writeLeases = createWriteLeases(db);
   const mandateRepo = createMandateRepo(db);
-  // M4：flag 关（缺省）不注入 repo = 恒隐式 record_only（P2 字节兼容）；
-  // flag 开才启用「显式行 UNION 隐式缺省」三档解析。
+  // 执行档读取不再由用户 flag 决定：mandate 仓储恒注入，未命中显式行时仍隐式
+  // record_only（零行为变化）；显式 auto 行（收件箱批转写入）因此对未来事件生效。
+  // mandateGate 只保留 admission/guide 的额外守卫语义，不否决执行档解析。
   const mandateGate = options.mandateGate === true;
-  const mandate = mandateGate
-    ? createMandateContract({ repo: mandateRepo, workspaceIdentity, now })
-    : createMandateContract();
+  const mandate = createMandateContract({ repo: mandateRepo, workspaceIdentity, now });
   const delivery = createCommandInboxTriggerDelivery({
     handleCommand: hostPorts.handleCommand,
     now,
@@ -646,10 +645,12 @@ export async function createSuperAgentControlPlane(
     worker,
     decisionLog,
     now,
-    ...(mandateGate ? { mandate } : {}),
+    mandate,
     ...(options.specRun ? { specRun: options.specRun } : {}),
     ...(options.resolveSpecRunGate ? { resolveSpecRunGate: options.resolveSpecRunGate } : {}),
-    proposalGate: mandateGate,
+    // 五字段方案门是自动执行的结构前提，不再依赖用户 flag；缺字段的 accept 仍然
+    // 降级 record_only，不会伪造方案。
+    proposalGate: true,
     onError: options.onError,
   });
   // would-accept 权威投影变化通知：卡片产出/批转后由宿主刷新已订阅客户端的投影。
@@ -914,12 +915,24 @@ export async function createSuperAgentControlPlane(
    * 锁内重读保证并发重复批转收敛为幂等：后到者看到 convert 行直接提交返回。
    */
   const promoteWouldAccept = async (cardId: string): Promise<void> => {
+    let triggerId: string;
+    let scheme: ReturnType<typeof parseWouldAcceptScheme>;
+    let trigger: { source: string; thread_key: string } | undefined;
+    let mandateId: string;
     db.exec("begin immediate");
     try {
       const card = db
-        .prepare(`select workspace_identity, trigger_id, disposition from decision_log where id = ?`)
+        .prepare(
+          `select workspace_identity, trigger_id, disposition, card_payload
+             from decision_log where id = ?`,
+        )
         .get(cardId) as
-        | { workspace_identity: string; trigger_id: string | null; disposition: string }
+        | {
+            workspace_identity: string;
+            trigger_id: string | null;
+            disposition: string;
+            card_payload: string | null;
+          }
         | undefined;
       if (
         !card ||
@@ -929,8 +942,15 @@ export async function createSuperAgentControlPlane(
       ) {
         throw new Error(`would-accept 卡不可批转: ${cardId}（不存在 / 非本 workspace / 非待批卡）`);
       }
-      const triggerId = card.trigger_id;
-      const trigger = db
+      triggerId = card.trigger_id;
+      // 自动执行必须有完整五字段方案；缺方案只允许旧人工批转路径（无 specRun 的测试/旧宿主）。
+      scheme = parseWouldAcceptScheme(card.card_payload);
+      if (options.specRun && !scheme) {
+        throw new Error(
+          `would-accept 卡缺五字段方案，不能自动执行: ${cardId}（card_payload 不完整）`,
+        );
+      }
+      trigger = db
         .prepare(`select source, thread_key from trigger_events where id = ?`)
         .get(triggerId) as { source: string; thread_key: string } | undefined;
       if (!trigger) {
@@ -959,7 +979,7 @@ export async function createSuperAgentControlPlane(
         );
       }
       // 同 triggerClass 已有 auto 行（他卡先批）：复用其 id，不撞 partial unique。
-      const mandateId =
+      mandateId =
         active?.id ??
         mandateRepo.insert({
           workspaceIdentity,
@@ -989,6 +1009,24 @@ export async function createSuperAgentControlPlane(
     // 事务已提交：卡片从权威读面消失，通知宿主刷新已订阅投影（幂等重复批转折返早退
     // 路径不通知，因为没有状态变化）。
     notifyWouldAcceptChanged();
+    // 当前卡也执行：批转不是只给未来事件写授权；有 specRun + 五字段方案时立即把这张
+    // 最佳方案交给 spec lane。异步派发，失败经 onError 原样上浮（不吞、不伪造完成）。
+    if (options.specRun && scheme && trigger) {
+      void options.specRun
+        .start({
+          triggerId,
+          workspaceIdentity,
+          threadKey: trigger.thread_key,
+          source: trigger.source,
+          tier: "auto",
+          reason: `would-accept promote ${cardId}`,
+          evidence: [`card:${cardId}`, `mandate:${mandateId}`],
+          card: scheme,
+        })
+        .catch((error: unknown) => {
+          options.onError(error, "super_agent.would_accept.auto_run");
+        });
+    }
   };
 
   /**

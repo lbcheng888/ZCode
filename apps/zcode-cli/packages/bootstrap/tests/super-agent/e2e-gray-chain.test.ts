@@ -311,7 +311,16 @@ describe("flag-on 灰度链（真域库 + 真模块，仅宿主端口替身）",
     ).toMatchObject({ disposition: "accept" });
     expect(plane.listPendingWouldAccept()).toEqual([]);
     expect(inbox.envelopes).toHaveLength(1);
-    expect(specRunStarts).toEqual([]);
+    // 批转当前卡也立即派发：不是只给未来事件写授权。
+    await vi.waitFor(() => expect(specRunStarts).toHaveLength(1));
+    expect(specRunStarts[0]).toMatchObject({
+      triggerId: candidate1.triggerId,
+      workspaceIdentity: WS,
+      threadKey: `${WS}|${CANDIDATE_THREAD_HINT}`,
+      source: "im",
+      tier: "auto",
+      card: SCHEME_CARD,
+    });
 
     // (e) 下一候选命中显式 auto 档：commit 后 specRun 发行即派发事实。
     const candidate2 = await plane.triggerSink.ingest({
@@ -339,8 +348,8 @@ describe("flag-on 灰度链（真域库 + 真模块，仅宿主端口替身）",
     ]);
     expect(errors).toEqual([]);
 
-    await vi.waitFor(() => expect(specRunStarts).toHaveLength(1));
-    expect(specRunStarts[0]).toMatchObject({
+    await vi.waitFor(() => expect(specRunStarts).toHaveLength(2));
+    expect(specRunStarts[1]).toMatchObject({
       triggerId: candidate2.triggerId,
       workspaceIdentity: WS,
       threadKey: `${WS}|${CANDIDATE_THREAD_HINT}`,

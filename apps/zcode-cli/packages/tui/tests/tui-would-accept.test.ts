@@ -129,7 +129,7 @@ function promoteHarness(promote?: (cardId: string) => Promise<void>) {
   };
 }
 
-test("promote：成功呈现写行结果并如实标注执行档 Phase 3 边界", async () => {
+test("promote：成功呈现写行结果并如实标注 best-plan 执行授权", async () => {
   const seen: string[] = [];
   const io = promoteHarness(async (cardId) => {
     seen.push(cardId);
@@ -139,7 +139,7 @@ test("promote：成功呈现写行结果并如实标注执行档 Phase 3 边界"
   assert.deepEqual(io.messages[0], { content: "/would-accept promote card-7", role: "user" });
   assert.match(
     io.messages[1]?.content ?? "",
-    /Promoted card-7: auto mandate row recorded \(auto execution tier activates in a later phase\)\./,
+    /Promoted card-7: auto mandate row recorded; best-plan execution authorized\./,
   );
   assert.equal(io.status, "Would-accept card card-7 promoted to auto.");
 });

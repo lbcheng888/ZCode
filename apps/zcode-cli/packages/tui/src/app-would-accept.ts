@@ -130,7 +130,7 @@ export async function submitWouldAcceptPromoteCommand(input: {
     input.setMessages((current) => [
       ...current,
       {
-        content: `Promoted ${input.cardId}: auto mandate row recorded (auto execution tier activates in a later phase).`,
+        content: `Promoted ${input.cardId}: auto mandate row recorded; best-plan execution authorized.`,
         role: "agent",
       },
     ]);

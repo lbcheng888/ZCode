@@ -14,6 +14,7 @@ import {
   type SuperAgentCommandHandle,
   type SuperAgentControlPlane,
 } from "../../src/app/super-agent-control-plane.js";
+import type { TriggerSpecRunPort } from "../../src/super-agent/trigger/index.js";
 import type { Message } from "../../../tui/src/app-model.js";
 import {
   WOULD_ACCEPT_UNAVAILABLE_TEXT,
@@ -26,6 +27,16 @@ const WS = "ws-would-accept";
 const SESSION = "session-would-accept";
 const THREAD_HINT = "bot:b1+u1";
 const THREAD_KEY = `${WS}|${THREAD_HINT}`;
+const SCHEME_CARD = {
+  currentEvidence: "nightly failed 的日志",
+  candidateOptions: [
+    { option: "修复 flaky 用例", cost: "低" },
+    { option: "重试任务", cost: "中" },
+  ],
+  recommendation: "修复 flaky 用例",
+  impact: "仅测试文件",
+  verification: "pnpm test",
+};
 
 const planes: SuperAgentControlPlane[] = [];
 const roots: string[] = [];
@@ -55,7 +66,9 @@ function makeInboxHandle(): SuperAgentCommandHandle {
 }
 
 /** 真域库装配 + 脚本化裁决会话（零 LLM）：ingest unowned 候选 → runBatch 落 would-accept 卡。 */
-async function makePlaneWithCard(): Promise<{ plane: SuperAgentControlPlane; cardId: string }> {
+async function makePlaneWithCard(
+  options: { specRun?: TriggerSpecRunPort; mandateGate?: boolean } = {},
+): Promise<{ plane: SuperAgentControlPlane; cardId: string }> {
   const root = await mkdtemp(join(tmpdir(), "zcode-sa-promote-"));
   roots.push(root);
   const verdictTriggerIds: string[] = [];
@@ -65,9 +78,10 @@ async function makePlaneWithCard(): Promise<{ plane: SuperAgentControlPlane; car
       outputText: JSON.stringify({
         decisions: verdictTriggerIds.map((id) => ({
           triggerId: id,
-          disposition: "record-only",
-          reason: "仅记录",
+          disposition: "accept",
+          reason: "可修复",
           evidence: ["payload 摘要"],
+          scheme: SCHEME_CARD,
         })),
       }),
     };
@@ -84,6 +98,8 @@ async function makePlaneWithCard(): Promise<{ plane: SuperAgentControlPlane; car
       superAgentDatabasePath: join(root, "super-agent.sqlite"),
     },
     adjudicationSession: { run: adjudicationRun, destroySession: vi.fn() },
+    ...(options.mandateGate === true ? { mandateGate: true } : {}),
+    ...(options.specRun === undefined ? {} : { specRun: options.specRun }),
   });
   planes.push(plane);
   await plane.start();
@@ -153,6 +169,29 @@ describe("would-accept 可见面 + 批转（真 DB fixture）", () => {
     expect(io.status).toBe("Would-accept inbox: 1 card(s).");
   });
 
+  it("无 mandateGate 也立即派发当前卡，auto mandate 对未来生效", async () => {
+    const starts: Parameters<TriggerSpecRunPort["start"]>[0][] = [];
+    const specRun: TriggerSpecRunPort = {
+      async start(input) {
+        starts.push(input);
+      },
+    };
+    const { plane, cardId } = await makePlaneWithCard({ specRun });
+
+    await plane.promoteWouldAccept(cardId);
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      triggerId: expect.any(String),
+      workspaceIdentity: WS,
+      threadKey: `${WS}|${THREAD_HINT}`,
+      source: "im",
+      tier: "auto",
+      card: SCHEME_CARD,
+    });
+    expect(plane.listPendingWouldAccept()).toEqual([]);
+  });
+
   it("promote 后读面收敛 + mandate auto 行落库 + decision_log 转化行；重复 promote 幂等", async () => {
     const { plane, cardId } = await makePlaneWithCard();
 
@@ -164,7 +203,7 @@ describe("would-accept 可见面 + 批转（真 DB fixture）", () => {
       setStatus: io.setStatus,
     });
     expect(agentText(io)).toContain(
-      `Promoted ${cardId}: auto mandate row recorded (auto execution tier activates in a later phase).`,
+      `Promoted ${cardId}: auto mandate row recorded; best-plan execution authorized.`,
     );
     expect(io.status).toBe(`Would-accept card ${cardId} promoted to auto.`);
 
