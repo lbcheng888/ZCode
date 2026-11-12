@@ -48,6 +48,8 @@ interface SetupOpts {
   cwd?: string;
   toolCallId?: string;
   resumedFrom?: string;
+  /** 编译期阶段表（`EngineConfig.sitePhases`）：在场时「站点不在表里」是编译期的一次表态。 */
+  sitePhases?: ReadonlyMap<string, string>;
   /** 模拟 driver 侧的模型档位解析（会话创建时把解析结果写进 actor 记录）。 */
   resolveModel?: (persona: { model?: string }) => string;
 }
@@ -73,6 +75,7 @@ function setup(opts: SetupOpts = {}) {
     ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
     ...(opts.toolCallId === undefined ? {} : { toolCallId: opts.toolCallId }),
     ...(opts.resumedFrom === undefined ? {} : { resumedFrom: opts.resumedFrom }),
+    ...(opts.sitePhases === undefined ? {} : { sitePhases: opts.sitePhases }),
   });
   return { journal, driver, engine };
 }
@@ -2002,6 +2005,100 @@ describe("WorkflowEngine — 出生阶段坐标（phaseName）", () => {
 
     engine.askTurnEnded(inst("ask#1"), "RA");
     await expect(Promise.all([pA, pB])).resolves.toEqual(["RA", "r2"]);
+  });
+
+  it("keeps a listed ask's lexical birth phase across the hold bump, and leaves a declined site bare", async () => {
+    const journal = new InMemoryJournalStore();
+    journal.createRun({
+      runId: RUN,
+      caps: { maxConcurrency: 16 },
+      spentTokens: 0,
+      status: "running",
+    });
+    journal.putActor({ runId: RUN, siteId: "actor#1", ordinal: 1 });
+    // 前一世只记下 seq0 = ask#2@1。本次重跑先发的 ask#1 是 fresh，被 hold 规则扣住，
+    // 直到 seq0 被释放才入队——那时控制流已经走到 B 了。
+    journal.putNode({
+      runId: RUN,
+      siteId: "ask#2",
+      ordinal: 1,
+      kind: "ask",
+      actorSiteId: "actor#1",
+      actorOrdinal: 1,
+      actorSeq: 0,
+      inputHash: inputHash("B"),
+      status: "completed",
+      result: "r2",
+    });
+
+    const { engine, driver } = setup({
+      journal,
+      sitePhases: new Map([
+        ["actor#1", "A"],
+        ["ask#1", "A"],
+      ]),
+    });
+    const actor = engine.createActor("actor#1");
+    engine.enterPhase("A");
+    const pA = engine.ask("ask#1", actor, "A"); // ordinal 铸于 A（表里的 A），但没有入队
+    expect(driver.eventsOfType("node-queued")).toEqual([]);
+    engine.enterPhase("B");
+    const pB = engine.ask("ask#2", actor, "B"); // 命中 seq0 → 释放它，随后才轮到 ask#1
+    await flush();
+
+    const queued = driver.eventsOfType("node-queued");
+    expect(queued).toHaveLength(1);
+    expect(refToString(queued[0]!.instance)).toBe("ask#1@1");
+    expect(queued[0]!.phaseName).toBe("A");
+    // 事件确实晚于 B 的标记发出：戳来自铸造点，不是发出点。
+    expect(driver.events.indexOf(queued[0]!)).toBeGreaterThan(
+      driver.events.findIndex((e) => e.type === "phase-entered" && e.name === "B"),
+    );
+    // ask#2 不在编译期表里：命中的缓存结算就是它的出生事件，但不拿当前标记 B 冒充。
+    const settled = driver.eventsOfType("node-settled")[0]!;
+    expect(settled).toMatchObject({ cached: true });
+    expect(settled).not.toHaveProperty("phaseName");
+
+    engine.askTurnEnded(inst("ask#1"), "RA");
+    await expect(Promise.all([pA, pB])).resolves.toEqual(["RA", "r2"]);
+  });
+
+  it("leaves a shared helper's ask bare instead of stamping another lane's marker", async () => {
+    const { engine, driver } = setup({
+      askSpecs: untypedSpecs("ask#1", "ask#2", "ask#3"),
+      sitePhases: new Map([
+        ["actor#1", "lane-a"],
+        ["ask#1", "lane-a"],
+        ["actor#2", "lane-b"],
+        ["ask#2", "lane-b"],
+        ["actor#3", "lane-b"],
+      ]),
+    });
+    // 真跑的形状（三并行 lane 共用一个评审 helper）：两条 lane 的标记都在各自 future 的开头
+    // 同步跑完，最后一个是 lane-b；helper 在 await 之后才发出 ask#3，站点被两个阶段各认领一次，
+    // 编译期表因此不列它——修复前这里被戳成 lane-b，评审节点挂到了别的车道上。
+    engine.enterPhase("lane-a");
+    engine.enterPhase("lane-b");
+    const laneA = engine.createActor("actor#1", "lane-a");
+    const laneB = engine.createActor("actor#2", "lane-b");
+    const reviewer = engine.createActor("actor#3", "reviewer");
+    void engine.ask("ask#1", laneA, "a");
+    void engine.ask("ask#2", laneB, "b");
+    void engine.ask("ask#3", reviewer, "shared review");
+    await flush();
+
+    const queuedOf = (id: string) =>
+      driver.eventsOfType("node-queued").find((e) => refToString(e.instance) === id);
+    expect(queuedOf("ask#1@1")?.phaseName).toBe("lane-a");
+    expect(queuedOf("ask#2@1")?.phaseName).toBe("lane-b");
+    expect(queuedOf("ask#3@1")).toBeDefined();
+    expect(queuedOf("ask#3@1")).not.toHaveProperty("phaseName");
+    // 派发重复出生事实，同样不戳。
+    const dispatched = driver
+      .eventsOfType("node-dispatched")
+      .find((e) => refToString(e.instance) === "ask#3@1");
+    expect(dispatched).toBeDefined();
+    expect(dispatched).not.toHaveProperty("phaseName");
   });
 
   it("stamps a replay-cached node-settled with the phase current at that point of the re-run", async () => {

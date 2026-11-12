@@ -996,3 +996,72 @@ describe("report facade-siting", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+/**
+ * 交接图的参与者来自因果图的 step 归属：一份 step 一张卡（家族按成员展开）。may-set 车道
+ * 拷贝被广播进每个认领阶段时，交接图会成倍画出实际不存在的参与者——三相位并行、每相位
+ * 一条两成员车道的脚本，真实 actor 实例 6 个，静态图却是 3 × 3 车道 × 2 成员 = 18 张卡。
+ */
+describe("handoff participants for may-set lane copies", () => {
+  const IDS = `const IDS = ["a", "b"];`;
+  const helper = `async function work(who: Agent, q: string): Promise<string> {
+    return await who.ask<string>(q);
+  }`;
+
+  it("counts one card per lane, not one per claiming phase", () => {
+    // 三相位并行：每相位一条车道，车道在相位里出生，fan-out 展开成两成员家族。
+    const result = analyzeWorkflowScript(
+      `${IDS}
+${helper}
+phase("p1");
+const r1 = await Promise.all(IDS.map((n) => work(agent(\`p1-\${n}\`), \`one \${n}\`)));
+phase("p2");
+const r2 = await Promise.all(IDS.map((n) => work(agent(\`p2-\${n}\`), \`two \${n}\`)));
+phase("p3");
+const r3 = await Promise.all(IDS.map((n) => work(agent(\`p3-\${n}\`), \`three \${n}\`)));
+return [...r1, ...r2, ...r3];`,
+    );
+    expect(result.diagnostics).toEqual([]);
+    const handoff = result.handoff;
+    if (handoff === undefined) throw new Error("expected a hand-off graph");
+    const cardsOf = (phase: string) => handoff.participants.filter((card) => card.phase === phase);
+    // 每列两枚药丸、总计六枚；每枚只认自己那条车道。
+    expect(["phase#1", "phase#2", "phase#3"].map((phase) => cardsOf(phase).length)).toEqual([2, 2, 2]);
+    expect(["phase#1", "phase#2", "phase#3"].map((phase) => [...new Set(cardsOf(phase).map((card) => card.lane))])).toEqual([
+      ["actor#1"],
+      ["actor#2"],
+      ["actor#3"],
+    ]);
+    // 卡里的 step 就是三份车道拷贝本身：没有 `~phase` 后缀的第二轮复制（那才是广播的影子）。
+    expect([...new Set(handoff.participants.flatMap((card) => card.steps))]).toEqual([
+      "ask#1~actor#1",
+      "ask#1~actor#2",
+      "ask#1~actor#3",
+    ]);
+  });
+
+  it("still hands off a site that genuinely runs in two phases", () => {
+    // 对照：车道出生在标记之前，站点在两个阶段各发出一次，两列都保留自己的卡。
+    const result = analyzeWorkflowScript(
+      `const a = agent("a");
+const b = agent("b");
+async function work(cond: boolean, q: string): Promise<string> {
+  return await (cond ? a : b).ask<string>(q);
+}
+phase("p1");
+const x = await work(true, "one");
+phase("p2");
+const y = await work(false, "two");
+return x + y;`,
+    );
+    expect(result.diagnostics).toEqual([]);
+    const handoff = result.handoff;
+    if (handoff === undefined) throw new Error("expected a hand-off graph");
+    expect(handoff.participants.map((card) => card.id)).toEqual([
+      "phase#1:actor#1",
+      "phase#1:actor#2",
+      "phase#2:actor#1",
+      "phase#2:actor#2",
+    ]);
+  });
+});

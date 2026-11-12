@@ -249,6 +249,73 @@ describe("phase markers in analyzeWorkflowScript", () => {
 });
 
 /**
+ * 阶段认领必须按**图里的 step id** 走：may-set 展开把共享 helper 的 ask 站点拆成每车道一份
+ * 拷贝（`ask#1~actor#2`），每份拷贝只归它自己存在过的阶段。按 `source` 回查站点会溶解回
+ * 站点级认领，把每份拷贝复制进站点认领的每个阶段。
+ *
+ * 2026-11-12 的并行阶段回归：三个相位各起一条两成员车道，共享 helper 的 ask 被 may-set
+ * 拆成三条车道，每份拷贝都被广播进三个相位，静态图于是画出 3 × 3 车道 × 2 成员 = 18 张
+ * 参与者卡，而真实 actor 实例只有 6 个。
+ */
+describe("phase claims for may-set lane copies", () => {
+  /** 三相位并行：每相位一条车道，`agent()` 在相位里出生，fan-out 展开成两成员家族。 */
+  const parallelPhases = `
+    const IDS = ["a", "b"];
+    async function work(who: Agent, q: string): Promise<string> {
+      return await who.ask<string>(q);
+    }
+    phase("p1");
+    const r1 = await Promise.all(IDS.map((n) => work(agent(\`p1-\${n}\`), \`one \${n}\`)));
+    phase("p2");
+    const r2 = await Promise.all(IDS.map((n) => work(agent(\`p2-\${n}\`), \`two \${n}\`)));
+    phase("p3");
+    const r3 = await Promise.all(IDS.map((n) => work(agent(\`p3-\${n}\`), \`three \${n}\`)));
+    return [...r1, ...r2, ...r3];
+  `;
+
+  const stepsOf = (scriptText: string): string[] => {
+    const result = analyzeWorkflowScript(scriptText);
+    expect(result.diagnostics).toEqual([]);
+    const causality = result.causality;
+    if (causality === undefined) throw new Error("expected a causality graph");
+    return causality.steps.map((step) => `${step.id}@${step.phase}`);
+  };
+
+  it("homes each lane copy in the phase where its lane is born", () => {
+    // 一份站点、三份车道拷贝，各自落在车道的出生相位；没有第二轮 `~phase` 复制。
+    expect(stepsOf(parallelPhases)).toEqual([
+      "ask#1~actor#1@phase#1",
+      "ask#1~actor#2@phase#2",
+      "ask#1~actor#3@phase#3",
+    ]);
+  });
+
+  it("still copies a site that genuinely runs in every claiming phase", () => {
+    // 对照：两个 actor 都出生在标记之前（`unphased`），车道全程存在，站点的两份认领都成立，
+    // 每份车道拷贝照旧一阶段一份——收窄只按车道自己的出生相位发生。
+    expect(
+      stepsOf(`
+        const a = agent("a");
+        const b = agent("b");
+        async function work(cond: boolean, q: string): Promise<string> {
+          return await (cond ? a : b).ask<string>(q);
+        }
+        phase("p1");
+        const x = await work(true, "one");
+        phase("p2");
+        const y = await work(false, "two");
+        return x + y;
+      `),
+    ).toEqual([
+      "ask#1~actor#1~phase#1@phase#1",
+      "ask#1~actor#1~phase#2@phase#2",
+      "ask#1~actor#2~phase#1@phase#1",
+      "ask#1~actor#2~phase#2@phase#2",
+    ]);
+  });
+});
+
+/**
  * `alongside` against the causality quotient, over the whole corpus (the plan's "Why
  * `alongside` is a node fact, not an edge").
  *

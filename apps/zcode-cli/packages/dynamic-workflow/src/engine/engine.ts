@@ -64,7 +64,7 @@ import type {
 import { refToString, WorkflowError } from "./types.js";
 import { runLaunchedEvent } from "./engine-launch.js";
 import { normalizePersona } from "./persona.js";
-import { enrichProviderStopPhase, stampBirthPhase } from "./engine-phase-stamp.js";
+import { enrichProviderStopPhase, stampBirthPhase, type BirthPhase } from "./engine-phase-stamp.js";
 
 /** 引擎构造配置（定义迁到 engine-config.ts，这里原地再导出）。 */
 export type { EngineConfig } from "./engine-config.js";
@@ -110,14 +110,20 @@ export class WorkflowEngine implements WorkflowHostApi, WorkflowReportSink {
   private currentPhase: string | undefined;
   /** 站点 → 词法出生阶段（见 {@link EngineConfig.sitePhases}）。可变，与 `askSpecs` 同一条路换表。 */
   private sitePhases: ReadonlyMap<string, string>;
+  /**
+   * 本 run 是否拿到过编译期阶段表：`config.sitePhases` 在场，或 `fillHole` 换入了有效脚本的表。
+   * 表在场时，站点不在表里是编译期的一次**表态**（这个站点跨阶段），铸造那一刻的当前标记因此
+   * 不归它——ask 节点的戳据它缺省（见 engine-phase-stamp.ts 的 {@link BirthPhase}）。
+   */
+  private hasSitePhases: boolean;
   /** 留白的停驻表与本世的补全记忆（engine-holes.ts）。 */
   private readonly holes: HoleRegistry;
   /**
-   * 实例（`siteId@ordinal`）→ 它**出生时**的阶段名。写在铸造点、读在 {@link record} 的打戳漏斗：静态因果图按阶段拷贝
+   * 实例（`siteId@ordinal`）→ 它**出生时**的阶段（名字 + 来源）。写在铸造点、读在 {@link record} 的打戳漏斗：静态因果图按阶段拷贝
    * 站点，运行时实例必须带同一个坐标，否则一条车道上的实例会被那个站点的每一份阶段拷贝
    * 同时认领（本 bug 的形状：五个阶段各 20 个子代理，五张卡各显示 100 个）。
    */
-  private readonly instancePhases = new Map<string, string>();
+  private readonly instancePhases = new Map<string, BirthPhase>();
 
   /**
    * 本 run 内已被认领的**非空有效 actor 名** → 认领它的 actor（用于失败信息里指认前一处）。
@@ -180,6 +186,7 @@ export class WorkflowEngine implements WorkflowHostApi, WorkflowReportSink {
     this.askSpecs = config.askSpecs;
     this.validate = config.validate;
     this.sitePhases = config.sitePhases ?? new Map();
+    this.hasSitePhases = config.sitePhases !== undefined;
     this.holes = new HoleRegistry(config.now ?? Date.now);
     this.importedCache = config.importedCache;
     this.importedWorld = new ImportedWorldQueue(config.importedCache?.world ?? new Map());
@@ -470,6 +477,8 @@ export class WorkflowEngine implements WorkflowHostApi, WorkflowReportSink {
     return fillHoleBody(this.state, this.holes, fill, (askSpecs, sitePhases) => {
       this.askSpecs = askSpecs;
       this.sitePhases = sitePhases;
+      // 有效脚本的表也是编译产物：此后「站点不在表里」同样是编译期的表态。
+      this.hasSitePhases = true;
     });
   }
 
@@ -655,15 +664,28 @@ export class WorkflowEngine implements WorkflowHostApi, WorkflowReportSink {
   /**
    * 站点序号的**唯一**铸造点（createActor / admitAsk 第一行 / worldRead / report / artifact 全
    * 同步经它），因此也是实例出生阶段的唯一记录点：这一行总在脚本调用的同一个 tick 里执行，
-   * 而事件未必——ask 的 `node-queued` 会被 hold 规则推迟到下一个标记之后才发出。
+   * 而事件未必——ask 的 `node-queued` 会被 hold 规则推迟到下一个标记之后才发出。记下的不只是
+   * 名字，还有它的来源（`table` / `marker` / `unlisted`）：弄混来源的正是「共享 helper 的 ask
+   * 被戳成别的车道」那个 bug。
    */
   private nextOrdinal(siteId: string): number {
     const next = (this.ordinals.get(siteId) ?? 0) + 1;
     this.ordinals.set(siteId, next);
+    const key = refToString({ siteId, ordinal: next });
     // 词法优先、动态兜底：并发的两个 future 各带自己的标记时，「最近经过的标记」是谁家的全凭
     // 时序；编译期表里的阶段才是确认图上用户看到的那个（docs/execution-engine.md）。
-    const phase = this.sitePhases.get(siteId) ?? this.currentPhase;
-    if (phase !== undefined) this.instancePhases.set(refToString({ siteId, ordinal: next }), phase);
+    const listed = this.sitePhases.get(siteId);
+    if (listed !== undefined) {
+      this.instancePhases.set(key, { name: listed, from: "table" });
+    } else if (this.currentPhase !== undefined) {
+      // 表在场却没有这个站点，是编译期的一次表态：它在几个阶段里各执行一次，当前标记不归它。
+      // ask 节点的戳读到这里就缺省（engine-phase-stamp.ts 的 birthPhaseOf）；其余实例仍拿它
+      // 当坐标——没有表时的 marker 是它们唯一的那个。
+      this.instancePhases.set(key, {
+        name: this.currentPhase,
+        from: this.hasSitePhases ? "unlisted" : "marker",
+      });
+    }
     return next;
   }
 

@@ -1770,6 +1770,11 @@ exceptions:
       - apps/zcode-cli/packages/dynamic-workflow/src/analysis/causality-order-types.ts
       - apps/zcode-cli/packages/dynamic-workflow/src/analysis/flow-strands.ts
     reason: Admitted upstream analyzer files edited only to stop the workflow analysis from growing much faster than the script (callback bindings, loop regions, join control, flow strands); adopting apps/zcode-cli/packages/dynamic-workflow needs a separate module boundary refactor that first breaks its 24 internal import cycles.
+  - id: workflow-phase-stamp-unmanaged-edit
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/dynamic-workflow/src/engine/engine-phase-stamp.ts
+    reason: 已准入的上游 engine-phase-stamp.ts 只把 instancePhases 的值从阶段名扩成 {name, from}，让共享 helper 的 ask 在被编译期表拒绝表态时不再被戳成别的车道；分片函数仍是纯函数、engine 的模块边界不变，adopting dynamic-workflow 仍需先拆内部循环。
   - id: off-peak-model-descriptor-unmanaged-edit
     rule: unmanaged-new-file
     paths: [apps/zcode-cli/packages/core/src/runtime/off-peak/model-binding.ts]

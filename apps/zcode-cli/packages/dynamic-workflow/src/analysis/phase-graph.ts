@@ -24,11 +24,17 @@ import type { CausalityGraph, Certainty, OrderEdge, Phase, Step } from "./causal
 /** 拷贝 id 分隔符：与 may-set 车道拷贝同一个（两种展开叠加时形如 `ask#2~actor#1~phase#2`）。 */
 const COPY_SEPARATOR = "~";
 
-/** 认领关系：谁属于哪个阶段，以及该认领有多确定。全部按**站点 id** 键。 */
+/**
+ * 认领关系：谁属于哪个阶段，以及该认领有多确定。键是**图里的 step id**——站点 id，或
+ * may-set 展开出来的车道拷贝 id（`ask#1~actor#2`）。
+ *
+ * 两种键都要有：商图的事实按站点 id 说话（事实先于拷贝存在），而 step 的归属必须按它自己
+ * 的 id 查——否则一份车道拷贝会继承整个站点的认领，被复制进每个认领阶段。
+ */
 interface PhaseClaims {
-  /** 站点 -> 认领它的阶段，按 issue 顺序去重。 */
+  /** 站点 / 车道拷贝 id -> 认领它的阶段，按 issue 顺序去重。 */
   bySite: Map<string, string[]>;
-  /** `${site}|${phase}` -> 该阶段内部的认领 certainty。 */
+  /** `${step}|${phase}` -> 该阶段内部的认领 certainty。 */
   certainty: Map<string, Certainty>;
   /** 阶段 -> 首个成员 issue 的时钟位置；商图事实的排序键。 */
   position: Map<string, number>;
@@ -74,6 +80,12 @@ function headPhasesOf(claiming: readonly string[], toPhases: ReadonlySet<string>
  * step 不是 control 边的目标。逐字对应 causality-graph.ts 的 `certaintyOf`，只是把「所有
  * issue」换成「该阶段的 issue」——共享 helper 在 preflight（顶层）与 gate（循环+分支内）
  * 各一份拷贝时，两份的 certainty 因此可以不同，这正是拷贝要单独推导的理由。
+ *
+ * **车道拷贝的认领**从 `actor` 事件读：每个前缀它真实出生所在阶段的 may-set 车道，只有在
+ * 这些阶段里才可能是该站点这次发出的车道。不这么做，`projectPhaseGraph` 只能拿同一站点的
+ * 全部认领去复制每份车道拷贝，三相位并行脚本里每条车道都会被广播进每一列（3 phase ×
+ * 6 张卡，真实 actor 只有 6 个实例）。出生在 `unphased` 的车道不设限：它从脚本开头就存在，
+ * 在哪个认领阶段都可能被选中。
  */
 export function collectPhaseClaims(
   events: readonly OrderEvent[],
@@ -86,9 +98,24 @@ export function collectPhaseClaims(
   const firstIssue = new Map<string, number>();
   const lastIssue = new Map<string, number>();
   const certainSeen = new Set<string>();
+  /** 有事件的车道（actor 事件即出生时刻）。 */
+  const lanes = new Set<string>();
+  /** 车道 -> 它出生所在的阶段；`unphased` 出生的车道不进表（不设限）。 */
+  const laneBirth = new Map<string, Set<string>>();
+  const bornBeforePhases = new Set<string>();
   // 与 causality-graph.ts 同一个时钟：每个 issue 事件走一格，不论它是否落在图里的 step 上。
   let clock = 0;
   for (const event of events) {
+    if (event.at === "actor") {
+      lanes.add(event.actor);
+      if (event.phase === UNPHASED_ID) bornBeforePhases.add(event.actor);
+      else {
+        const phases = laneBirth.get(event.actor) ?? new Set<string>();
+        phases.add(event.phase);
+        laneBirth.set(event.actor, phases);
+      }
+      continue;
+    }
     if (event.at !== "issue") continue;
     const at = clock;
     clock += 1;
@@ -102,13 +129,32 @@ export function collectPhaseClaims(
     lastIssue.set(key, at);
     if (certainChain(event.regions)) certainSeen.add(key);
   }
+  // 出生在标记之外的车道全程存在：拿掉它的阶段限制。
+  for (const lane of bornBeforePhases) laneBirth.delete(lane);
 
+  const certaintyAt = (site: string, phase: string): Certainty => {
+    const key = `${site}|${phase}`;
+    return certainSeen.has(key) && !controlled.has(site) ? "always" : "maybe";
+  };
   const certainty = new Map<string, Certainty>();
   for (const [site, claiming] of bySite) {
-    for (const phase of claiming) {
-      const key = `${site}|${phase}`;
-      certainty.set(key, certainSeen.has(key) && !controlled.has(site) ? "always" : "maybe");
+    for (const phase of claiming) certainty.set(`${site}|${phase}`, certaintyAt(site, phase));
+  }
+  // 车道拷贝的认领：同一份拷贝只归它自己存在过的阶段。车道在站点发出过的任何阶段都还不
+  // 存在时（静态 may-set 与实际发出矛盾），保留站点的认领——抹掉一份参与者比多画一格更
+  // 坏，与 `admits` 的「全被拦下 → 退回全展开」同一个姿态。
+  const copies = new Map<string, string[]>();
+  for (const [site, claiming] of bySite) {
+    for (const lane of lanes) {
+      const born = laneBirth.get(lane);
+      const narrowed = born === undefined ? claiming : claiming.filter((phase) => born.has(phase));
+      copies.set(`${site}${COPY_SEPARATOR}${lane}`, narrowed.length > 0 ? narrowed : claiming);
     }
+  }
+  for (const [copy, claiming] of copies) {
+    const site = copy.slice(0, copy.lastIndexOf(COPY_SEPARATOR));
+    bySite.set(copy, claiming);
+    for (const phase of claiming) certainty.set(`${copy}|${phase}`, certaintyAt(site, phase));
   }
   return { bySite, certainty, firstIssue, lastIssue, position };
 }
@@ -128,9 +174,11 @@ export function projectPhaseGraph(
 ): CausalityGraph {
   if (phases.length === 0) return graph; // 零标记 → 零词汇表，图逐字节不动
 
-  const claimsOf = (siteId: string): string[] => claims.bySite.get(siteId) ?? [UNPHASED_ID];
-  const certaintyOfClaim = (siteId: string, phase: string): Certainty =>
-    claims.certainty.get(`${siteId}|${phase}`) ?? "maybe";
+  // 归属按**图里的 step id** 查：站点 id，或 may-set 展开出来的车道拷贝 id。车道拷贝不回退
+  // 到 `source` 的全量认领——那会把一份拷贝复制进站点认领的每个阶段。
+  const claimsOf = (stepId: string): string[] => claims.bySite.get(stepId) ?? [UNPHASED_ID];
+  const certaintyOfClaim = (stepId: string, phase: string): Certainty =>
+    claims.certainty.get(`${stepId}|${phase}`) ?? "maybe";
 
   /**
    * 时间可行性：一条 a→b 的边能不能落在拷贝对 (a@P, b@Q) 上。
@@ -174,13 +222,15 @@ export function projectPhaseGraph(
   const copiesOf = new Map<string, (Step & { phase: string })[]>();
   for (const step of graph.steps) {
     const siteId = step.source ?? step.id;
-    const claiming = claimsOf(siteId);
+    // 认领按 step 自己的 id：车道拷贝在 `collectPhaseClaims` 里已经有它自己那份（只含它
+    // 存在过的阶段），这里不再溶解回站点。
+    const claiming = claimsOf(step.id);
     if (claiming.length < 2) continue;
     copiesOf.set(
       step.id,
       claiming.map((phase) => ({
         ...step,
-        certainty: weakest([step.certainty, certaintyOfClaim(siteId, phase)]),
+        certainty: weakest([step.certainty, certaintyOfClaim(step.id, phase)]),
         id: `${step.id}${COPY_SEPARATOR}${phase}`,
         phase,
         // `source` 是运行时实际上报的站点 id，**只设一次**：车道拷贝已经带上了，沿用。
@@ -194,7 +244,7 @@ export function projectPhaseGraph(
     if (copies !== undefined) return copies;
     // k = 1：认领唯一，所以该阶段的 certainty 与 step 自己的逐字相等（全部 issue 都在
     // 这个阶段里），不必覆盖。
-    return [{ ...step, phase: claimsOf(step.source ?? step.id)[0] as string }];
+    return [{ ...step, phase: claimsOf(step.id)[0] as string }];
   });
 
   // --- 2. 边改写：镜像 expandMaySetLanes 的机制 --------------------------------------
@@ -216,7 +266,7 @@ export function projectPhaseGraph(
   ): { certainty: Certainty; id: string; lane?: string; phase: string }[] => {
     const copies = copiesOf.get(id);
     if (copies !== undefined) {
-      const heads = new Set(headPhasesOf(claimsOf(siteOf(id)), toPhases));
+      const heads = new Set(headPhasesOf(claimsOf(id), toPhases));
       return copies
         .filter((copy) => heads.has(copy.phase))
         .map((copy) => ({
@@ -232,7 +282,7 @@ export function projectPhaseGraph(
         certainty: step?.certainty ?? "maybe",
         id,
         lane: step?.lane,
-        phase: claimsOf(siteOf(id))[0] as string,
+        phase: claimsOf(id)[0] as string,
       },
     ];
   };
