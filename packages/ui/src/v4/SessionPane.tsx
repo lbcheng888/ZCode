@@ -6178,6 +6178,7 @@ export function SessionPane({
   }, [
     conversationShareService,
     intl,
+    locale,
     remoteSessionId,
     sessionId,
     shareDraft,
