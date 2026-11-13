@@ -1,6 +1,7 @@
 import type { AgentRuntime, TurnAttachment, TurnResult } from "@zcode/core";
 import {
   SessionEventType,
+  createRootTraceContext,
   traceContextToLogContext,
   type InputHistoryEntry,
   type InputHistoryKind,
@@ -23,6 +24,7 @@ import type {
   ZCodeApp,
 } from "./types.js";
 import type { CliDefaultSelection } from "./cli-default-selection.js";
+import type { BestPlanSuperAgent } from "./best-plan-super-agent.js";
 import type { SuperAgentAdmissionMandateResolution } from "./super-agent-admission-facts.js";
 
 type InputFacade = Pick<
@@ -61,6 +63,11 @@ interface CreateInputFacadeDeps {
   runtime: AgentRuntime;
   sessionId: SessionId;
   traceContext: TraceContext;
+  /**
+   * 每轮用户输入起步后的独立方案 super-agent：TurnStarted 命中本次 inputId 时触发，
+   * 由它经 ProposeBestPlan 把六字段卡注入当前回合。缺席时保持既有行为。
+   */
+  bestPlanSuperAgent?: BestPlanSuperAgent;
   /**
    * M4：按 inputId(=wire commandId) 取控制面在投递前解析的 mandate 结论。
    * 仅 features.eventRouter + features.mandateGate 同时打开时由组合根注入。
@@ -254,8 +261,10 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
       const admissionMandateFacts =
         admissionResolution?.kind === "mandate" ? admissionResolution.facts : undefined;
       let keepAdmissionMandateFacts = false;
+      let startedTurn = false;
+      const bestPlanAbort = new AbortController();
       const unsubscribe =
-        options?.onEvent || options?.onTurnStartedObserved
+        options?.onEvent || options?.onTurnStartedObserved || deps.bestPlanSuperAgent
           ? deps.runtime.subscribeEvents({
               onSessionEvent: async (event) => {
                 await options?.onEvent?.(event);
@@ -265,6 +274,53 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
                 ) {
                   // TurnStarted 只用于后续关联；admission ACK 不等待 projection commit。
                   options?.onTurnStartedObserved?.(event);
+                  const bestPlanSuperAgent = deps.bestPlanSuperAgent;
+                  if (bestPlanSuperAgent) {
+                    const turnId = event.turnId;
+                    if (turnId === undefined) {
+                      deps.logger.warn(
+                        "Best plan super-agent skipped: TurnStarted without turnId",
+                        {
+                          ...traceContextToLogContext(deps.traceContext),
+                          event: "best_plan.super_agent.turn_id_missing",
+                          module: "bootstrap",
+                          sessionId: String(deps.sessionId),
+                          status: "failed",
+                        },
+                      );
+                      return;
+                    }
+                    // 用事件自身的 traceId + turnId 建独立根上下文：super-agent 的模型调用与
+                    // 注入的工具事件都归属当前回合，写前门禁按同一 turnId 记账。
+                    const bestPlanTraceContext = createRootTraceContext({
+                      traceId: event.traceId,
+                      sessionId: deps.sessionId,
+                      turnId,
+                      attributes: { querySource: "best_plan_super_agent" },
+                    });
+                    void bestPlanSuperAgent
+                      .onTurnStarted({
+                        turnId,
+                        requestText: promptInput.text,
+                        traceContext: bestPlanTraceContext,
+                        // wire 用户回合会显式带 triggerSource="user"（session-flow 的
+                        // promptTriggerSourceOf），只有 "trigger" 才是事件回合；缺席同样是
+                        // 用户直接输入（human-explicit 免 Mandate），不能误判成非用户回合。
+                        userOrigin: admissionTriggerSource !== "trigger",
+                        signal: bestPlanAbort.signal,
+                      })
+                      .catch((error: unknown) => {
+                        // 卡片注入失败不能让回合静默无卡：留 warn 供诊断，worker 仍受硬门禁约束。
+                        deps.logger.warn("Best plan super-agent failed", {
+                          ...traceContextToLogContext(bestPlanTraceContext),
+                          error: error instanceof Error ? error.message : String(error),
+                          event: "best_plan.super_agent.failed",
+                          module: "bootstrap",
+                          sessionId: String(deps.sessionId),
+                          status: "failed",
+                        });
+                      });
+                  }
                 }
               },
             })
@@ -289,6 +345,8 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
           ...(admissionMandateFacts ? { mandateFacts: admissionMandateFacts } : {}),
         });
         if (result.kind === "started") {
+          startedTurn = true;
+          void result.completion.finally(() => bestPlanAbort.abort());
           await recordAcceptedInputHistory(
             promptInput.text,
             "prompt",
@@ -319,6 +377,7 @@ export function createInputFacade(deps: CreateInputFacadeDeps): InputFacade {
         unsubscribe?.();
         throw error;
       } finally {
+        if (!startedTurn) bestPlanAbort.abort();
         if (!keepAdmissionMandateFacts) {
           deps.releaseAdmissionMandateFacts?.(admissionInputId);
         }

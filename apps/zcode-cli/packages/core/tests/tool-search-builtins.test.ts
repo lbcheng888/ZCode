@@ -22,7 +22,7 @@ const RESIDENT_NAMES = [
   "GoalCreate",
   "GoalUpdate",
   "Grep",
-  // 每条用户指令都要先调，不能 defer 到 ToolSearch 之后。
+  // super-agent 每回合注入；硬门禁兜底时模型也要能直接调用，不能 defer 到 ToolSearch 之后。
   "ProposeBestPlan",
   "Read",
   "ReportFindings",

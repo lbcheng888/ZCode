@@ -8053,7 +8053,7 @@ const enUS: Record<string, string> = {
   "planTool.panel.viewFull": "View full plan",
   "planTool.panel.syncing": "Syncing plan…",
   "planTool.guidance.enterMode": "Entered plan mode",
-  "bestPlan.title": "Best plan",
+  "bestPlan.title": "Super-agent best plan",
   "bestPlan.currentEvidence": "Current evidence",
   "bestPlan.candidateOptions": "Candidate options",
   "bestPlan.candidateOption": "{option} (cost: {cost})",

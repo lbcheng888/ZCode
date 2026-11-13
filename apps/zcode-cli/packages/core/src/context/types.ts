@@ -47,7 +47,6 @@ export type ContextSource =
   | "session_guidance" // 当前可用内置能力指导
   | "context_management" // 长上下文管理提示
   | "desktop_context" // ZCode Desktop 渲染与交互协议
-  | "best_plan" // 最佳方案协议：ProposeBestPlan 在本次工具表里时注入
   | "total_tokens"; // 固定的 token 预算行
 
 export type ContextInjectionTarget = "system" | "meta_user";

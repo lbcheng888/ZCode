@@ -120,6 +120,7 @@ import { createWorkflowFacade } from "./workflow-facade.js";
 import { resolveChengHostPortForApp } from "./cheng-host-config.js";
 import { createChengReadPort } from "./workflow-cheng-read-port.js";
 import { createInputFacade } from "./input-facade.js";
+import { createBestPlanSuperAgent } from "./best-plan-super-agent.js";
 import { createPluginFacadeForApp } from "./plugin-facade.js";
 import { resolvePluginRuntimeFeatures } from "./plugin-runtime-features.js";
 import { OFFICIAL_VISUALIZE_PLUGIN_ID } from "./official-plugin-definitions.js";
@@ -1533,6 +1534,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     });
     scheduleStartupLogRetentionCleanup(loggerFactory, logger);
     const inputFacade = createInputFacade({
+      bestPlanSuperAgent: createBestPlanSuperAgent({ runtime, sessionId, logger }),
       cliDefaultSelection,
       artifactStore,
       customCommandPromptResolver: async (text, resolverOptions) => {

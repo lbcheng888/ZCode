@@ -2580,10 +2580,9 @@ exceptions:
     rule: unmanaged-new-file
     paths:
       - apps/zcode-cli/packages/contracts/src/tools/best-plan.ts
-      - apps/zcode-cli/packages/core/src/context/sections/best-plan.ts
       - apps/zcode-cli/packages/core/src/tool/handlers/best-plan.ts
       - packages/ui/src/ToolCallBlocks/renderers/best-plan.tsx
-    reason: ProposeBestPlan 是一个只读工具的四段闭环（契约 schema、可选协议段、handler、内联卡片 renderer），分别落在既有的 contracts/core/ui 目录；它不新增状态 owner、不跨模块写入，接管整个 contracts、core 或 ui 包不属于本工具的范围，故按精确路径准入。
+    reason: ProposeBestPlan 是一个只读工具的三段闭环（契约 schema、handler、内联卡片 renderer），分别落在既有的 contracts/core/ui 目录；提示词协议段已由每回合 super-agent 注入取代并删除。它不新增状态 owner、不跨模块写入，接管整个 contracts、core 或 ui 包不属于本工具的范围，故按精确路径准入。
   - id: ui-more-locales-new-files
     rule: unmanaged-new-file
     paths:
@@ -2673,3 +2672,7 @@ exceptions:
     paths:
       - packages/ui/src/root/GlobalDatabaseStartupLoading.tsx
     reason: 启动失败页在现有复制诊断/重试/退出旁增加导出日志按钮（docs/desktop/database-migration-startup-gate-plan.md）。只扩展既有失败页交互，不新增文件、不改变启动状态 owner 或模块边界；接管 packages/ui/src/root 不在本次范围内。
+  - id: best-plan-super-agent-unmanaged-file
+    rule: unmanaged-new-file
+    paths: [apps/zcode-cli/packages/bootstrap/src/app/best-plan-super-agent.ts]
+    reason: 写前强制最佳方案的 bootstrap 宿主模块：每个用户回合起步后独立生成六字段方案，并经 ProposeBestPlan 把卡片注入当前回合；只经注入的 runtime 调用 generateWorkspaceText/scheduleTools/executeTools，方案事实与写前门禁仍归 Core 工具层，不新增跨模块 owner。接管整个 zcode-cli bootstrap 目录需要单独的模块边界整理，不在本次范围内。

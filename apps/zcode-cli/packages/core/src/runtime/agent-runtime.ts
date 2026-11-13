@@ -718,6 +718,8 @@ export interface AgentRuntime {
     traceContext: TraceContext;
   }): Promise<void>;
   getToolRegistry(): ToolRegistry;
+  /** 当前 turn 是否已有最佳方案卡；super-agent 在注入前查重。 */
+  isBestPlanSatisfied(turnId: TurnId): boolean;
   /**
    * 注册表被外部改写后让 getTools 重算。公开它的唯一使用者是 dwf driver 的 submit profile 运行时
    * 守卫：静态 profile 与实际 ask 不符时把

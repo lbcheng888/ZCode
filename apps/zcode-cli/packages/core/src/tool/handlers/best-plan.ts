@@ -1,9 +1,10 @@
 // ============================================================
 // ProposeBestPlan Tool Handler
 // ============================================================
-// 主代理在每条用户指令开头先交一张六字段方案卡（现状证据 / 候选方案 / 推荐 / 影响面 /
-// 验证），再动手。工具只读：不写文件、不改会话状态，唯一产物是这条工具结果本身——
-// UI 据此在消息流内联渲染卡片。
+// 主代理的六字段方案卡（现状证据 / 候选方案 / 推荐 / 影响面 / 验证）通常由 super-agent
+// 在副作用工具前自动提交；只有写/执行工具结果明确要求当前 turn 没有方案卡时，模型才
+// 自己调用。工具只读：不写文件、不改会话状态，唯一产物是这条工具结果本身——UI 据此在
+// 消息流内联渲染卡片。
 //
 // planId 由 handler 从**归一化后的输入**算出，模型既不能指定也不能伪造：同一份方案
 // 重放得到同一个指纹，卡片与后续回合的动作才能对上。
@@ -25,11 +26,11 @@ import type { ToolEntry, ToolHandler } from "../types.js";
 const MAX_BEST_PLAN_MODEL_BYTES = 4_096;
 
 /**
- * 描述就是这个工具的全部纪律：调用时机（每条指令一次、先于任何其它工具与实质回答）、
- * 填满全部字段、写完直接执行不等审批、同一 turn 不重复。
+ * 描述即调用契约：super-agent 通常自动提交，模型只在写/执行工具结果明确要求当前 turn
+ * 没有方案卡时自己调用；填满全部字段后重试被拦截的工具。
  */
 const BEST_PLAN_DESCRIPTION =
-  "For every user instruction, investigate read-only as needed, then call this exactly once before the first side-effecting tool call or substantive answer. Fill all fields; then execute the recommendation without waiting for approval. Never repeat it in the same turn.";
+  "Super-agent normally submits the best plan automatically before side-effecting tools, so do not call this on your own. Call it only when a write or execution tool result explicitly says the current turn has no plan card yet. Fill all six fields, then retry the tool.";
 
 const bestPlanHandler: ToolHandler = async (input) => {
   const parsed = BestPlanInputSchema.parse(input);

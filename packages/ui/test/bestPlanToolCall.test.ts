@@ -205,8 +205,8 @@ describe("bestPlan 文案键", () => {
       .sort();
 
     expect(enKeys).toEqual(zhKeys);
-    expect(zhCN["bestPlan.title"]).toBe("最佳方案");
-    expect(enUS["bestPlan.title"]).toBe("Best plan");
+    expect(zhCN["bestPlan.title"]).toBe("超级代理最佳方案");
+    expect(enUS["bestPlan.title"]).toBe("Super-agent best plan");
     expect(zhCN["bestPlan.candidateOption"]).toContain("{option}");
     expect(zhCN["bestPlan.candidateOption"]).toContain("{cost}");
   });

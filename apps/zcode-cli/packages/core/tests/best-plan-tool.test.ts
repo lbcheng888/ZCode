@@ -171,13 +171,13 @@ describe("ProposeBestPlan registration", () => {
     expect(READ_ONLY_TOOLS.has(BEST_PLAN_TOOL_NAME)).toBe(true);
   });
 
-  it("tells the model exactly when to call it and never to repeat it", () => {
+  it("tells the model to call it only when a tool result demands the missing plan card", () => {
     const description = bestPlanToolEntry.metadata.description ?? "";
 
-    expect(description).toContain("exactly once before the first side-effecting tool call");
-    expect(description).toContain("investigate read-only as needed");
-    expect(description).toContain("without waiting for approval");
-    expect(description).toContain("Never repeat it in the same turn");
+    expect(description).toContain("Super-agent normally submits the best plan automatically");
+    expect(description).toContain("do not call this on your own");
+    expect(description).toContain("explicitly says the current turn has no plan card yet");
+    expect(description).toContain("Fill all six fields");
   });
 
   it("is ordered with the shared provider tool names", () => {

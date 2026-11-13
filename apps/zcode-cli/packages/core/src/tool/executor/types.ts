@@ -194,6 +194,9 @@ export interface ToolExecutor {
     traceContext: TraceContext,
   ): Promise<boolean[]>;
 
+  /** 当前 turn 是否已经成功提交过 ProposeBestPlan；super-agent 用它避免同一 turn 双卡。 */
+  isBestPlanSatisfied(turnId: TurnId): boolean;
+
   execute(toolCall: ExecutableToolCall, options?: ToolExecuteOptions): Promise<ToolExecutionResult>;
   executeBatch(
     toolCalls: ExecutableToolCall[],

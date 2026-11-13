@@ -34,6 +34,8 @@ export interface WorkspaceGenerateTextInput {
   prompt?: string;
   messages?: ModelInputMessage[];
   tools?: ModelToolContract[];
+  /** 结构化输出 Schema，原样交给 Model；是否支持由模型能力与适配层决定，不在此处兜底。 */
+  responseJsonSchema?: Record<string, unknown>;
   querySource: string;
   maxOutputTokens?: number;
 }
@@ -198,6 +200,10 @@ async function generateWorkspaceTextImpl(
     ...(requestMaxOutputTokens === undefined
       ? {}
       : { options: { maxOutputTokens: requestMaxOutputTokens } }),
+    // 未传时保持键缺失，避免把 undefined 当成显式结构化输出请求发给适配层。
+    ...(input.responseJsonSchema === undefined
+      ? {}
+      : { responseJsonSchema: input.responseJsonSchema }),
   };
 
   using statusSink = this.createModelStatusSink(modelTraceContext, events);

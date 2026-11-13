@@ -118,6 +118,10 @@ export class ToolExecutorImpl implements ToolExecutor {
     this.backgroundTasks = new BackgroundTaskTracker(this.deps);
   }
 
+  isBestPlanSatisfied(turnId: TurnId): boolean {
+    return this.bestPlanTurnId === turnId;
+  }
+
   async authorizeAppTool(
     toolCall: ExecutableToolCall,
     entry: ToolEntry,

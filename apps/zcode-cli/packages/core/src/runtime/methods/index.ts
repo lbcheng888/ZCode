@@ -167,7 +167,7 @@ import {
 import { loadCheckpointMessagePreviews } from "./workspace-checkpoints.js";
 import { applyWorkspaceFileRewind, previewWorkspaceFileRewind } from "./file-rewind.js";
 import { scheduleTools } from "./tools.js";
-import { executeTools } from "./tools.js";
+import { executeTools, isBestPlanSatisfied } from "./tools.js";
 import { emitToolScheduledEvents } from "./tools.js";
 import { emitFileMutationCheckpoint } from "./tools.js";
 import { emitPermissionRequest } from "./tools.js";
@@ -389,6 +389,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.applyWorkspaceFileRewind = applyWorkspaceFileRewind;
   proto.scheduleTools = scheduleTools;
   proto.executeTools = executeTools;
+  proto.isBestPlanSatisfied = isBestPlanSatisfied;
   proto.emitToolScheduledEvents = emitToolScheduledEvents;
   proto.emitFileMutationCheckpoint = emitFileMutationCheckpoint;
   proto.emitPermissionRequest = emitPermissionRequest;

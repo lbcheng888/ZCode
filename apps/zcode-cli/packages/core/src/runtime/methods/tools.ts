@@ -11,6 +11,7 @@ import type {
   ToolCallId,
   TraceContext,
   ToolCall,
+  TurnId,
   ToolDependency,
   ToolSchedule,
   ExecutableToolCall,
@@ -58,6 +59,10 @@ export async function scheduleTools(
   });
 
   return this.toolScheduler.schedule(dependencies);
+}
+
+export function isBestPlanSatisfied(this: AgentRuntimeInternal, turnId: TurnId): boolean {
+  return this.executor.isBestPlanSatisfied(turnId);
 }
 
 export async function executeTools(
