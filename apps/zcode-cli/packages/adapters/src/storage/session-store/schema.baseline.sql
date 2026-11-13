@@ -507,9 +507,10 @@ CREATE INDEX session_parent_idx on session(parent_id);
 
 CREATE INDEX session_project_idx on session(project_id);
 
+CREATE INDEX session_purge_root_idx on session_purge(root_id);
+
 CREATE INDEX session_target_event_session_idx
           on session_target_event(session_id, id);
-CREATE INDEX session_purge_root_idx on session_purge(root_id);
 
 CREATE INDEX session_task_link_activity_idx
         on session_task_link(activity_id);
