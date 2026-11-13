@@ -314,12 +314,103 @@ export function innermost(state: TraceState, chain: readonly string[]): string {
   return chain[chain.length - 1] ?? state.root;
 }
 
-export function issue(state: TraceState, step: string, chain: readonly string[]): void {
+export function issue(
+  state: TraceState,
+  step: string,
+  chain: readonly string[],
+  call?: ts.Node,
+): void {
   state.issued.add(step);
   // The strand this issue happened in owns the step for the LIFT rule: awaiting a promise
   // that carries this step's label is evidence that that activation has completed.
   noteIssuedInStrand(state, step);
-  state.events.push({ at: "issue", phase: state.currentPhase, regions: chain, step });
+  const lanes = call === undefined ? undefined : askLanesAtCall(state, call);
+  state.events.push({
+    at: "issue",
+    phase: state.currentPhase,
+    regions: chain,
+    step,
+    ...(lanes === undefined ? {} : { lanes }),
+  });
+}
+
+/**
+ * 一次 `.ask()` 调用里 receiver 能解析出的 actor 站点。
+ *
+ * 站点的 `actors` 是全部调用点的并集：共享 helper 的 `who.ask()` 在四个 lane 里被调用时，
+ * 静态站点会带上四个 actor，phase 投影于是把每条车道拷贝广播进每个相位。走查手里有**这次
+ * 内联调用**的实参（{@link Activation.args}），所以能沿「helper 参数 → 调用点实参 → 变量
+ * 初始化 / 三元分支」把 receiver 收窄回这次真正可能传入的 actor。
+ *
+ * 解析不了就返回 undefined，读方保持并集口径；这里不做猜测。
+ */
+function askLanesAtCall(state: TraceState, call: ts.Node): string[] | undefined {
+  if (!ts.isCallExpression(call)) return undefined;
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "ask") return undefined;
+  return actorLanesOf(state, callee.expression, 0);
+}
+
+function actorLanesOf(
+  state: TraceState,
+  expr: ts.Expression,
+  depth: number,
+): string[] | undefined {
+  if (depth > 8) return undefined;
+  if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) {
+    return actorLanesOf(state, expr.expression, depth + 1);
+  }
+  if (ts.isAwaitExpression(expr)) return actorLanesOf(state, expr.expression, depth + 1);
+  if (ts.isConditionalExpression(expr)) {
+    return unionLanes([
+      actorLanesOf(state, expr.whenTrue, depth + 1),
+      actorLanesOf(state, expr.whenFalse, depth + 1),
+    ]);
+  }
+  if (
+    ts.isBinaryExpression(expr) &&
+    (expr.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+      expr.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+  ) {
+    return unionLanes([
+      actorLanesOf(state, expr.left, depth + 1),
+      actorLanesOf(state, expr.right, depth + 1),
+    ]);
+  }
+  if (ts.isCallExpression(expr)) {
+    const actor = state.actorByCall.get(expr);
+    return actor === undefined ? undefined : [actor];
+  }
+  if (!ts.isIdentifier(expr)) return undefined;
+  const symbol = state.checker.getSymbolAtLocation(expr);
+  const decl = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (decl === undefined) return undefined;
+  if (ts.isVariableDeclaration(decl)) {
+    return decl.initializer === undefined
+      ? undefined
+      : actorLanesOf(state, decl.initializer, depth + 1);
+  }
+  if (!ts.isParameter(decl)) return undefined;
+  const fn = decl.parent;
+  const param = (fn as ts.SignatureDeclaration).parameters.indexOf(decl);
+  if (param < 0) return undefined;
+  for (let i = state.activations.length - 1; i >= 0; i -= 1) {
+    const activation = state.activations[i] as Activation;
+    if (activation.decl !== fn) continue;
+    const arg = activation.args[param];
+    return arg === undefined ? undefined : actorLanesOf(state, arg, depth + 1);
+  }
+  return undefined;
+}
+
+/** 分支并集：任一分支解析不了，整次调用就不算解析成功。 */
+function unionLanes(parts: readonly (readonly string[] | undefined)[]): string[] | undefined {
+  const out = new Set<string>();
+  for (const part of parts) {
+    if (part === undefined) return undefined;
+    for (const lane of part) out.add(lane);
+  }
+  return [...out];
 }
 
 export function jump(

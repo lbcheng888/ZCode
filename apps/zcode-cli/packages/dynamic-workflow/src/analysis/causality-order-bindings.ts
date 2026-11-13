@@ -17,6 +17,11 @@ export interface Activation {
   /** Per parameter, the functions the call bound; absent when the call left it unfilled. */
   bindings: readonly (ReadonlySet<ts.Node> | undefined)[];
   /**
+   * 调用实参表达式，按参数顺序。走查靠它把「receiver 是 helper 参数」解析回调用方这次真正
+   * 传入的 actor；站点不是 CallExpression 时为空。
+   */
+  args: readonly ts.Expression[];
+  /**
    * decl + own bindings + the resolution of every OUTER parameter the body names. Two
    * activations with equal keys inline identical subtrees; a key already on the stack is
    * recursion.
@@ -161,7 +166,8 @@ export function activationKey(
 /** Open an activation for inlining `decl` at `site`: its resolved bindings and its key. */
 export function activationFor(ctx: BindingContext, decl: ts.Node, site: ts.Node): Activation {
   const bindings = resolveBindings(ctx, site, decl);
-  return { bindings, decl, key: activationKey(ctx, decl, bindings) };
+  const args = ts.isCallExpression(site) ? [...site.arguments] : [];
+  return { args, bindings, decl, key: activationKey(ctx, decl, bindings) };
 }
 
 /**

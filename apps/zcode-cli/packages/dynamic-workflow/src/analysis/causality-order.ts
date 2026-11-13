@@ -124,7 +124,7 @@ export function traceOrder(
       walkedFns.add(owner);
       // No call binds anything here: the body's calls through its own parameters fall back
       // to the merged record.
-      activations.push({ bindings: [], decl: owner, key: activationKey(state, owner, []) });
+      activations.push({ args: [], bindings: [], decl: owner, key: activationKey(state, owner, []) });
       const detached = openRegion(state, "branch", root, {
         detached: true,
         entered: false,

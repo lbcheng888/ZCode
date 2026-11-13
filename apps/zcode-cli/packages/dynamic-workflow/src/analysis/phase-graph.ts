@@ -81,7 +81,9 @@ function headPhasesOf(claiming: readonly string[], toPhases: ReadonlySet<string>
  * issue」换成「该阶段的 issue」——共享 helper 在 preflight（顶层）与 gate（循环+分支内）
  * 各一份拷贝时，两份的 certainty 因此可以不同，这正是拷贝要单独推导的理由。
  *
- * **车道拷贝的认领**从 `actor` 事件读，按车道的形态分两种：
+ * **车道拷贝的认领**优先读 issue 事件自带的 `lanes`：走查在内联调用点把 receiver 解析
+ * 回这次实参指向的 actor，所以共享 helper 的每条车道拷贝只归真正调用它的阶段。只有解析
+ * 不了时才退回下面的存在性口径：
  *
  * - **车道家族**（`agent()` 在 fan-out/loop 内创建，`families` 非空）：每个元素是那次迭代
  *   的新 actor，家族的出生阶段就是它参与的阶段。若不区分，这些拷贝会被广播到站点的全部
@@ -91,10 +93,10 @@ function headPhasesOf(claiming: readonly string[], toPhases: ReadonlySet<string>
  *   只按出生阶段归属会漏掉“早期创建、后期复用”的那份拷贝；这里用首次 `actor` 事件的时钟
  *   做下界，允许阶段内最后一次 issue 晚于出生的拷贝。
  *
- * 单例 actor 的“后期阶段也可能被选中”是分析器上下文无关并集的必然结果：issue 事件不携带
- * 车道，站点 receiver 的 actor 集合是全部调用点的并集（docs/analysis.md「The call oracle」
- * 明确 caller-context precision 不在范围内）。因此这里不裁掉“实际没传它”的阶段——那需要
- * 调用点精度；只保证不隐藏真实参与者。出生在 `unphased` 的车道从脚本开头就存在，不设限。
+ * 解析不了时的并集口径是分析器的既有契约：站点 receiver 的 actor 集合是全部调用点的并集
+ * （docs/analysis.md「The call oracle」明确 caller-context precision 不在范围内）。因此
+ * 这一级不裁掉“实际没传它”的阶段——那需要调用点精度；只保证不隐藏真实参与者。出生在
+ * `unphased` 的车道从脚本开头就存在，不设限。
  */
 export function collectPhaseClaims(
   events: readonly OrderEvent[],
@@ -115,6 +117,10 @@ export function collectPhaseClaims(
   /** 单例车道的首次出生时钟：阶段内最后一次 issue 不早于它，才可能被选中。 */
   const laneBornAt = new Map<string, number>();
   const bornBeforePhases = new Set<string>();
+  /** `${site}|${phase}` -> 该阶段的 issue 在这次调用点解析出的 actor；缺席 = 未解析。 */
+  const issueLanes = new Map<string, Set<string>>();
+  const unresolvedIssue = new Set<string>();
+  const resolvedSites = new Set<string>();
   // 与 causality-graph.ts 同一个时钟：每个 issue 事件走一格，不论它是否落在图里的 step 上。
   let clock = 0;
   for (const event of events) {
@@ -142,6 +148,13 @@ export function collectPhaseClaims(
     if (!firstIssue.has(key)) firstIssue.set(key, at);
     lastIssue.set(key, at);
     if (certainChain(event.regions)) certainSeen.add(key);
+    if (event.lanes === undefined) unresolvedIssue.add(key);
+    else {
+      resolvedSites.add(event.step);
+      const set = issueLanes.get(key) ?? new Set<string>();
+      for (const lane of event.lanes) set.add(lane);
+      issueLanes.set(key, set);
+    }
   }
   // 出生在标记之外的车道全程存在：拿掉它的阶段限制。
   for (const lane of bornBeforePhases) laneBirth.delete(lane);
@@ -154,21 +167,28 @@ export function collectPhaseClaims(
   for (const [site, claiming] of bySite) {
     for (const phase of claiming) certainty.set(`${site}|${phase}`, certaintyAt(site, phase));
   }
-  // 车道拷贝的认领：家族只归它自己出生的阶段；单例 actor 从出生起在所有后续认领阶段都
-  // 可能被选中。车道在站点发出过的任何阶段都还不存在时（静态 may-set 与实际发出矛盾），
-  // 保留站点的认领——抹掉一份参与者比多画一格更坏，与 `admits` 的「全被拦下 → 退回全展开」
-  // 同一个姿态。
+  // 车道拷贝的认领，按证据强度三级：
+  // 1) issue 事件带 lanes（走查从这次调用点的实参解析出了 receiver 的 actor）：拷贝只归
+  //    真正解析到它的阶段；这是最精确的一级，共享 helper 的四个 lane 不再互相广播。
+  // 2) 该阶段有解析不了的 issue：退回上下文无关并集，按车道存在性（家族出生阶段 / 单例
+  //    出生时刻）判断，宁可多画也不隐藏真实参与者。
+  // 3) 站点完全没有解析证据：保持二级的旧口径。
+  // 车道在每个认领阶段都不存在时（静态 may-set 与实际发出矛盾），保留站点认领——抹掉一份
+  // 参与者比多画一格更坏，与 `admits` 的「全被拦下 → 退回全展开」同一个姿态。
+  const mayExist = (lane: string, site: string, phase: string): boolean => {
+    const born = laneBirth.get(lane);
+    if (familyLanes.has(lane) && born !== undefined) return born.has(phase);
+    return (lastIssue.get(`${site}|${phase}`) ?? -1) >= (laneBornAt.get(lane) ?? 0);
+  };
   const copies = new Map<string, string[]>();
   for (const [site, claiming] of bySite) {
     for (const lane of lanes) {
-      const born = laneBirth.get(lane);
-      const isFamily = familyLanes.has(lane) && born !== undefined;
-      const bornAt = laneBornAt.get(lane) ?? 0;
-      const narrowed = claiming.filter((phase) =>
-        isFamily
-          ? born.has(phase)
-          : (lastIssue.get(`${site}|${phase}`) ?? -1) >= bornAt,
-      );
+      const narrowed = claiming.filter((phase) => {
+        const key = `${site}|${phase}`;
+        if (issueLanes.get(key)?.has(lane) === true) return true;
+        if (resolvedSites.has(site) && !unresolvedIssue.has(key)) return false;
+        return mayExist(lane, site, phase);
+      });
       copies.set(`${site}${COPY_SEPARATOR}${lane}`, narrowed.length > 0 ? narrowed : claiming);
     }
   }

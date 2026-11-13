@@ -80,7 +80,7 @@ export function walkCall(
 
   const ask = state.askByCall.get(node);
   if (ask !== undefined) {
-    issue(state, ask, chain);
+    issue(state, ask, chain, node);
     return;
   }
   const hole = state.holeByCall.get(node);

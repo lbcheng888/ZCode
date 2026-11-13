@@ -101,6 +101,11 @@ export interface IssueEvent {
    * membership.
    */
   phase: string;
+  /**
+   * ask 的 receiver 在**这次调用**里能解析出的 actor 站点。只有走查能从调用点实参证明时
+   * 才存在；缺席 = 保持上下文无关并集，读方不得把它当成空集。
+   */
+  lanes?: readonly string[];
 }
 
 /** An `await` barrier: these steps' promises are known to have settled here. */

@@ -290,9 +290,10 @@ describe("phase claims for may-set lane copies", () => {
     ]);
   });
 
-  it("keeps a singleton lane available from its birth onward", () => {
-    // 单例 actor 不是 fan-out 家族：出生前不可能出现在 issue 上，出生后的每个认领阶段都
-    // 可能被选中。c 在 phase#1 的 ask 之后才创建，所以 phase#1 没有它的拷贝，phase#2 有。
+  it("resolves a helper receiver to the actors this call actually passes", () => {
+    // 共享 helper 的 receiver 是参数：phase#1 传 a，phase#2 传 b 或 c。c 虽然出生在
+    // phase#1（标记之后、ask 之前），这次调用没传它，所以 phase#1 没有它的拷贝；它只在
+    // phase#2 的调用点候选里。按出生阶段归属会把这张卡放反。
     expect(
       stepsOf(`
         const a = agent("a");
@@ -301,18 +302,16 @@ describe("phase claims for may-set lane copies", () => {
           return await who.ask<string>(q);
         }
         phase("p1");
+        const c = agent("c");
         const x = await work(a, "one");
         phase("p2");
-        const c = agent("c");
         const flag = Math.random() > 0.5;
         const y = await work(flag ? b : c, "two");
         return x + y;
       `),
     ).toEqual([
-      "ask#1~actor#1~phase#1@phase#1",
-      "ask#1~actor#1~phase#2@phase#2",
-      "ask#1~actor#2~phase#1@phase#1",
-      "ask#1~actor#2~phase#2@phase#2",
+      "ask#1~actor#1@phase#1",
+      "ask#1~actor#2@phase#2",
       "ask#1~actor#3@phase#2",
     ]);
   });
