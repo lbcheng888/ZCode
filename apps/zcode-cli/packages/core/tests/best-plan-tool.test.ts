@@ -174,8 +174,8 @@ describe("ProposeBestPlan registration", () => {
   it("tells the model exactly when to call it and never to repeat it", () => {
     const description = bestPlanToolEntry.metadata.description ?? "";
 
-    expect(description).toContain("exactly once at the start of every user instruction");
-    expect(description).toContain("before any other tool call or substantive answer");
+    expect(description).toContain("exactly once before the first side-effecting tool call");
+    expect(description).toContain("investigate read-only as needed");
     expect(description).toContain("without waiting for approval");
     expect(description).toContain("Never repeat it in the same turn");
   });

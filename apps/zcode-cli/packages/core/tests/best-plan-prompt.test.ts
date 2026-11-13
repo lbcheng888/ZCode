@@ -48,7 +48,7 @@ describe("context builder — best plan protocol", () => {
 
     const stableBody = String(result.systemMessages[1]?.content ?? "");
     expect(stableBody).toContain("# Best plan");
-    expect(stableBody).toContain("任何其它工具调用或实质回答之前");
+    expect(stableBody).toContain("第一次写/改/执行类工具调用或实质回答之前");
     expect(stableBody).toContain("同一轮只调用一次");
     expect(stableBody.indexOf(IDENTITY_OPENING)).toBeGreaterThanOrEqual(0);
     expect(stableBody.indexOf("# Best plan")).toBeGreaterThan(stableBody.indexOf(IDENTITY_OPENING));

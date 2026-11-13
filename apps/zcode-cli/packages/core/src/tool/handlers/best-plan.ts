@@ -29,7 +29,7 @@ const MAX_BEST_PLAN_MODEL_BYTES = 4_096;
  * 填满全部字段、写完直接执行不等审批、同一 turn 不重复。
  */
 const BEST_PLAN_DESCRIPTION =
-  "Call this exactly once at the start of every user instruction, before any other tool call or substantive answer. Fill all fields; then execute the recommendation without waiting for approval. Never repeat it in the same turn.";
+  "For every user instruction, investigate read-only as needed, then call this exactly once before the first side-effecting tool call or substantive answer. Fill all fields; then execute the recommendation without waiting for approval. Never repeat it in the same turn.";
 
 const bestPlanHandler: ToolHandler = async (input) => {
   const parsed = BestPlanInputSchema.parse(input);
