@@ -190,6 +190,33 @@ return settled;
     expect(regionsOf(regions, "choice").filter((region) => region.exhaustive === true)).toEqual([]);
   });
 
+  it("does not treat a primitive field of a joined result as a callback", () => {
+    // `Promise.all([laneA, laneB])` 的函数值随结果对象漏进 `lane`；`String(lane)` 的实参
+    // 静态类型是 string，不可能调用它。若不按类型挡住，走查会把整个 lane 函数体内联进
+    // `lanes.map`，两个 actor 被错记成同一条 fan-out 家族，live 视图于是按成员数重复出卡。
+    const { core, result } = trace(`
+const a = future(async () => {
+  phase("p1");
+  const x = agent("x");
+  return await x.ask<string>("x");
+});
+const b = future(async () => {
+  phase("p2");
+  const y = agent("y");
+  return await y.ask<string>("y");
+});
+const [ra, rb] = await Promise.all([a, b]);
+const lanes = [ra, rb];
+const lines = lanes.map((lane) => String(lane));
+return lines.join(",");
+`);
+    expect(core.sites.actors.map((actor) => actor.within)).toEqual([undefined, undefined]);
+    expect(result.handoff?.participants.map((participant) => participant.member)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
   it("inlines an indirect dispatch over several targets as one exhaustive choice", () => {
     const { regions, causality } = trace(`
 const seed = await agent("seed").ask<string>("seed");

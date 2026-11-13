@@ -417,7 +417,16 @@ function handleUnknownCall(
       if (tracked.length > 0) ev.s.recordThroughParam(site, ref, "argument", tracked);
     });
   }
-  for (const arg of argVals) applyPessimistically(ev, arg, actual, ctx, out, site);
+  for (let index = 0; index < argVals.length; index += 1) {
+    const arg = argVals[index] as AbstractValue;
+    // 静态类型已是原始值的实参不可能被未知 callee 当函数调用。taint 的 fns 是字段不敏感的：
+    // `Promise.all([laneA, laneB])` 的函数值会随结果对象漏到 `lane.rounds`，于是
+    // `String(lane.rounds)` 也被当成“可能调用 laneA”，时序走查把整个 lane 函数体内联进
+    // `lanes.map` 的阶段链，actor 被错记成 fan-out 家族。原始值实参不存在可调用字段，跳过
+    // 悲观应用是精确的，不丢任何 may-flow。
+    if (isDefinitelyPrimitiveArgument(ev, site, index)) continue;
+    applyPessimistically(ev, arg, actual, ctx, out, site);
+  }
   if (tail !== undefined) applyPessimistically(ev, tail, actual, ctx, out, site);
 
   // Capture (b): a placeholder-valued argument may be invoked by the unknown fn with the
@@ -433,6 +442,38 @@ function handleUnknownCall(
     recordPhCallActuals(ev, calleeVal, argPot);
   }
   return out;
+}
+
+/**
+ * 这个实参的静态类型是否确定是原始值。只用于跳过“未知 callee 可能调用它”的悲观应用：
+ * 原始值没有可调用字段，taint 带来的 fns 只能是字段不敏感传播的噪声。
+ */
+function isDefinitelyPrimitiveArgument(
+  ev: Evaluator,
+  site: ts.Node | undefined,
+  index: number,
+): boolean {
+  if (site === undefined || !ts.isCallExpression(site)) return false;
+  const expr = site.arguments[index];
+  if (expr === undefined || ts.isSpreadElement(expr)) return false;
+  return isPrimitiveType(ev.checker.getTypeAtLocation(expr));
+}
+
+function isPrimitiveType(type: ts.Type): boolean {
+  if (type.isUnion()) return type.types.every((part) => isPrimitiveType(part));
+  return (
+    (type.flags &
+      (ts.TypeFlags.StringLike |
+        ts.TypeFlags.NumberLike |
+        ts.TypeFlags.BooleanLike |
+        ts.TypeFlags.BigIntLike |
+        ts.TypeFlags.ESSymbolLike |
+        ts.TypeFlags.Null |
+        ts.TypeFlags.Undefined |
+        ts.TypeFlags.Void |
+        ts.TypeFlags.Never)) !==
+    0
+  );
 }
 
 /**
