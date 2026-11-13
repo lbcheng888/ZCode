@@ -66,8 +66,8 @@ export type V4InteractionAutoResolution =
 
 export interface V4InteractionRegistrationOptions {
   sessionId: string;
-  kind: "askUserQuestion" | "other";
-  fullAccess?: () => Promise<void>;
+  kind: "askUserQuestion" | "pluginInstall" | "other";
+  fullAccess?: (mode: "guarded" | "yolo") => Promise<void>;
   initialAutoResolution?: V4InteractionAutoResolution;
   onAutoResolutionUpdated?: (state: V4InteractionAutoResolution) => void | Promise<void>;
 }
@@ -162,13 +162,32 @@ export class V4InteractionRegistry {
    * 其余（permission / plan approval / MCP elicitation）属于宿主确认面，read_mostly
    * 远端附件不得自答（spec §1.3）。未知 id 返回 undefined，调用方按更严处理。
    */
-  interactionKind(interactionId: string): "askUserQuestion" | "other" | undefined {
+  interactionKind(
+    interactionId: string,
+  ): "askUserQuestion" | "pluginInstall" | "other" | undefined {
     return this.pending.get(interactionId)?.options?.kind;
   }
 
-  resolve(interactionId: string, answer: V4InteractionAnswer): boolean {
+  resolve(
+    interactionId: string,
+    answer: V4InteractionAnswer,
+    expectedSessionId?: string | null,
+    pluginDiscoveryUi = false,
+  ): boolean {
     const entry = this.pending.get(interactionId);
     if (!entry || entry.fullAccessPending) return false;
+    // 交互 ID 可由工具行得知。只有支持卡片的同会话输入才能消费 resolver，旧端不能代为批准/跳过。
+    if (
+      entry.options?.kind === "pluginInstall" &&
+      (!pluginDiscoveryUi || entry.options.sessionId !== expectedSessionId)
+    )
+      return false;
+    if (
+      expectedSessionId !== undefined &&
+      entry.options?.sessionId &&
+      entry.options.sessionId !== expectedSessionId
+    )
+      return false;
     // 先删再 resolve：resolve 可能同步触发 broker finally 的注销，避免重入下重复投递。
     this.remove(interactionId, entry);
     entry.resolve(answer);
@@ -176,7 +195,11 @@ export class V4InteractionRegistry {
   }
 
   /** 带权限副作用的应答只对已登记的同 session 能力开放；失败保留请求供重试。 */
-  async resolveFullAccess(interactionId: string, sessionId: string): Promise<boolean> {
+  async resolvePermissionMode(
+    interactionId: string,
+    sessionId: string,
+    mode: "guarded" | "yolo",
+  ): Promise<boolean> {
     const entry = this.pending.get(interactionId);
     if (!entry) return false;
     if (entry.options?.sessionId !== sessionId || !entry.options.fullAccess) {
@@ -184,9 +207,10 @@ export class V4InteractionRegistry {
     }
     if (entry.fullAccessPending) {
       await entry.fullAccessPending;
-      return true;
+      // 并发请求共享事务，但只有取得应答权的命令能证明本端授权。
+      return false;
     }
-    const operation = entry.options.fullAccess();
+    const operation = entry.options.fullAccess(mode);
     entry.fullAccessPending = operation;
     try {
       await operation;

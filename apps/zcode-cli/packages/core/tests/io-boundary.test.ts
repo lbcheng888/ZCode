@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-
 const repoRoot = join(import.meta.dirname, "..", "..", "..");
 const allowedNetworkBoundaryFiles = new Set([
   // spec-lane egress 代理本身就是网络边界适配器（HTTP CONNECT 隧道用 net.connect）。

@@ -189,11 +189,6 @@ function mapQuerySourceToModelApiOperation(querySource: string | undefined): {
       return { operation: ModelApiOperation.WebSearch, actorKind: ModelApiActorKind.Tool };
     case "web_fetch_processing":
       return { operation: ModelApiOperation.WebFetch, actorKind: ModelApiActorKind.Tool };
-    case "read_session_context":
-      return {
-        operation: ModelApiOperation.ReadSessionContextExtract,
-        actorKind: ModelApiActorKind.Tool,
-      };
     case "project_memory_extract":
       return {
         operation: ModelApiOperation.ProjectMemoryExtract,

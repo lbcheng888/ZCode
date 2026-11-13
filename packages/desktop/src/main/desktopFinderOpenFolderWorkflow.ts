@@ -10,6 +10,9 @@ const WORKFLOW_VERSION = "6";
 const SERVICES_MENU_LABELS: Record<Locale, string> = {
   "zh-CN": "在ChengCode中打开",
   "en-US": "Open in ChengCode",
+  "ja-JP": "Open in ChengCode",
+  "ru-RU": "Open in ChengCode",
+  "ko-KR": "Open in ChengCode",
 };
 
 const workflowScript = `first=""

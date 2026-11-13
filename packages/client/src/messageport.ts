@@ -67,7 +67,12 @@ export interface MessagePortServiceConnection {
  */
 export function createMessagePortServiceConnection(
   port: MessagePort,
-  options: { sourceServerManagementService?: boolean; deviceSyncStateService?: boolean } = {},
+  options: {
+    sourceServerManagementService?: boolean;
+    deviceSyncStateService?: boolean;
+    extensionsService?: boolean;
+    managedWorktreeService?: boolean;
+  } = {},
 ): MessagePortServiceConnection {
   logMessagePortDebug("[messageport] creating protocol and client...");
   // P6：必须在 MessagePortProtocol 构造前注册票据通道监听。宿主在 attach 时就把
@@ -118,7 +123,12 @@ export function createMessagePortServiceConnection(
  */
 export function connectViaMessagePort(
   port: MessagePort,
-  options: { sourceServerManagementService?: boolean; deviceSyncStateService?: boolean } = {},
+  options: {
+    sourceServerManagementService?: boolean;
+    deviceSyncStateService?: boolean;
+    extensionsService?: boolean;
+    managedWorktreeService?: boolean;
+  } = {},
 ): IServiceAccessor {
   return createMessagePortServiceConnection(port, options).services;
 }

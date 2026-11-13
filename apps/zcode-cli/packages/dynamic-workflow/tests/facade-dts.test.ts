@@ -20,6 +20,11 @@ describe("facade dts segments", () => {
   // 为 16 214 字节；上限按实测 + ≥500 余量重设，任何新段都必须同批改这个数。
   it("stays a reference: FACADE_DTS is under 16 800 bytes", () => {
     expect(Buffer.byteLength(FACADE_DTS, "utf8")).toBeLessThan(16_800);
+  // 2026-09-30 去重前是 23 275 字节，其中约 2 万是注释。
+  // 2026-11-02 上限 14 000 → 14 200：persona 新增 `budget.webSearch`（一行声明 + 一行参考注释，
+  // 约 110 字节）时 facade 只剩 1 字节余量；新成员的参考层文字是真增量，规则仍是只放参考层。
+  it("stays a reference: FACADE_DTS is under 14 200 bytes", () => {
+    expect(Buffer.byteLength(FACADE_DTS, "utf8")).toBeLessThan(14_200);
   });
 
   // args 在**两个** facade 里都在：snippet 的「逐字可迁移」不变式要求一段引用 args 的

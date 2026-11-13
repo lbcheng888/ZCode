@@ -22,6 +22,17 @@ ChengCode is an AI coding workspace with desktop, browser, and terminal interfac
 - 2026-10-16: Updated to ChengCode v3.15.4.
 - 2026-10-10: Updated to ChengCode v3.15.1.
 - 2026-9-23: Updated to ChengCode v3.14.3.
+- **2026-11-12**: Updated to ZCode v3.18.2.
+- 2026-11-12: Updated to ZCode v3.18.1.
+- 2026-11-11: Updated to ZCode v3.18.0.
+- 2026-11-03: Updated to ZCode v3.17.2.
+- 2026-10-30: Updated to ZCode v3.17.1.
+- 2026-10-29: Updated to ZCode v3.17.0.
+- 2026-10-19: Updated to ZCode v3.16.2.
+- 2026-10-16: Updated to ZCode v3.16.1.
+- 2026-10-16: Updated to ZCode v3.15.4.
+- 2026-10-10: Updated to ZCode v3.15.1.
+- 2026-9-23: Updated to ZCode v3.14.3.
 
 ## Setup
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isHighspeedProviderId, resolveExecutionState, type ExecutionState } from "@zcode/shared";
 import { buildExecutionStateEntry, readRuntimeExecutionState } from "../execution-state.js";
+import { copyPromptSnapshotToFork } from "../helpers/prompt-snapshot.js";
 import {
   createModelId,
   createModelProviderId,
@@ -814,6 +815,10 @@ async function commitAtomicConversationFork(
         : `Forked session ${forkedSessionId} from message ${options.targetMessageId}: copied ${options.messages.length} messages.`,
   };
 }
+import {
+  asRecord,
+  buildAtomicConversationForkBundle,
+} from "../session-fork-commit/index.js";
 
 /**
  * 副屏创建使用父 active transcript 的稳定落盘边界。正在生成时只保留已提交的本轮
@@ -826,26 +831,39 @@ export async function createSelectionSideConversation(
   if (!options.sourceCommandId.trim()) {
     throw stableForkError("Selection side chat sourceCommandId must not be empty");
   }
-  if (!this.sessionStore?.commitForkBundle) {
-    throw stableForkError("Selection side chat requires commitForkBundle");
+  if (!this.sessionStore?.commitForkFromSource) {
+    throw stableForkError("Selection side chat requires commitForkFromSource");
   }
-  const parentSession = await this.sessionStore.getSession(this.sessionId);
-  if (!parentSession) throw stableForkError(`Session not found: ${this.sessionId}`);
-  const parentMessages = await this.sessionStore.messages({ sessionID: this.sessionId });
-  const activeMessages = forkSourceMessagesForSession(parentMessages, parentSession);
-  const history = selectionSideChatHistoryMessages(activeMessages, this.activeTurn?.turnId);
-  const targetMessageId = history.at(-1)?.info.id ?? createMessageId();
-  return await commitAtomicConversationFork(this, {
-    modelSelection: options.modelSelection,
-    goalBoundary: { kind: "none" },
-    kind: "selection_side_chat",
-    messages: history,
-    parentSession,
-    revisionAtDecision: options.revisionAtDecision,
-    sourceCommandId: options.sourceCommandId,
-    targetMessageId,
-    traceContext: options.traceContext ?? this.rootTraceContext,
+  let copiedMessageCount = 0;
+  let targetMessageId = createMessageId();
+  const child = await this.sessionStore.commitForkFromSource({
+    sessionID: this.sessionId,
+    build: ({ session: parentSession, messages }) => {
+      const activeMessages = forkSourceMessagesForSession(messages, parentSession);
+      const history = selectionSideChatHistoryMessages(activeMessages, this.activeTurn?.turnId);
+      copiedMessageCount = history.length;
+      targetMessageId = history.at(-1)?.info.id ?? targetMessageId;
+      return buildAtomicConversationForkBundle(this, {
+        modelSelection: options.modelSelection,
+        goalBoundary: { kind: "none" },
+        kind: "selection_side_chat",
+        messages: history,
+        parentSession,
+        revisionAtDecision: options.revisionAtDecision,
+        sourceCommandId: options.sourceCommandId,
+        targetMessageId,
+        traceContext: options.traceContext ?? this.rootTraceContext,
+      });
+    },
   });
+  return {
+    copiedMessageCount,
+    forkedSessionId: child.id,
+    parentSessionId: this.sessionId,
+    targetMessageId,
+    restoredFiles: [],
+    response: `Created selection side chat ${child.id}.`,
+  };
 }
 
 export function selectionSideChatHistoryMessages(
@@ -872,6 +890,7 @@ export async function createForkedSession(
     parentSession: SessionInfo;
     forkedSessionId?: SessionId;
     stableForkMetadata?: StableConversationForkChildMetadata;
+    traceContext: TraceContext;
   },
 ): Promise<SessionId> {
   if (!runtime.sessionStore) {
@@ -906,6 +925,10 @@ export async function createForkedSession(
   await runtime.sessionStore.saveSessionEntry?.(
     buildExecutionStateEntry(forkedSessionId, readRuntimeExecutionState(runtime)),
   );
+  // 修复原因：legacy fork（session/fork、/fork、/rewind fork）原来只建 child、不复制 prompt 快照，
+  // child 第一个请求按当前代码重新渲染并记录 system；父会话的快照来自旧版本时，child 用不上父会话的
+  // 前缀缓存。与原子 fork 一样复制父会话当前的快照（三条 legacy 路径都经过这里建 child）。
+  await copyPromptSnapshotToFork(runtime, forkedSessionId, options.traceContext);
   return forkedSessionId;
 }
 
@@ -972,6 +995,7 @@ export async function forkConversationFromMessage(
   const forkedSessionId = await createForkedSession(this, {
     forkedSessionId: options.forkedSessionId,
     parentSession,
+    traceContext: options.traceContext,
   });
   const { copiedMessageCount, messageIdMap } = await this.copySessionMessagesForFork({
     forkedSessionId,
@@ -1090,6 +1114,7 @@ export async function forkStableConversationAtMessage(
     sourceCommandId: options.sourceCommandId,
     target: options.target,
     targetMessageId: options.target.boundaryMessageId as MessageId,
+    ...(options.targetCwd ? { targetCwd: options.targetCwd } : {}),
     traceContext: options.traceContext ?? this.rootTraceContext,
   });
 }
@@ -1402,12 +1427,6 @@ export function forkSourceMessagesForSession(
   });
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
 export function activeForkTranscriptMessages(
   messages: MessageWithParts[],
   options: {
@@ -1436,6 +1455,10 @@ export function resolveForkHistoryEndIndex(
   let endIndex = targetIndex + 1;
   for (let index = targetIndex + 1; index < messages.length; index++) {
     const message = messages[index]!;
+    // 修复原因：工具批次之间会写入隐藏的 model-only 提醒（token 预算、静默提醒等），
+    // 它们是 user 角色；遇到就停会把同一回合后面的 assistant 截掉，fork 只复制半个回合。
+    // 跳过它们继续找，只在之后还有同回合 assistant 时才一起带上。
+    if (isHiddenReminderMessage(message)) continue;
     if (message.info.role !== "assistant" || message.info.parentID !== parentId) {
       break;
     }

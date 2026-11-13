@@ -19,6 +19,7 @@ export * from "./skill.js";
 export * from "./todo.js";
 export * from "./automation.js";
 export * from "./off-peak.js";
+export * from "./plugin-discovery.js";
 export * from "./target.js";
 export * from "./plan-mode.js";
 // 每条用户指令开头的六字段方案卡：字段名与长度上限被 UI 的内联卡片与提示词 lane 同读，

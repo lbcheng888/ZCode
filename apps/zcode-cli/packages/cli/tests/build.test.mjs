@@ -432,4 +432,6 @@ test("freshness gate reports a sibling with src but no dist, including repo-root
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+test("CLI leaves system keyring native loading to the runtime", () => {
+  assert.ok(resolveBuildExternal().includes("@napi-rs/keyring"));
 });

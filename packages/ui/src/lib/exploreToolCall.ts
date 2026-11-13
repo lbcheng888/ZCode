@@ -121,7 +121,6 @@ export function isShellToolCallAwaitingCommand({ kind, input }: { kind: string; 
   const identity = resolveToolCallIdentity({ kind, input });
   return identity.family === "shell" && extractToolCommands(input).length === 0;
 }
-
 export function isExploreToolCall({ kind, input }: { kind: string; input: unknown }) {
   const identity = resolveToolCallIdentity({ kind, input });
 

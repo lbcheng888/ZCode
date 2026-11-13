@@ -44,6 +44,7 @@ export function createOfficialMcpAuthHeadersPort(input: {
   resolveWorkspace: (input: {
     workspaceIdentity?: string;
     workspacePath?: string;
+    workspaceKey?: string;
   }) => ZCodeWorkspaceRef | undefined;
 }): OfficialMcpAuthHeadersPort {
   return {
@@ -52,6 +53,7 @@ export function createOfficialMcpAuthHeadersPort(input: {
       const workspace = input.resolveWorkspace({
         ...(request.workspaceIdentity ? { workspaceIdentity: request.workspaceIdentity } : {}),
         ...(request.workspacePath ? { workspacePath: request.workspacePath } : {}),
+        ...(request.workspaceKey ? { workspaceKey: request.workspaceKey } : {}),
       });
       if (!context || !workspace) {
         return { ok: false, reason: "official_auth_unavailable" };

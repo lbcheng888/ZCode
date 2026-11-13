@@ -82,8 +82,7 @@ export function ToolPresentation({
   const identity = resolveToolCallIdentity(toolCall);
   if (identity.family === "todo" && options.showTodoToolCalls !== true) return null;
   const Renderer = resolveToolCallRenderer(context);
-  if (Renderer === FallbackToolCallBlock)
-    return <FallbackToolCallBlock {...context} hideRawFallback={capabilities.readonly} />;
+  if (Renderer === FallbackToolCallBlock) return <FallbackToolCallBlock {...context} />;
   if (Renderer === CuaGroupToolCallBlock)
     return (
       <CuaGroupToolCallBlock

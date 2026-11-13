@@ -93,7 +93,6 @@ export {
 } from "./lib/fileDisplay.js";
 export type { FileDisplayDescriptor, FileDisplayOptions } from "./lib/fileDisplay.js";
 export { playTaskNotificationSound } from "./lib/taskNotificationSound.js";
-export { installDocumentHiddenMotionPause } from "./lib/documentHiddenMotionPause.js";
 export {
   applyUiFontSizePx,
   loadUiFontSizePx,
@@ -121,4 +120,8 @@ export { useWouldAcceptPromote } from "./would-accept/useWouldAcceptPromote.js";
 export type { IWouldAcceptPromoteService } from "./would-accept/useWouldAcceptPromote.js";
 
 export { LocalTtftObserver, setLocalTtftObserver } from "@/v4/telemetry/local-ttft/contract.js";
-export { ensurePendingTaskDraft } from "@/v4/composer/composerDraftStore.js";
+export {
+  ensurePendingTaskDraft,
+  readPendingTaskDraft,
+  readComposerWorkspaceScope,
+} from "@/v4/composer/composerDraftStore.js";

@@ -8,6 +8,7 @@ import type {
   TuiModelOption,
   TuiPromoteWouldAcceptCard,
   TuiRecallPreviousInput,
+  TuiRegisterPermissionRequester,
   TuiSendInput,
   TuiSetMode,
   TuiSessionMetadata,
@@ -29,6 +30,7 @@ export type TuiPromptHandler = TuiSubmitPrompt & {
   listWouldAcceptCards?: TuiListWouldAcceptCards;
   promoteWouldAcceptCard?: TuiPromoteWouldAcceptCard;
   getMainSessionId?: TuiGetMainSessionId;
+  registerPermissionRequester?: TuiRegisterPermissionRequester;
   listModelOptions?: () => Promise<readonly TuiModelOption[]>;
   recallPreviousInput?: TuiRecallPreviousInput;
   sendInput?: TuiSendInput;

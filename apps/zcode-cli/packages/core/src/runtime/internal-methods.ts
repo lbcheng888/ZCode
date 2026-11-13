@@ -33,6 +33,7 @@ import type {
   ToolRegistry,
   ContextBuilder,
   ExecutionShellSelection,
+  PendingInputEditLock,
 } from "./deps.js";
 import type { BackgroundResultOriginMeta, ContextUsageBreakdownItem } from "@zcode/contracts";
 import type { RuntimeCommand, RuntimeCommandId } from "./command-queue.js";
@@ -64,6 +65,9 @@ import type {
   TurnResult,
   TurnStoppingListener,
   TurnStoppingListenerContext,
+  EditPendingInputOptions,
+  EditPendingInputResult,
+  LockPendingInputEditResult,
 } from "./types.js";
 
 export interface AgentRuntimeCoreMethods {
@@ -78,6 +82,11 @@ export interface AgentRuntimeCoreMethods {
   getPlanEnabled(): boolean;
   isGoalLayerEnabled(): boolean;
   grantPermissionFullAccess(interactionId: string, signal?: AbortSignal): Promise<string>;
+  grantPermissionMode(
+    interactionId: string,
+    mode: "guarded" | "yolo",
+    signal?: AbortSignal,
+  ): Promise<string>;
   setExecutionState(
     input: { mode?: string; planEnabled?: boolean },
     traceContext?: TraceContext,
@@ -216,11 +225,19 @@ export interface AgentRuntimeCoreMethods {
     reservationId: string;
     traceContext: TraceContext;
   }): Promise<boolean>;
-  editPendingInputById(options: {
+  editPendingInputById(
+    options: EditPendingInputOptions & { traceContext: TraceContext },
+  ): Promise<EditPendingInputResult>;
+  lockPendingInputEdit(options: {
     pendingInputId: string;
-    newText: string;
+    editLock: PendingInputEditLock;
+    traceContext: TraceContext;
+  }): Promise<LockPendingInputEditResult>;
+  releasePendingInputEdit(options: {
+    pendingInputId: string;
     traceContext: TraceContext;
   }): Promise<boolean>;
+  getPendingInputEditLock(pendingInputId: string): PendingInputEditLock | undefined;
   reorderPendingInput(options: {
     pendingInputId: string;
     beforePendingInputId: string | null;
@@ -305,7 +322,9 @@ export interface AgentRuntimeCoreMethods {
     messages: ModelInputMessage[],
     limit?: unknown,
   ): Array<Record<string, unknown>>;
-  buildContextUsageSnapshot(options: RunModelTextRequestOptions): Record<string, unknown>;
+  buildContextUsageSnapshot(
+    options: RunModelTextRequestOptions,
+  ): import("./methods/context-usage.js").ContextUsageSnapshot;
   buildContextUsageBreakdownFromSnapshot(
     snapshot: Record<string, unknown>,
   ): ContextUsageBreakdownItem[];

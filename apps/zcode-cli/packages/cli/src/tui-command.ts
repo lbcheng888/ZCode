@@ -116,6 +116,7 @@ export const runTuiCommand = async (
         listWouldAcceptCards: promptHandler.listWouldAcceptCards,
         promoteWouldAcceptCard: promptHandler.promoteWouldAcceptCard,
         getMainSessionId: promptHandler.getMainSessionId,
+        registerPermissionRequester: promptHandler.registerPermissionRequester,
         writeClipboardText:
           deps.writeClipboardText ?? createNodeClipboardTextWriter({ stdout: ctx.stdout }),
         stderr: ctx.stderr,

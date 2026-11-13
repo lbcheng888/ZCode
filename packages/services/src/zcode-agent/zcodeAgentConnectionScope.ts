@@ -106,6 +106,7 @@ export interface ZCodeAgentV4ConnectionContext {
    * 是**连接**的事实，不是某一次订阅可以自选的口味。缺席 = 按旧消费者处理。
    */
   workflowRunDeltas?: boolean;
+  pluginDiscoveryUi?: boolean;
   historyFirst?: boolean;
   /**
    * P6：宿主侧附件权威事实。只由 Host 在建连时写入，renderer/mobile 入参中的同名字段
@@ -183,6 +184,7 @@ export function readTrustedZCodeAgentV4Connection(
     clientMode: context.clientMode,
     // 只认 true：缺席与 false 都是「旧消费者」，键在场与否是下游读端的判据。
     ...(context.workflowRunDeltas === true ? { workflowRunDeltas: true } : {}),
+    ...(context.pluginDiscoveryUi === true ? { pluginDiscoveryUi: true } : {}),
     ...(context.historyFirst === true ? { historyFirst: true } : {}),
     ...(attachment !== undefined ? { attachment } : {}),
     ...(capabilityTicket !== undefined ? { capabilityTicket } : {}),
@@ -205,6 +207,7 @@ function withTrustedConnection<T extends object>(
   delete forwarded["subscriberScope"];
   // 与 clientMode 同族的可信位：UI 面的 subscribe 不能自己挑增量编码。
   delete forwarded["workflowRunDeltas"];
+  delete forwarded["pluginDiscoveryUi"];
   delete forwarded["historyFirst"];
   // P6：附件事实只能来自 Host 连接元数据，调用方传入的同名键一律丢弃。
   delete forwarded["attachment"];
@@ -225,6 +228,20 @@ function withTrustedUnsubscribeRoute<T extends object>(
   delete forwarded[TRUSTED_UNSUBSCRIBE_ROUTE_FIELD];
   forwarded[TRUSTED_UNSUBSCRIBE_ROUTE_FIELD] = route;
   return forwarded as T;
+}
+
+/** sendText.source 或 createSession.firstInput.source 是 extension（CLI 契约 conversation-input-source.md §2）。 */
+function carriesExtensionInputSource(envelope: { type: string; payload: unknown }): boolean {
+  const payload =
+    envelope.payload && typeof envelope.payload === "object"
+      ? (envelope.payload as {
+          source?: { kind?: unknown };
+          firstInput?: { source?: { kind?: unknown } } | null;
+        })
+      : undefined;
+  if (envelope.type === "sendText") return payload?.source?.kind === "extension";
+  if (envelope.type === "createSession") return payload?.firstInput?.source?.kind === "extension";
+  return false;
 }
 
 function workspaceKey(target: ZCodeAgentWorkspaceTarget): string {
@@ -345,6 +362,7 @@ function createHello(context: ZCodeAgentV4ConnectionContext): HelloMessage {
       // 本 Host 会转发 `workflowRun.*` 键级增量；客户端见到它才能在 clientHello 里回声明
       // （那个 capabilities 是 .strict() 的，反过来会让老 Host 握不上手）。
       workflowRunDeltas: true,
+      pluginDiscovery: true,
       historyFirst: true,
       // P6：只读投影放在非 strict 的 capabilities 扩展位，旧客户端会静默丢弃，
       // 不会因为 hello 顶层 strict 解析失败而断连。
@@ -386,6 +404,7 @@ export function createZCodeAgentConnectionScope(
   let boundClientId: string | null = null;
   /** clientHello 里的增量声明；trusted relay 没有自己的 clientHello，只搬运下游的。 */
   let clientWorkflowRunDeltas = false;
+  let pluginDiscoveryUiSupported = false;
   let clientHistoryFirst = false;
   let commandQueryWorkspaceKey: string | null = null;
   let currentTransportFlowState: V4ConnectionFlowState = "drained";
@@ -404,6 +423,7 @@ export function createZCodeAgentConnectionScope(
         clientMode: downstream.clientMode,
         // 增量位属于**下游那一端**：relay 自己不消费帧，只把下游 clientHello 的声明带上去。
         ...(downstream.workflowRunDeltas === true ? { workflowRunDeltas: true } : {}),
+        ...(downstream.pluginDiscoveryUi === true ? { pluginDiscoveryUi: true } : {}),
         ...(downstream.historyFirst === true ? { historyFirst: true } : {}),
         // 附件角色同理属于下游那一端的宿主连接记录。
         ...(downstream.attachment !== undefined ? { attachment: downstream.attachment } : {}),
@@ -417,6 +437,9 @@ export function createZCodeAgentConnectionScope(
       connectionId: context.connectionId,
       clientMode: context.clientMode,
       ...(clientWorkflowRunDeltas ? { workflowRunDeltas: true } : {}),
+      ...(role === "terminal-client" && pluginDiscoveryUiSupported
+        ? { pluginDiscoveryUi: true }
+        : {}),
       ...(clientHistoryFirst ? { historyFirst: true } : {}),
       // Host 写入的附件事实随每条命令透传；getter 在此按当前 registry 角色求值。
       ...(context.attachment !== undefined ? { attachment: context.attachment } : {}),
@@ -846,6 +869,7 @@ export function createZCodeAgentConnectionScope(
       }
       boundClientId = parsed.clientId;
       clientWorkflowRunDeltas = clientSupportsWorkflowRunDeltas(parsed);
+      pluginDiscoveryUiSupported = parsed.capabilities?.pluginDiscoveryUi === true;
       clientHistoryFirst = parsed.capabilities?.historyFirst === true;
       handshakeComplete = true;
     },
@@ -869,6 +893,11 @@ export function createZCodeAgentConnectionScope(
     },
     async sendConversationCommandV4(params) {
       assertOpen();
+      // extension 来源只由扩展网关经 app-control 注入（docs/plugins/extension-host.md §17.8）；app-control 直接调
+      // 基础 agent 服务，不经任何连接作用域。渲染进程、手机与 relay 的命令都从这里进入，带这个来源就是伪造。
+      if (carriesExtensionInputSource(params.envelope)) {
+        throw new Error("fault.command.extensionSourceUntrusted");
+      }
       if (role === "terminal-client") {
         assertReady();
         if (params.envelope.clientId !== boundClientId) {

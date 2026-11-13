@@ -98,6 +98,11 @@ async function sendText(
     });
   const routingMode = host.getInputRoutingMode?.(envelope.sessionId ?? "") ?? null;
   const forceStartNow = payload.requestedDelivery === "startNow";
+  // 队首被 composer 编辑态冻结时 Core 可能完全空闲；不强制入队会 startNow 越过冻结项。
+  const queueHeadEditLocked =
+    !forceStartNow &&
+    routingMode === "enqueue" &&
+    host.isQueueHeadEditLocked?.(record.app.sessionId) === true;
   // 加速本轮由「标准 Selection 指向加速 Provider + 单次执行材料」表达；判定必须用 Family
   // 谓词，不能和单个 provider id 常量比较，否则 BigModel 账号的卡会被当成普通轮静默丢弃。
   const highspeedExecution: V4TurnExecution | undefined = isHighspeedProviderId(
@@ -283,6 +288,7 @@ async function sendText(
       // P6：每次 admission 按当前连接复核附件角色与票据授权域。
       ...(attachmentAdmission ? { attachment: attachmentAdmission } : {}),
       ...(capabilityTicketAdmission ? { capabilityTicket: capabilityTicketAdmission } : {}),
+      ...(queueHeadEditLocked ? { requireQueue: true } : {}),
     });
   } catch (error) {
     if (
