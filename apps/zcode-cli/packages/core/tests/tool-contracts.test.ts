@@ -33,6 +33,7 @@ const DIRECT_BRANCH_EXPECTED_PROVIDER_TOOL_ORDER = [
   "ExitPlanMode",
   "Glob",
   "Grep",
+  "ProposeBestPlan",
   "Read",
   // SendMessage、ToolSearch 在排序名单内，和名单内其他工具一起按名字排序。
   "SendMessage",

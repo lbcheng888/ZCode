@@ -2,7 +2,7 @@
 // Context Builder - System prompt assembly
 // ============================================================
 
-import type { ModelInputMessage } from "@zcode/contracts";
+import { BEST_PLAN_TOOL_NAME, type ModelInputMessage } from "@zcode/contracts";
 import type {
   ContextMetaUserAttachment,
   ContextSection,
@@ -22,6 +22,7 @@ import { buildCurrentDateSection } from "./sections/current-date.js";
 import { buildMemorySection } from "./sections/memory.js";
 import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../memory/project-memory-retrieval-branch.js";
 import { buildDesktopContextSection } from "./sections/desktop.js";
+import { buildBestPlanSection } from "./sections/best-plan.js";
 import {
   buildContextManagementSection,
   buildDynamicBehaviorSection,
@@ -126,6 +127,16 @@ export class ContextBuilder {
           this.config.preferDynamicWorkflows === true,
         ),
       );
+    }
+
+    // Best plan protocol：ProposeBestPlan 在本次工具表里才注入。自定义 prompt 与工作流子代理
+    // 都不产卡，两条路径都跳过；位置固定为稳定身份段之后、动态段之前。
+    if (
+      !hasCustomSystemPrompt &&
+      !isWorkflowActor &&
+      this.config.guidanceToolNames?.includes(BEST_PLAN_TOOL_NAME)
+    ) {
+      sections.push(buildBestPlanSection());
     }
 
     // 环境与模型是运行时公告（meta_user），不进 system；使用自定义 prompt 时也照常发送。

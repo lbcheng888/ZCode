@@ -61,6 +61,7 @@ import {
   exitPlanModeToolEntry,
 } from "./plan-mode.js";
 import { askUserQuestionToolEntry } from "./ask-user-question.js";
+import { bestPlanToolEntry } from "./best-plan.js";
 import { sendMessageToolEntry } from "./send-message.js";
 import { respondToCoordinatorToolEntry } from "./respond-to-coordinator.js";
 import { createSubmitResultToolEntry, submitResultToolEntry } from "./submit-result.js";
@@ -122,6 +123,9 @@ export const builtInTools: ToolEntry[] = [
   enterPlanModeToolEntry,
   exitPlanModeToolEntry,
   askUserQuestionToolEntry,
+  // 每条用户指令开头的内联方案卡：只读、无 gate。只有主代理需要它——workflow child 的调用
+  // 会把卡片投进父会话的 transcript，所以在 tool-allowlist 的 child 禁用名单里。
+  bestPlanToolEntry,
   sendMessageToolEntry,
   respondToCoordinatorToolEntry,
   submitResultToolEntry,

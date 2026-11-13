@@ -22,6 +22,8 @@ const RESIDENT_NAMES = [
   "GoalCreate",
   "GoalUpdate",
   "Grep",
+  // 每条用户指令都要先调，不能 defer 到 ToolSearch 之后。
+  "ProposeBestPlan",
   "Read",
   "ReportFindings",
   "Skill",

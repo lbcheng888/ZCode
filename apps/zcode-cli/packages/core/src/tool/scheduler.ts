@@ -239,6 +239,8 @@ export const READ_ONLY_TOOLS = new Set([
   "TodoRead",
   "TodoWrite",
   "AskUserQuestion",
+  // 方案卡只读、无副作用：与其它只读工具同组并发，不占串行槽位。
+  "ProposeBestPlan",
   "Skill",
 ]);
 

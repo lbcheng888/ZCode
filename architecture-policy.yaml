@@ -1819,3 +1819,11 @@ exceptions:
     paths:
       - packages/zcode-cua/src/**
     reason: The whole zcode-cua producer package (broker, native adapters, tools) entered the repo after the gate timestamp as pre-existing code moved from a separate repository; adopting its internal layers needs a dedicated CONTRACT pass (it has known internal cycles by design), not a mechanical split in this branch.
+  - id: best-plan-tool-unmanaged-new-files
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/contracts/src/tools/best-plan.ts
+      - apps/zcode-cli/packages/core/src/context/sections/best-plan.ts
+      - apps/zcode-cli/packages/core/src/tool/handlers/best-plan.ts
+      - packages/ui/src/ToolCallBlocks/renderers/best-plan.tsx
+    reason: ProposeBestPlan 是一个只读工具的四段闭环（契约 schema、可选协议段、handler、内联卡片 renderer），分别落在既有的 contracts/core/ui 目录；它不新增状态 owner、不跨模块写入，接管整个 contracts、core 或 ui 包不属于本工具的范围，故按精确路径准入。

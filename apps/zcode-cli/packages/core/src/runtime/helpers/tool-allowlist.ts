@@ -1,5 +1,6 @@
 import {
   AMEND_WORKFLOW_TOOL_NAME,
+  BEST_PLAN_TOOL_NAME,
   CHENG_GENERATE_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   FILL_WORKFLOW_HOLE_TOOL_NAME,
@@ -57,6 +58,10 @@ const WORKFLOW_CHILD_DISALLOWED_TOOLS = [
   // 同款根因）；加一条结构性理由：child 的效应只走脚本声明的 cheng.* world-read 站点，actor 的
   // 模型面不得另开 host 作业。
   CHENG_GENERATE_TOOL_NAME,
+  // ProposeBestPlan 是**主代理**每轮开头的内联方案卡：child 的工具事件经 subagent 路径
+  // 镜像回父会话，child 再交一张卡只会把别人的方案混进用户正在看的那条消息流。这里不是
+  // 「无窗可弹」（它没有 gate），而是卡片归属的唯一性——谁在跟用户对话，谁交方案。
+  BEST_PLAN_TOOL_NAME,
 ] as const;
 
 /**

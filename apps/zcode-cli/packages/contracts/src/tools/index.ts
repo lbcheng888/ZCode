@@ -21,6 +21,9 @@ export * from "./automation.js";
 export * from "./off-peak.js";
 export * from "./target.js";
 export * from "./plan-mode.js";
+// 每条用户指令开头的六字段方案卡：字段名与长度上限被 UI 的内联卡片与提示词 lane 同读，
+// 漏掉这行消费方拿不到 schema 与 BEST_PLAN_TOOL_NAME。
+export * from "./best-plan.js";
 export * from "./ask-user-question.js";
 export * from "./send-message.js";
 export * from "./respond-to-coordinator.js";

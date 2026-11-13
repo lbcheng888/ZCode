@@ -7495,6 +7495,14 @@ const enUS: Record<string, string> = {
   "planTool.panel.viewFull": "View full plan",
   "planTool.panel.syncing": "Syncing plan…",
   "planTool.guidance.enterMode": "Entered plan mode",
+  "bestPlan.title": "Best plan",
+  "bestPlan.currentEvidence": "Current evidence",
+  "bestPlan.candidateOptions": "Candidate options",
+  "bestPlan.candidateOption": "{option} (cost: {cost})",
+  "bestPlan.recommendation": "Recommendation",
+  "bestPlan.impact": "Impact",
+  "bestPlan.verification": "Verification",
+  "bestPlan.invalid": "This best-plan call has no fields to display.",
   "chat.permission.switchMode.placeholder": "Implementation plan",
 
   // ZCode Agent

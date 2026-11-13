@@ -7126,6 +7126,14 @@ const zhCN: Record<string, string> = {
   "planTool.panel.viewFull": "查看完整计划",
   "planTool.panel.syncing": "正在同步计划…",
   "planTool.guidance.enterMode": "已开启 Plan Mode",
+  "bestPlan.title": "最佳方案",
+  "bestPlan.currentEvidence": "现状证据",
+  "bestPlan.candidateOptions": "候选方案",
+  "bestPlan.candidateOption": "{option}（代价：{cost}）",
+  "bestPlan.recommendation": "推荐方案",
+  "bestPlan.impact": "影响面",
+  "bestPlan.verification": "验证方案",
+  "bestPlan.invalid": "这条最佳方案调用缺少可展示的字段。",
   "chat.permission.switchMode.placeholder": "实施计划",
 
   // ZCode Agent

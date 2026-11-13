@@ -7,6 +7,7 @@
 
 import { EditToolCallBlock } from "@/ToolCallBlocks/renderers/edit.js";
 import { AgentToolCallBlock } from "@/ToolCallBlocks/renderers/agent.js";
+import { BestPlanToolCallBlock } from "@/ToolCallBlocks/renderers/best-plan.js";
 import { ChangesGroupToolCallBlock } from "@/ToolCallBlocks/renderers/changes-group.js";
 import { CreateWorkflowToolCallBlock } from "@/ToolCallBlocks/renderers/create-workflow.js";
 import { EscalateToolCallBlock } from "@/ToolCallBlocks/renderers/escalate.js";
@@ -140,6 +141,8 @@ export function resolveToolCallRenderer(context: ToolCallBlockRenderContext) {
   switch (identity.family) {
     case "plan-guidance":
       return PlanGuidanceToolCallBlock;
+    case "best-plan":
+      return BestPlanToolCallBlock;
     case "agent":
       return AgentToolCallBlock;
     case "todo":

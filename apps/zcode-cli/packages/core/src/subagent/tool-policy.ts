@@ -1,4 +1,5 @@
 import {
+  BEST_PLAN_TOOL_NAME,
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
   RESPOND_TO_COORDINATOR_TOOL_NAME,
@@ -14,6 +15,9 @@ import {
 export const SUBAGENT_CHILD_FORCED_DISALLOWED_TOOLS = [
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  // 内联最佳方案卡属于「主代理对用户指令的承诺」，子代理没有自己的用户轮次；
+  // 让它产卡会在父会话里插入一张无人认领的方案，且卡面归属会被误读。
+  BEST_PLAN_TOOL_NAME,
   // AgentSwarm 会再拉起一批子代理；child 持有它等于允许嵌套 swarm，统一剔除。
   AGENT_SWARM_TOOL_NAME,
 ] as const;
