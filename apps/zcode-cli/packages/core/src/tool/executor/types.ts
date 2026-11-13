@@ -92,6 +92,12 @@ export interface ToolExecutorOptions {
   shouldEnqueueBackgroundTaskNotification?: ShouldEnqueueBackgroundTaskNotification;
   sessionId: SessionId;
   turnId?: TurnId;
+  /**
+   * 主代理的「先方案后动手」硬门禁：只在工具面含 ProposeBestPlan 时开启。
+   * 开启后，本 turn 第一次 workspace/git/network/system 副作用工具或子代理派发前
+   * 必须先成功调用 ProposeBestPlan；否则该调用被拒并回注原因。
+   */
+  bestPlanGate?: boolean;
   defaultTimeoutMs?: number;
   permissionTimeoutMs?: number;
   logger?: Logger;
@@ -242,6 +248,9 @@ export interface ToolExecutorDeps {
   shouldEnqueueBackgroundTaskNotification?: ShouldEnqueueBackgroundTaskNotification;
   sessionId: SessionId;
   turnId?: TurnId;
+  bestPlanGate?: boolean;
+  isBestPlanSatisfied?: (turnId: TurnId) => boolean;
+  markBestPlan?: (turnId: TurnId) => void;
   defaultTimeoutMs: number;
   permissionTimeoutMs?: number;
   logger?: Logger;

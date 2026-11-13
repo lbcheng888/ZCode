@@ -1,4 +1,4 @@
-import { toolSearchNameForMode } from "@zcode/contracts";
+import { BEST_PLAN_TOOL_NAME, toolSearchNameForMode } from "@zcode/contracts";
 import { resolveDeferredToolCall } from "../deferred-call.js";
 import {
   type AgentTelemetryErrorCategory,
@@ -186,6 +186,40 @@ async function executeToolCallImpl(
       toolName: toolCall.name,
     });
     telemetry?.finishFailed("lookup", "configuration", result.error);
+    return result;
+  }
+
+  const bestPlanCapability =
+    deps.bestPlanGate === true
+      ? resolveToolCallCapabilityFlags(deps, entry, canonicalToolCall.input)
+      : undefined;
+  if (
+    deps.bestPlanGate === true &&
+    turnId !== undefined &&
+    deps.isBestPlanSatisfied?.(turnId) !== true &&
+    toolRequiresBestPlan(entry, canonicalToolCall.name, bestPlanCapability)
+  ) {
+    const result = createErrorResult(
+      canonicalToolCall,
+      createCoreError(
+        CoreErrorType.InvalidStateTransition,
+        "Call ProposeBestPlan before the first workspace, execution, network or delegation tool in this user turn. The user must see the six-field best plan card first; then retry this tool.",
+        {
+          context: { toolCallId: canonicalToolCall.id, toolName: canonicalToolCall.name },
+          recoverable: true,
+        },
+      ),
+    );
+    result.modelContent = `<tool_use_error>Error: Call ProposeBestPlan first. This tool changes or executes something; the current user turn has no best-plan card yet. Call ProposeBestPlan with the six fields, then retry this tool.</tool_use_error>`;
+    await emitToolCallError(deps, canonicalToolCall.id, traceContext, turnId, result.error);
+    deps.logger?.warn("Tool call blocked until ProposeBestPlan is recorded", {
+      ...traceContextToLogContext(traceContext),
+      event: "tool.call.best_plan_required",
+      module: "core.tool.executor",
+      status: "failed",
+      toolCallId: canonicalToolCall.id,
+      toolName: canonicalToolCall.name,
+    });
     return result;
   }
 
@@ -710,6 +744,10 @@ async function executeToolCallImpl(
         { entry },
       );
 
+      if (canonicalToolCall.name === BEST_PLAN_TOOL_NAME && turnId !== undefined) {
+        deps.markBestPlan?.(turnId);
+      }
+
       await emitToolCallResult(
         deps,
         canonicalToolCall,
@@ -886,4 +924,28 @@ function withHookAdditionalContexts(
 ): ToolExecutionResult {
   if (hookAdditionalContexts.length === 0) return result;
   return { ...result, hookAdditionalContexts: [...hookAdditionalContexts] };
+}
+
+/**
+ * 「先方案后动手」覆盖的副作用面：workspace/git/network/system 四类真实副作用，
+ * 以及会拉起子代理继续动手的 Agent/Task/AgentSwarm。session 类（TodoWrite、
+ * AskUserQuestion、Skill）不阻塞：它们不改变工作区，也不替用户拍板。
+ */
+function toolRequiresBestPlan(
+  entry: ToolEntry,
+  toolName: string,
+  capability: { readOnly?: boolean; sideEffectScope?: string } | undefined,
+): boolean {
+  if (toolName === BEST_PLAN_TOOL_NAME) return false;
+  if (toolName === "Agent" || toolName === "Task" || toolName === "AgentSwarm") return true;
+  if (capability?.readOnly === true) return false;
+  switch (capability?.sideEffectScope ?? entry.metadata.sideEffectScope) {
+    case "workspace":
+    case "git":
+    case "network":
+    case "system":
+      return true;
+    default:
+      return false;
+  }
 }

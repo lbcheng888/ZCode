@@ -22,7 +22,7 @@ import { orderProviderVisibleToolContracts } from "../src/tool/provider-visible-
 import { createToolRegistry } from "../src/tool/registry.js";
 import { READ_ONLY_TOOLS } from "../src/tool/scheduler.js";
 import { SUBAGENT_CHILD_FORCED_DISALLOWED_TOOLS } from "../src/subagent/tool-policy.js";
-import type { ToolExecutionContext } from "../src/tool/types.js";
+import type { ToolEntry, ToolExecutionContext } from "../src/tool/types.js";
 
 const validInput = {
   summary: "Normalize the tool result before the card renders it",
@@ -200,5 +200,100 @@ describe("ProposeBestPlan registration", () => {
 
   it("is force-disallowed in every subagent child, not only workflow children", () => {
     expect(SUBAGENT_CHILD_FORCED_DISALLOWED_TOOLS).toContain(BEST_PLAN_TOOL_NAME);
+  });
+});
+
+describe("ProposeBestPlan runtime gate", () => {
+  function sideEffectEntry(
+    name: string,
+    sideEffectScope: ToolEntry["metadata"]["sideEffectScope"],
+    readOnly: boolean,
+  ): ToolEntry {
+    return {
+      ...bestPlanToolEntry,
+      metadata: {
+        ...bestPlanToolEntry.metadata,
+        name,
+        readOnly,
+        sideEffectScope,
+        description: `${name} test double`,
+      },
+      permission: {
+        ...bestPlanToolEntry.permission,
+        permission: `${name.toLowerCase()}.test`,
+      },
+      handler: async () => ({
+        ok: true as const,
+        planId: "test-plan",
+        message: "ok",
+      }),
+    };
+  }
+
+  async function executorWithGate() {
+    const sessionId = createSessionId("best-plan-gate");
+    const turnId = createTurnId("best-plan-gate");
+    const traceContext = createRootTraceContext({ sessionId, turnId });
+    const events: SessionEvent[] = [];
+    const registry = createToolRegistry();
+    registry.register(bestPlanToolEntry);
+    registry.register(sideEffectEntry("Write", "workspace", false));
+    registry.register(sideEffectEntry("Read", "none", true));
+    registry.register(sideEffectEntry("Agent", "session", false));
+
+    const executor = createToolExecutor({
+      emitEvent: async (event) => {
+        events.push(event);
+      },
+      mode: "build",
+      bestPlanGate: true,
+      permissionBroker: {
+        async requestPermission() {
+          return { decision: "allow" as const };
+        },
+      },
+      permissionService: new PermissionService(defaultPermissionConfig),
+      registry,
+      sessionId,
+      turnId,
+      traceContext,
+      workingDirectory: "/workspace/never-read",
+    });
+
+    const execute = (name: string) =>
+      executor.execute({ id: createToolCallId(name), input: validInput, name }, { traceContext });
+
+    return { events, execute, turnId };
+  }
+
+  it("lets read-only tools run, then blocks the first write and delegation until a plan is recorded", async () => {
+    const { execute, events } = await executorWithGate();
+
+    const read = await execute("Read");
+    expect(read.success).toBe(true);
+
+    const blockedWrite = await execute("Write");
+    expect(blockedWrite.success).toBe(false);
+    expect(blockedWrite.modelContent).toContain("Call ProposeBestPlan first");
+
+    const blockedAgent = await execute("Agent");
+    expect(blockedAgent.success).toBe(false);
+
+    // 门禁拒绝也要留下可见的错误事件，UI 不能停在 running。
+    expect(
+      events.filter((event) => event.type === SessionEventType.ToolCallError).length,
+    ).toBeGreaterThanOrEqual(2);
+
+    const plan = await execute(BEST_PLAN_TOOL_NAME);
+    expect(plan.success).toBe(true);
+
+    const write = await execute("Write");
+    expect(write.success).toBe(true);
+  });
+
+  it("scopes the recorded plan to its own turn", async () => {
+    const { execute } = await executorWithGate();
+    expect((await execute(BEST_PLAN_TOOL_NAME)).success).toBe(true);
+    expect((await execute("Write")).success).toBe(true);
   });
 });

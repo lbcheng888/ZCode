@@ -7,6 +7,7 @@ import {
   registerBuiltInTools,
   traceContextToLogContext,
 } from "../deps.js";
+import { BEST_PLAN_TOOL_NAME } from "@zcode/contracts";
 import type { HookRunner, SessionId, ToolExecutor, TraceContext } from "../deps.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import type { AgentRuntimeDeps } from "../types.js";
@@ -169,6 +170,8 @@ function createRuntimeToolExecutor(
     agentTelemetry: runtime.agentTelemetry.port,
     agentTelemetryActorKind: runtime.agentTelemetry.actorKind,
     registry: runtime.registry,
+    // 主代理工具面才有 ProposeBestPlan；子代理/worker 不注册它，门禁随之关闭。
+    bestPlanGate: runtime.registry.has(BEST_PLAN_TOOL_NAME),
     permissionService: runtime.permissionService,
     permissionBroker: runtime.permissionBroker,
     emitEvent: async (event) => {

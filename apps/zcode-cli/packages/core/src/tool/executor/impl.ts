@@ -27,6 +27,8 @@ export class ToolExecutorImpl implements ToolExecutor {
   private readonly backgroundTasks: BackgroundTaskTracker;
   /** 一个 runtime 一个执行器，序号在同一 assistant 内可比；删除、清空读取状态不影响它。 */
   private readFileStateSnapshotCount = 0;
+  /** 已成功提交最佳方案的 turn；一个 runtime 同时只有一个活动 turn，不必留历史。 */
+  private bestPlanTurnId: TurnId | undefined;
 
   constructor(options: ToolExecutorOptions) {
     this.deps = {
@@ -41,6 +43,11 @@ export class ToolExecutorImpl implements ToolExecutor {
       registerResidencyBlockingWork: options.registerResidencyBlockingWork,
       sessionId: options.sessionId,
       turnId: options.turnId,
+      bestPlanGate: options.bestPlanGate === true,
+      isBestPlanSatisfied: (turnId) => this.bestPlanTurnId === turnId,
+      markBestPlan: (turnId) => {
+        this.bestPlanTurnId = turnId;
+      },
       defaultTimeoutMs: options.defaultTimeoutMs ?? 300000,
       permissionTimeoutMs: options.permissionTimeoutMs,
       logger: options.logger,
