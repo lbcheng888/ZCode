@@ -148,13 +148,12 @@ describe("ProposeBestPlan handler", () => {
 });
 
 describe("ProposeBestPlan registration", () => {
-  it("is registered as a resident read-only tool with no approval", () => {
+  it("is registered as a deferred read-only tool with no approval", () => {
     expect(builtInTools.map((entry) => entry.metadata.name)).toContain(BEST_PLAN_TOOL_NAME);
 
     expect(bestPlanToolEntry.metadata).toMatchObject({
       name: BEST_PLAN_TOOL_NAME,
-      shouldDefer: false,
-      alwaysLoad: true,
+      shouldDefer: true,
       readOnly: true,
       destructive: false,
       concurrentSafe: true,
@@ -163,6 +162,7 @@ describe("ProposeBestPlan registration", () => {
       riskLevel: "low",
       needsApproval: false,
     });
+    expect(bestPlanToolEntry.metadata.alwaysLoad).toBeUndefined();
     expect(bestPlanToolEntry.permission.permission).toBe("best-plan.propose");
     expect(bestPlanToolEntry.permission.needsApproval).toBe(false);
     expect(bestPlanToolEntry.permission.alwaysAllowPatternSources).toEqual(["toolName"]);
@@ -178,6 +178,7 @@ describe("ProposeBestPlan registration", () => {
     expect(description).toContain("do not call this on your own");
     expect(description).toContain("explicitly says the current turn has no plan card yet");
     expect(description).toContain("Fill all six fields");
+    expect(description).toContain("If this tool is not loaded yet, load it with ToolSearch first.");
   });
 
   it("is ordered with the shared provider tool names", () => {

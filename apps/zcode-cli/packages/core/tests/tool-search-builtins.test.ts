@@ -22,8 +22,6 @@ const RESIDENT_NAMES = [
   "GoalCreate",
   "GoalUpdate",
   "Grep",
-  // super-agent 每回合注入；硬门禁兜底时模型也要能直接调用，不能 defer 到 ToolSearch 之后。
-  "ProposeBestPlan",
   "Read",
   "ReportFindings",
   "Skill",
@@ -81,6 +79,8 @@ it.each([false, true])(
       .filter((tool) => tool.name !== "DeferredToolCall" && !RESIDENT_NAMES.includes(tool.name))
       .map((tool) => tool.name)
       .sort();
+    // deferred 后 super-agent 注入照常走 executor；硬门禁兜底靠公告让模型先 ToolSearch 加载。
+    expect(deferredNames).toContain("ProposeBestPlan");
     const announcement = buildToolSearchAnnouncement({ ...input, mode: "native", entries });
     expect(announcement?.metadata?.toolSearchAnnouncement).toEqual({
       addedNames: deferredNames,

@@ -22,6 +22,9 @@ import {
   type TurnId,
 } from "@zcode/contracts";
 
+// 与 core workspace-generate-text.ts 导出的 BEST_PLAN_SUPER_AGENT_QUERY_SOURCE 字面量互指：
+// @zcode/core 公开入口未 re-export 该值，bootstrap 保持本地字面量，改动需两处同步。
+// Core 按此 querySource 把方案卡调用绑定到辅助档（最低公开档位），避免格式化任务深推理。
 const BEST_PLAN_SUPER_AGENT_QUERY_SOURCE = "best_plan_super_agent";
 const BEST_PLAN_SUPER_AGENT_MAX_OUTPUT_TOKENS = 2_048;
 /** 隐藏 system reminder 的注册源名（core system-reminder/source.ts 的 per-request 源）。 */

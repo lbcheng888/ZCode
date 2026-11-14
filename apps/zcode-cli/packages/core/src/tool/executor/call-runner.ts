@@ -211,6 +211,20 @@ async function executeToolCallImpl(
       ),
     );
     result.modelContent = `<tool_use_error>Error: Call ProposeBestPlan first. This tool changes or executes something; the current user turn has no best-plan card yet. Call ProposeBestPlan with the six fields, then retry this tool.</tool_use_error>`;
+    // deferred 后 ProposeBestPlan 的 schema 可能尚未加载；被拦时顺带告知加载路径，门禁判定不变。
+    const search = options?.toolSearch;
+    if (
+      search?.enabled &&
+      !search.discovered.has(BEST_PLAN_TOOL_NAME) &&
+      search.catalog.some((tool) => tool.name === BEST_PLAN_TOOL_NAME && tool.deferred)
+    ) {
+      result.modelContent =
+        (result.modelContent ?? "") +
+        ` Load the tool first: call ${toolSearchNameForMode(search.mode)} with query "select:${BEST_PLAN_TOOL_NAME}", then call it with the six fields.` +
+        (search.mode === "local"
+          ? `\nCall DeferredToolCall with {name: "${BEST_PLAN_TOOL_NAME}", input: {...}}.`
+          : "");
+    }
     await emitToolCallError(deps, canonicalToolCall.id, traceContext, turnId, result.error);
     deps.logger?.warn("Tool call blocked until ProposeBestPlan is recorded", {
       ...traceContextToLogContext(traceContext),

@@ -27,10 +27,11 @@ const MAX_BEST_PLAN_MODEL_BYTES = 4_096;
 
 /**
  * 描述即调用契约：super-agent 通常自动提交，模型只在写/执行工具结果明确要求当前 turn
- * 没有方案卡时自己调用；填满全部字段后重试被拦截的工具。
+ * 没有方案卡时自己调用；填满全部字段后重试被拦截的工具。deferred 后 schema 不在请求里，
+ * 末句告知加载路径。
  */
 const BEST_PLAN_DESCRIPTION =
-  "Super-agent normally submits the best plan automatically before side-effecting tools, so do not call this on your own. Call it only when a write or execution tool result explicitly says the current turn has no plan card yet. Fill all six fields, then retry the tool.";
+  "Super-agent normally submits the best plan automatically before side-effecting tools, so do not call this on your own. Call it only when a write or execution tool result explicitly says the current turn has no plan card yet. Fill all six fields, then retry the tool. If this tool is not loaded yet, load it with ToolSearch first.";
 
 const bestPlanHandler: ToolHandler = async (input) => {
   const parsed = BestPlanInputSchema.parse(input);
@@ -60,10 +61,9 @@ function formatBestPlanModelContent(output: unknown): ModelMessageContent {
 export const bestPlanToolEntry: ToolEntry = {
   capability: "Record the six-field best plan for the current user instruction as an inline card",
   metadata: {
-    // 常驻而非延迟加载：它必须出现在每条指令开头；defer 到 ToolSearch 之后等于让模型
-    // 先找到一个才想起要交方案。
-    shouldDefer: false,
-    alwaysLoad: true,
+    // deferred：正常路径由 super-agent 每回合自动注入，worker 从不自己调用，常驻 schema
+    // 是每请求纯开销；super-agent 失败后的硬门禁兜底靠 ToolSearch 公告让模型发现并加载本工具。
+    shouldDefer: true,
     name: BEST_PLAN_TOOL_NAME,
     description: BEST_PLAN_DESCRIPTION,
     allowedInPlanMode: true,

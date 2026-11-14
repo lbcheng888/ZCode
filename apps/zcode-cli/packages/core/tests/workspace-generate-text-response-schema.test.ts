@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createSessionId, type Model, type ModelRequest } from "@zcode/contracts";
+import {
+  createSessionId,
+  type Model,
+  type ModelOptions,
+  type ModelRequest,
+} from "@zcode/contracts";
 import { createTestAgentRuntime } from "./test-agent-runtime.js";
 import { createTestModelSelection } from "./test-model-selection.js";
 import { createTestSessionEventStore } from "./test-event-store.js";
@@ -15,7 +20,7 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
   },
 };
 
-function createCapturingModel(requests: ModelRequest[]): Model {
+function createCapturingModel(requests: ModelRequest[], binds?: ModelOptions[]): Model {
   const model: Model = {
     providerId: "test-provider",
     modelId: "glm-test",
@@ -35,7 +40,8 @@ function createCapturingModel(requests: ModelRequest[]): Model {
       maxOutputTokens: 128_000,
       reasoningLevel: "disabled",
     },
-    bind(_options) {
+    bind(options) {
+      binds?.push(options);
       return this;
     },
     async generateText(request: ModelRequest) {
@@ -99,5 +105,27 @@ describe("workspace generateText responseJsonSchema", () => {
     expect(requests).toHaveLength(1);
     expect(Object.keys(requests[0]!)).not.toContain("responseJsonSchema");
     expect(requests[0]).not.toHaveProperty("responseJsonSchema");
+  });
+
+  it("binds auxiliary options for the best_plan_super_agent query source", async () => {
+    const requests: ModelRequest[] = [];
+    const binds: ModelOptions[] = [];
+    const runtime = createRuntimeWithModel(createCapturingModel(requests, binds));
+
+    await runtime.generateWorkspaceText({
+      selection: { providerId: "test-provider", modelId: "glm-test" },
+      prompt: "Generate a six-field plan",
+      querySource: "best_plan_super_agent",
+      maxOutputTokens: 2_048,
+      responseJsonSchema: RESPONSE_SCHEMA,
+    });
+
+    // 方案卡是格式化任务：与 git_commit_message / input_prediction 同走辅助档，
+    // 绑定最低公开档位 + 辅助输出预算，砍掉 reasoning token 放大。
+    expect(binds).toEqual([{ reasoningLevel: "disabled", maxOutputTokens: 5_000 }]);
+    // 绑定不改变请求行为：结构化 schema 与调用方预算仍原样传递。
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.responseJsonSchema).toBe(RESPONSE_SCHEMA);
+    expect(requests[0]!.options).toEqual({ maxOutputTokens: 2_048 });
   });
 });

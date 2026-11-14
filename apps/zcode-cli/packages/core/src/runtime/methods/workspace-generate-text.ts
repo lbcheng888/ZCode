@@ -28,6 +28,10 @@ const CONNECTIVITY_PROBE_MAX_OUTPUT_TOKENS = 512;
 const CONNECTIVITY_PROBE_SYSTEM = "You are ZCode connectivity probe.";
 const CONNECTIVITY_PROBE_USER = "hi";
 const GIT_COMMIT_MESSAGE_QUERY_SOURCE = "git_commit_message";
+// super-agent 方案卡是六字段 JSON 格式化任务，不需要深推理；Core 在下方按此源绑定辅助档。
+// bootstrap 侧同名字面量见 packages/bootstrap/src/app/best-plan-super-agent.ts（@zcode/core
+// 公开入口未 re-export 本值，两处保持字面量互指，改动需同步）。
+export const BEST_PLAN_SUPER_AGENT_QUERY_SOURCE = "best_plan_super_agent";
 
 export interface WorkspaceGenerateTextInput {
   selection: ModelSelection;
@@ -153,8 +157,11 @@ async function generateWorkspaceTextImpl(
   const baseModel = createRuntimeModel(this, { selection: requestedSelection, scope: "workspace" });
   // 辅助请求需要的是最低公开档位，不是扫描 off/nothink 等名称后强制关闭。
   // 输入预测按键触发、要求低延迟，同样走最低档位。
+  // super-agent 方案卡是格式化任务，绑最低档砍掉 reasoning token 放大。
   const model =
-    querySource === GIT_COMMIT_MESSAGE_QUERY_SOURCE || querySource === INPUT_PREDICTION_QUERY_SOURCE
+    querySource === GIT_COMMIT_MESSAGE_QUERY_SOURCE ||
+    querySource === INPUT_PREDICTION_QUERY_SOURCE ||
+    querySource === BEST_PLAN_SUPER_AGENT_QUERY_SOURCE
       ? baseModel.bind(auxiliaryModelOptions(baseModel))
       : baseModel;
   const baseTraceContext = options?.traceContext ?? this.rootTraceContext;
