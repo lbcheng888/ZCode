@@ -842,6 +842,28 @@ export type MessagePart =
   | PatchPart
   | ToolPart;
 
+/**
+ * super-agent 注入的合成工具调用（ProposeBestPlan 卡等）落库入参：在宿主 assistant
+ * message 上补一条 completed tool part；同 callID 重放幂等。字段形状与 turn-tools
+ * 正常路径（tool-result-settlement）一致，冷恢复 hydration 才能从 tool part 合成卡片。
+ */
+export interface PersistSyntheticToolPartInput {
+  turnId: TurnId;
+  parentUserMessageId?: MessageId;
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output: unknown;
+  startedAt: number;
+  endedAt: number;
+}
+
+/** persistSyntheticToolPart 落成的 transcript 事实 id：宿主 assistant message 与 tool part。 */
+export interface PersistSyntheticToolPartResult {
+  assistantMessageId: MessageId;
+  partId: string;
+}
+
 /** 浏览器轮尾截图 tool part 的 `state.input.source`。它只用于展示，不是模型块，不带 blockIndex。 */
 export const BROWSER_TURN_SCREENSHOT_SOURCE = "browser_turn_end" as const;
 
@@ -1187,12 +1209,36 @@ export interface TaskUsageQueryResult {
   inputBaselineBySource: Record<string, number>;
 }
 
+/**
+ * 整会话用量聚合（冷恢复种子重建 TPS/模型用时用），字段与共享
+ * sessionUsageStatsSchema 一一对应，全部来自 SQLite 只读聚合。
+ */
+export interface SessionUsageStatsAggregates {
+  /** turn_usage 里该 session 的总行数（含 running/error；UI 的轮数口径是回合数）。 */
+  turns: number;
+  /** model_usage 里 query_source='main_turn' 且 status='completed' 的行数。 */
+  steps: number;
+  /** 上述完成主会话请求中 duration_ms>0 的墙钟时间总和。 */
+  llmMs: number;
+  /** duration_ms>0 且 time_to_first_token_ms>0 的 duration_ms - time_to_first_token_ms 总和。 */
+  decodeMs: number;
+  /** duration_ms>0 的完成主会话请求 output_tokens 总和（无 output 求和为 0）。 */
+  decodeTokens: number;
+  /** time_to_first_token_ms>0 的 first token 延迟总和，覆盖 ttftSteps 个请求。 */
+  ttftMs: number;
+  /** 有 first token 时间的完成主会话请求数。 */
+  ttftSteps: number;
+  /** tool_usage 里 duration_ms>0 的工具执行时间总和。 */
+  toolMs: number;
+}
+
 export interface UsageStorePort {
   recordModelUsage(input: ModelUsageRecord): Promise<void>;
   upsertTurnUsage(input: TurnUsageRecord): Promise<void>;
   upsertToolUsage(input: ToolUsageRecord): Promise<void>;
   queryAppUsage(input: AppUsageQueryInput): Promise<AppUsageQueryResult>;
   queryTaskUsage(input: TaskUsageQueryInput): Promise<TaskUsageQueryResult>;
+  querySessionUsageStats(sessionID: SessionId): Promise<SessionUsageStatsAggregates | null>;
 }
 
 export interface LocalSettingStorePort {

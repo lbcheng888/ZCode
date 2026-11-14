@@ -5078,6 +5078,94 @@ describe("会话统计 sessionStats", () => {
       ttftSteps: 0,
     });
   });
+
+  it("seed 带 sessionStats 且投影缺席时，snapshot.usage.sessionStats 等于种子", () => {
+    const log = new EventLog();
+    // 冷恢复旧会话：逐请求事件已淘汰，日志里没有任何可累计的 model step。
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 200_000 });
+    const { projection } = runAll(log.events);
+    expect(projection.getSnapshot().usage.sessionStats).toBeUndefined();
+
+    const seedStats = {
+      turns: 4,
+      steps: 7,
+      decodeMs: 3_400,
+      decodeTokens: 1_250,
+      llmMs: 5_200,
+      toolMs: 900,
+      ttftMs: 1_800,
+      ttftSteps: 6,
+    };
+    projection.seedUsage({
+      contextWindow: { usedTokens: 16_727, maxTokens: 200_000, autoCompactThresholdTokens: null },
+      sessionStats: seedStats,
+    });
+    expect(projection.getSnapshot().usage.sessionStats).toEqual(seedStats);
+    // 统计补块不挡 token 水位：同一颗种子的分母照常落位。
+    expect(projection.getSnapshot().usage.contextWindow).toMatchObject({
+      usedTokens: 16_727,
+      maxTokens: 200_000,
+    });
+  });
+
+  it("投影已重放出 sessionStats 时，迟到种子不得覆盖事件权威计数", () => {
+    const log = new EventLog();
+    const turnId = "turn-seed-no-overwrite";
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 200_000 });
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "重放轮", messageId: "user-seed-no-overwrite" },
+      { turnId },
+    );
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      mainRequest({
+        requestId: "request-seed-no-overwrite",
+        durationMs: 1_000,
+        timeToFirstTextMs: 200,
+        outputTokens: 300,
+      }),
+      { turnId },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "done", tokenCount: 300, toolCallCount: 0, duration: 1_200, resultType: "success" },
+      { turnId },
+    );
+    const { projection } = runAll(log.events);
+    const replayed = projection.getSnapshot().usage.sessionStats;
+    expect(replayed).toEqual({
+      turns: 1,
+      steps: 1,
+      decodeMs: 800,
+      decodeTokens: 300,
+      llmMs: 1_000,
+      toolMs: 0,
+      ttftMs: 200,
+      ttftSteps: 1,
+    });
+
+    // 与重放计数明显不同的种子：copyFrom 纪律下只能补缺席，不能改写已重放的读数。
+    projection.seedUsage({
+      contextWindow: { usedTokens: 16_727, maxTokens: 200_000, autoCompactThresholdTokens: null },
+      sessionStats: {
+        turns: 9,
+        steps: 9,
+        decodeMs: 99_000,
+        decodeTokens: 99_000,
+        llmMs: 99_000,
+        toolMs: 99_000,
+        ttftMs: 99_000,
+        ttftSteps: 9,
+      },
+    });
+    expect(projection.getSnapshot().usage.sessionStats).toEqual(replayed);
+    // 种子的 token 半段照常生效，证明守卫没有把整颗种子拒之门外。
+    expect(projection.getSnapshot().usage.contextWindow).toMatchObject({
+      usedTokens: 16_727,
+      maxTokens: 200_000,
+    });
+  });
 });
 
 // ── 结构性黄金测试（13-golden-test-mapping §v4 新增）──

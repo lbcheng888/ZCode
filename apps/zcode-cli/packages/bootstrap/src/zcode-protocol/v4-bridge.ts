@@ -32,6 +32,7 @@ import {
   type V4ConversationFileChangesResult,
   type V4ConversationFileRewindPreviewResult,
   type SessionSummary,
+  type SessionUsageStats,
 } from "@zcode/shared/zcode-protocol-v4";
 import { V4CommandExecutor } from "../zcode-protocol-v4/commands/executor.js";
 import {
@@ -99,6 +100,7 @@ import type {
   StableForkGoalBoundaryMetadata,
   TraceId,
   TurnId,
+  UsageStorePort,
   WorkspaceId,
 } from "@zcode/contracts";
 import { formatModelPickerValue } from "@zcode/shared/model-selection";
@@ -154,6 +156,44 @@ function sessionUsageSeedFromRuntimeContextUsage(
       ...(contextUsage.breakdown ? { breakdown: contextUsage.breakdown } : {}),
     },
   };
+}
+
+/**
+ * 冷恢复/旧会话重开的 usage 种子：在 token 水位之上再补 store 聚合的整会话统计。
+ * 旧会话的逐请求事件可能已被内存淘汰（投影 sessionStats 缺席），SQLite 只读聚合是
+ * 唯一可信整会话读数；投影里已重放出的计数由 seedUsage 的 copyFrom 纪律保护，
+ * 这里的聚合只负责“缺席时补”。
+ */
+async function sessionUsageSeedFromStore(
+  context: ZCodeProtocolAgentServerContext,
+  sessionId: string,
+  contextUsage: ZCodeSessionContextUsage | undefined,
+  contextWindowOverride?: number,
+): Promise<SessionUsageSeed | null> {
+  const seed = sessionUsageSeedFromRuntimeContextUsage(contextUsage, contextWindowOverride);
+  if (!seed) {
+    return null;
+  }
+  // SessionStorePort 与 UsageStorePort 是分离接口，但实际 store 同时实现两者；
+  // 与 server-operations 的 usageStats 同一运行时收窄方式访问只读聚合方法。
+  const usageStore = context.deps.sessionStore as Partial<UsageStorePort>;
+  const aggregates = await usageStore.querySessionUsageStats?.(sessionId as SessionId);
+  // null（无 turn_usage 行）或 0 轮 = 尚无可信整会话读数；协议里 sessionStats
+  // 缺席就是这个语义（unknown≠0），不下发零读数种子。
+  if (!aggregates || aggregates.turns <= 0) {
+    return seed;
+  }
+  const sessionStats: SessionUsageStats = {
+    turns: aggregates.turns,
+    steps: aggregates.steps,
+    llmMs: aggregates.llmMs,
+    decodeMs: aggregates.decodeMs,
+    decodeTokens: aggregates.decodeTokens,
+    ttftMs: aggregates.ttftMs,
+    ttftSteps: aggregates.ttftSteps,
+    toolMs: aggregates.toolMs,
+  };
+  return { ...seed, sessionStats };
 }
 
 type RunningSubagentSeed = SessionSubagentsSeed["running"][number];
@@ -1956,7 +1996,9 @@ export function createConversationV4Gateway(
       const contextUsage = await readSessionContextUsage(context, sessionId, persistedMessages);
       // usage seed 会在 hydration 后再次覆盖首帧分母；必须与合成事件
       // 使用同一份当前模型 registry 真值，不能把旧 runtime projection 的窗口写回来。
-      return sessionUsageSeedFromRuntimeContextUsage(
+      return sessionUsageSeedFromStore(
+        context,
+        sessionId,
         contextUsage,
         resolveSessionModelContextWindow(context, record),
       );
@@ -2283,7 +2325,9 @@ export function createConversationV4Gateway(
       // 冷恢复 transcript 不保存模型能力，旧 hydration 自行填 20 万；
       // provider registry 已在 resume 前同步完成，应按恢复/退避后的当前模型精确取值。
       const contextWindow = resolveSessionModelContextWindow(context, record);
-      const usageSeed = sessionUsageSeedFromRuntimeContextUsage(
+      const usageSeed = await sessionUsageSeedFromStore(
+        context,
+        sessionId,
         await readSessionContextUsage(context, sessionId, source.messages),
         contextWindow,
       );

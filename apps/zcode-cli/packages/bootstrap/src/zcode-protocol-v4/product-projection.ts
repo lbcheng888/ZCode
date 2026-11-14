@@ -116,6 +116,7 @@ import type {
   RunningSubagentSummary,
   SessionControl,
   SessionUsageState,
+  SessionUsageStats,
   StatePatch,
   SubagentProjectionState,
   SubagentRow,
@@ -276,6 +277,11 @@ export interface SessionUsageSeed {
     maxTokens: number | null;
   };
   cumulative?: Partial<SessionUsageState["cumulative"]>;
+  /**
+   * 冷恢复 store 聚合的整会话读数；与 token 水位同一 copyFrom 纪律——
+   * 投影已重放出的 sessionStats 是事件权威，种子只在投影缺席时补。
+   */
+  sessionStats?: SessionUsageStats;
 }
 
 interface ContextWindowProjectionState {
@@ -1090,7 +1096,14 @@ export class ProductProjection {
   }
 
   seedUsage(seed: SessionUsageSeed): void {
-    const current = this.snapshot.usage;
+    let current = this.snapshot.usage;
+    // 整会话统计种子：旧会话的逐请求事件可能已被内存淘汰（sessionStats 缺席），
+    // store 聚合是唯一可信整会话读数；与 token 水位同一 copyFrom 纪律——
+    // 重放已累计出的 sessionStats 不得被种子覆盖，只在投影缺席时补。
+    if (!current.sessionStats && seed.sessionStats) {
+      current = { ...current, sessionStats: seed.sessionStats };
+      this.snapshot = { ...this.snapshot, usage: current };
+    }
     const currentContextWindow = current.contextWindow;
     if (currentContextWindow) {
       this.contextWindowState.usedTokens = currentContextWindow.usedTokens;

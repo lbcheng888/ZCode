@@ -6,6 +6,8 @@ import type {
   AppUsageQueryInput,
   AppUsageQueryResult,
   AppUsageToolRow,
+  SessionId,
+  SessionUsageStatsAggregates,
   TaskUsageQueryInput,
   TaskUsageQueryResult,
   ModelUsageRecord,
@@ -648,6 +650,56 @@ export async function queryTaskUsage(
     modelRequestCount: rows.length,
     modelErrorCount,
     inputBaselineBySource,
+  };
+}
+
+// 冷恢复种子：三条只读聚合重建整会话统计（轮数/主会话模型步数/墙钟/工具用时）。
+// turn_usage 无行返回 null（尚无可信整会话读数），其余字段空批归 0。
+export async function querySessionUsageStats(
+  db: DatabaseSync,
+  sessionID: SessionId,
+): Promise<SessionUsageStatsAggregates | null> {
+  const turnRow = db
+    .prepare(`select count(*) as turns from turn_usage where session_id = ?`)
+    .get(sessionID) as { turns: number | null };
+  if (Number(turnRow.turns ?? 0) === 0) {
+    return null;
+  }
+
+  // completed 主会话模型请求批：steps 计数；llm/decode/ttft 只累计有正时长的行，
+  // error 行与 duration 为 null 的行经 case 过滤自然归 0。
+  const modelRow = db
+    .prepare(
+      `select
+         count(*) as steps,
+         coalesce(sum(case when duration_ms > 0 then duration_ms else 0 end), 0) as llmMs,
+         coalesce(sum(case when duration_ms > 0 and time_to_first_token_ms > 0
+           then duration_ms - time_to_first_token_ms else 0 end), 0) as decodeMs,
+         coalesce(sum(case when duration_ms > 0 then output_tokens else 0 end), 0) as decodeTokens,
+         coalesce(sum(case when time_to_first_token_ms > 0 then time_to_first_token_ms else 0 end), 0) as ttftMs,
+         coalesce(sum(case when time_to_first_token_ms > 0 then 1 else 0 end), 0) as ttftSteps
+       from model_usage
+       where session_id = ? and query_source = 'main_turn' and status = 'completed'`,
+    )
+    .get(sessionID) as Record<string, number | null>;
+
+  const toolRow = db
+    .prepare(
+      `select coalesce(sum(duration_ms), 0) as toolMs
+       from tool_usage
+       where session_id = ? and duration_ms > 0`,
+    )
+    .get(sessionID) as Record<string, number | null>;
+
+  return {
+    turns: Number(turnRow.turns),
+    steps: Number(modelRow.steps),
+    llmMs: Number(modelRow.llmMs),
+    decodeMs: Number(modelRow.decodeMs),
+    decodeTokens: Number(modelRow.decodeTokens),
+    ttftMs: Number(modelRow.ttftMs),
+    ttftSteps: Number(modelRow.ttftSteps),
+    toolMs: Number(toolRow.toolMs),
   };
 }
 

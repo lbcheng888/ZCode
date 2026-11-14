@@ -278,6 +278,108 @@ describe("queryAppUsage", () => {
   });
 });
 
+describe("querySessionUsageStats", () => {
+  it("aggregates session-level turn/step/tool stats and returns null for sessions without turn rows", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-session-usage-stats-"));
+    const dbPath = join(tempRoot, "session.sqlite");
+    const store = await createSqliteSessionStore({ dbPath });
+    const sessionID = createSessionId("session-stats");
+    const emptySessionID = createSessionId("session-stats-empty");
+    const turnID = createTurnId("session-stats-turn");
+    const now = Date.now();
+    try {
+      for (const id of [sessionID, emptySessionID]) {
+        await store.createSession({
+          id,
+          projectID: createProjectId(`project-${id}`),
+          slug: String(id),
+          directory: tempRoot,
+          title: String(id),
+          version: "0.1.0",
+        });
+      }
+      // completed 主会话请求：唯一的 steps/llm/decode/ttft 计入来源。
+      await store.recordModelUsage({
+        id: "stats-model-1",
+        logicalRequestId: "stats-request-1",
+        sessionID,
+        turnID,
+        querySource: "main_turn",
+        providerId: "p",
+        modelId: "model-a",
+        status: "completed",
+        startedAt: now,
+        durationMs: 1000,
+        timeToFirstTokenMs: 200,
+        outputTokens: 30,
+      });
+      // error 且无 duration：不得进入任何聚合。
+      await store.recordModelUsage({
+        id: "stats-model-2",
+        logicalRequestId: "stats-request-2",
+        sessionID,
+        turnID,
+        querySource: "main_turn",
+        providerId: "p",
+        modelId: "model-a",
+        status: "error",
+        startedAt: now + 1,
+      });
+      // 其他 query_source（compact）即使 completed 也不计入主会话步数。
+      await store.recordModelUsage({
+        id: "stats-model-compact",
+        logicalRequestId: "stats-request-compact",
+        sessionID,
+        turnID,
+        querySource: "compact",
+        providerId: "p",
+        modelId: "model-a",
+        status: "completed",
+        startedAt: now + 2,
+        durationMs: 500,
+        timeToFirstTokenMs: 100,
+        outputTokens: 99,
+      });
+      await store.upsertTurnUsage({
+        sessionID,
+        turnID,
+        status: "completed",
+        startedAt: now,
+        durationMs: 2000,
+      });
+      await store.upsertToolUsage({
+        id: "stats-tool-1",
+        sessionID,
+        turnID,
+        toolCallID: createToolCallId("stats-call-1"),
+        toolName: "Read",
+        status: "completed",
+        startedAt: now,
+        durationMs: 120,
+      });
+
+      const stats = await store.querySessionUsageStats(sessionID);
+
+      expect(stats).toEqual({
+        turns: 1,
+        steps: 1,
+        llmMs: 1000,
+        decodeMs: 800,
+        decodeTokens: 30,
+        ttftMs: 200,
+        ttftSteps: 1,
+        toolMs: 120,
+      });
+
+      // 无任何 turn_usage 行的会话没有可信整会话读数。
+      expect(await store.querySessionUsageStats(emptySessionID)).toBeNull();
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+});
+
 describe("queryTaskUsage", () => {
   it("aggregates model usage by session id", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "zcode-task-usage-query-"));
