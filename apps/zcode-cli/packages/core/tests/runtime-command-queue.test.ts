@@ -9,7 +9,11 @@ import type { AgentRuntimeInternal } from "../src/runtime/internal.js";
 import {
   acquireForegroundPromotionLease,
   drainRuntimeCommandQueue,
+  enqueueRuntimeCommand,
+  releaseForegroundPromotionLease,
+  stopActiveForegroundExecution,
 } from "../src/runtime/methods/runtime-command-queue.js";
+import { createTurnCancelledError } from "../src/runtime/helpers/index.js";
 
 function command(id: string, priority: RuntimeCommandPriority): RuntimeCommand {
   return {
@@ -222,5 +226,151 @@ describe("RuntimeCommandQueue", () => {
         promotedInputId: "notification-b",
       }),
     ).toEqual({ kind: "busy" });
+  });
+});
+
+describe("RuntimeCommandQueue drain failure isolation", () => {
+  function settledPromptCommand(
+    id: string,
+    priority: RuntimeCommandPriority,
+  ): { command: RuntimeCommand; completion: Promise<unknown> } {
+    let resolve!: (result: unknown) => void;
+    let reject!: (error: unknown) => void;
+    const completion = new Promise<unknown>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return {
+      command: { ...promptCommand(id, priority), reject, resolve } as RuntimeCommand,
+      completion,
+    };
+  }
+
+  // 先挂上结算观察，保证命令 promise 的拒绝不会在测试自己 await 之前被判定为 unhandled。
+  function observeCompletion(completion: Promise<unknown>): Promise<Record<string, unknown>> {
+    return completion.then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+  }
+
+  it.each([
+    ["普通错误", () => new Error("turn failed")],
+    ["TurnCancelled", () => createTurnCancelledError(new Error("send-now preempted the turn"))],
+  ] as const)("rejects a failed prompt (%s) and keeps draining later commands", async (
+    _label,
+    createFailure,
+  ) => {
+    const executionOrder: string[] = [];
+    const failure = createFailure();
+    const runtime = {
+      activeForegroundExecution: undefined,
+      activeTurn: undefined,
+      activeTurnStartReservation: undefined,
+      executeTurnCommand: vi.fn(async (input: string) => {
+        executionOrder.push(input);
+        if (input === "first-prompt") throw failure;
+        return {};
+      }),
+      foregroundPromotionLease: undefined,
+      runtimeCommandDrainActive: false,
+      runtimeCommandQueue: createRuntimeCommandQueue(),
+    } as unknown as AgentRuntimeInternal;
+    const first = settledPromptCommand("first-prompt", "next");
+    const second = settledPromptCommand("second-prompt", "later");
+    const firstOutcome = observeCompletion(first.completion);
+    const secondOutcome = observeCompletion(second.completion);
+    runtime.runtimeCommandQueue.enqueue(first.command);
+    runtime.runtimeCommandQueue.enqueue(second.command);
+
+    await expect(drainRuntimeCommandQueue.call(runtime)).resolves.toBeUndefined();
+    expect(await firstOutcome).toEqual({ error: failure });
+    expect(await secondOutcome).toEqual({ result: {} });
+    expect(executionOrder).toEqual(["first-prompt", "second-prompt"]);
+  });
+
+  it("keeps draining when send-now preempts a running prompt and enqueues the next message", async () => {
+    const executionOrder: string[] = [];
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason);
+    };
+    const cancelled = createTurnCancelledError(new Error("send-now preempted the turn"));
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      const first = settledPromptCommand("preempted-prompt", "next");
+      const second = settledPromptCommand("send-now-prompt", "now");
+      const firstOutcome = observeCompletion(first.completion);
+      const secondOutcome = observeCompletion(second.completion);
+      const runtime = {
+        activeForegroundExecution: undefined,
+        activeTurn: undefined,
+        activeTurnStartReservation: undefined,
+        drainRuntimeCommandQueue: vi.fn(() => drainRuntimeCommandQueue.call(runtime)),
+        executeTurnCommand: vi.fn(
+          async (
+            input: string,
+            _attachments: unknown,
+            options?: { abortSignal?: AbortSignal },
+          ) => {
+            executionOrder.push(input);
+            if (input !== "preempted-prompt") return {};
+            // 模拟 send-now：取消正在跑的 turn，再把用户新消息排进队列。
+            stopActiveForegroundExecution.call(runtime, {
+              preserveQueueAutoDrainOnCancel: true,
+            });
+            expect(options?.abortSignal?.aborted).toBe(true);
+            enqueueRuntimeCommand.call(runtime, second.command);
+            throw cancelled;
+          },
+        ),
+        foregroundPromotionLease: undefined,
+        runtimeCommandDrainActive: false,
+        runtimeCommandQueue: createRuntimeCommandQueue(),
+      } as unknown as AgentRuntimeInternal;
+      runtime.runtimeCommandQueue.enqueue(first.command);
+
+      await expect(drainRuntimeCommandQueue.call(runtime)).resolves.toBeUndefined();
+      expect(await firstOutcome).toEqual({ error: cancelled });
+      expect(await secondOutcome).toEqual({ result: {} });
+      expect(executionOrder).toEqual(["preempted-prompt", "send-now-prompt"]);
+      // 让事件循环把可能的未处理拒绝暴露出来，再断言确实一条都没有。
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+  });
+
+  it("logs both fire-and-forget drain failures instead of leaking them", async () => {
+    const drainError = new Error("queue drain failed");
+    const logError = vi.fn();
+    const runtime = {
+      drainRuntimeCommandQueue: vi.fn(async () => {
+        throw drainError;
+      }),
+      foregroundPromotionLease: {
+        leaseId: "lease-drain-failure",
+        promotedInputId: "prompt-drain-failure",
+      },
+      logger: { error: logError },
+      runtimeCommandQueue: createRuntimeCommandQueue(),
+    } as unknown as AgentRuntimeInternal;
+
+    enqueueRuntimeCommand.call(runtime, promptCommand("prompt-drain-failure", "next"));
+    expect(releaseForegroundPromotionLease.call(runtime, "lease-drain-failure")).toBe(true);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(logError).toHaveBeenCalledTimes(2);
+    for (const call of logError.mock.calls) {
+      expect(call[0]).toBe("Runtime command queue drain failed");
+      expect(call[1]).toBe(drainError);
+      expect(call[2]).toMatchObject({
+        errorMessage: "queue drain failed",
+        event: "runtime_command_queue.drain_failed",
+        module: "core.runtime",
+        status: "failed",
+      });
+    }
   });
 });

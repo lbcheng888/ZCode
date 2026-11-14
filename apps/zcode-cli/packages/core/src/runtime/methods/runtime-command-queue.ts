@@ -44,7 +44,20 @@ export function enqueueRuntimeCommand(this: AgentRuntimeInternal, command: Runti
       queueSize: this.runtimeCommandQueue.size(),
     });
   }
-  void this.drainRuntimeCommandQueue();
+  void this.drainRuntimeCommandQueue().catch((error) => {
+    // drain 在事件循环外被点火，没人 await；不在这里记录就会变成未处理的 Promise 拒绝
+    // （CLI 实测会以 unhandledRejection 直接退出）。
+    this.logger?.error(
+      "Runtime command queue drain failed",
+      error instanceof Error ? error : new Error(String(error)),
+      {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        event: "runtime_command_queue.drain_failed",
+        module: "core.runtime",
+        status: "failed",
+      },
+    );
+  });
 }
 
 export async function drainRuntimeCommandQueue(this: AgentRuntimeInternal): Promise<void> {
@@ -170,7 +183,18 @@ export function releaseForegroundPromotionLease(
   if (this.foregroundPromotionLease?.leaseId !== leaseId) return false;
   this.foregroundPromotionLease = undefined;
   // 启动前失败时 B 可能已在 lease 后等待；释放必须主动恢复 drain，不能等下一条 enqueue。
-  void this.drainRuntimeCommandQueue();
+  void this.drainRuntimeCommandQueue().catch((error) => {
+    this.logger?.error(
+      "Runtime command queue drain failed",
+      error instanceof Error ? error : new Error(String(error)),
+      {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        event: "runtime_command_queue.drain_failed",
+        module: "core.runtime",
+        status: "failed",
+      },
+    );
+  });
   return true;
 }
 
@@ -204,6 +228,11 @@ async function runRuntimeCommand(
         // goal 续跑不挂在 prompt 命令尾部(设计 §3.6):drain 收口后的空闲沿由
         // idle 驱动器统一预约。旧 continueActiveTargetAfterTurn 触发源已删除。
         command.resolve(result);
+      } catch (error) {
+        // turn 失败是 command 失败，不是 drain 失败：send-now 抢占取消旧 turn 时，
+        // 新消息必须还能被同一次 drain 继续执行，不能被旧 turn 的取消拖死。
+        command.reject(error);
+        return;
       } finally {
         this.runtimeCommandQueue.clearCancelPending(command.id);
       }
