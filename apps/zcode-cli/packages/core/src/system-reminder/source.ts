@@ -62,6 +62,7 @@ export const SYSTEM_REMINDER_PER_REQUEST_SOURCES = [
   "target_anchor",
   "target_budget_outcome",
   "best_plan_super_agent",
+  "goal_continuation",
 ] as const;
 
 export type SystemReminderPersistedSource = (typeof SYSTEM_REMINDER_PERSISTED_SOURCES)[number];
@@ -232,6 +233,15 @@ const SYSTEM_REMINDER_DESCRIPTORS: Record<SystemReminderSource, DescriptorShape>
     "per_current_turn",
     true,
     "sr.best_plan_super_agent",
+  ),
+  // goal 长程续跑纪律的回合起跑注入（queueTurnSystemReminder，kimi goalInjection 先例）：
+  // goal 续跑回合起跑时一次性 system reminder，随当前 turn 的 request history 释放，
+  // 不进持久历史、不出现在 UI 消息流。
+  goal_continuation: descriptor(
+    "current_turn",
+    "per_current_turn",
+    true,
+    "sr.goal_continuation",
   ),
   // 第四批 4a-0（2026-09-12）：原 plugin_ui_state 源已删除，插件给模型的信息改走 ui/update-model-context。
 };

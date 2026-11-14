@@ -112,6 +112,8 @@ export const WC_SAFE_FLAGS = {
   "--words": "none",
 } as const satisfies Readonly<Record<string, SafeFlagValue>>;
 
+// rg 的 -r/--replace 只改写 stdout 输出（无 sed -i 式 in-place 模式），按带值 flag 放行；
+// 未列出的 --pre（执行任意预处理命令）等仍 fail-closed。
 export const RG_SAFE_FLAGS = {
   "-A": "number",
   "-B": "number",
@@ -130,6 +132,7 @@ export const RG_SAFE_FLAGS = {
   "-l": "none",
   "-m": "number",
   "-n": "none",
+  "-r": "string",
   "-s": "none",
   "-t": "string",
   "-u": "none",
@@ -165,6 +168,7 @@ export const RG_SAFE_FLAGS = {
   "--no-line-number": "none",
   "--pcre2": "none",
   "--regexp": "string",
+  "--replace": "string",
   "--smart-case": "none",
   "--sort": "string",
   "--sortr": "string",

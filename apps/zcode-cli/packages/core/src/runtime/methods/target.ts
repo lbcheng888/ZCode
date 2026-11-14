@@ -3,6 +3,8 @@ import {
   SessionEventType,
   createChildTraceContext,
   createCoreError,
+  createQueryId,
+  createTurnId,
   findExhaustedTargetBudgetDimension,
   formatGoalContinuationPrompt,
   formatTargetBudgetOutcomePrompt,
@@ -12,11 +14,16 @@ import {
 } from "../deps.js";
 import type {
   ModelUsageSummary,
+  QueryId,
   SessionGoal,
   TargetChangedPayload,
   TraceContext,
 } from "../deps.js";
-import type { ContinueActiveTargetLoopOptions, TurnResult } from "../types.js";
+import type {
+  ActiveTurnStartReservation,
+  ContinueActiveTargetLoopOptions,
+  TurnResult,
+} from "../types.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import {
   formatSwarmRoundEvidence,
@@ -32,11 +39,15 @@ import { hasRunningBackgroundRuntimeTask } from "../../runtime-task/registry.js"
 import { wrapSystemReminderForSource } from "../../system-reminder/source.js";
 import { verifyActiveTargetCompletionForContinuation } from "./target-completion-verification.js";
 import { enqueueCancellableRuntimeCommand } from "./runtime-command-submit.js";
+import { queueTurnSystemReminder } from "./turn-system-reminder/index.js";
 import {
   telemetryInputOrigin,
   TELEMETRY_INPUT_ORIGIN_ATTRIBUTE,
 } from "./input-intent-persistence.js";
-import { isGoalLayerEnabled } from "../helpers/goal-layer.js";
+import {
+  buildGoalContinuationReminder,
+  isGoalLayerEnabled,
+} from "../helpers/goal-layer.js";
 
 export async function recordTargetChanged(
   this: AgentRuntimeInternal,
@@ -403,6 +414,42 @@ export async function executeTargetContinuationCommand(
     },
   });
 
+  // 长程续跑纪律（kimi goalInjection/goalService 三件套最小移植）：goal 续跑回合起跑时
+  // 经 queueTurnSystemReminder 注入 goal reminder（source=goal_continuation，full/sparse
+  // 两档），模型上下文里由此始终带着纪律——大多数回合完成一段工作后正常结束等自动续跑，
+  // 不答一句就停、不早翻 complete、不遇阻就 blocked。注入只在开旗时发生：GoalUpdate/
+  // GoalBlock 等工具面只在 goalLayerEnabled 下暴露（tool-allowlist），纪律文本引用它们，
+  // 关旗的旧续跑行为保持原样。预算终局宽限回合（executeTargetBudgetOutcomeTurn）不注入：
+  // 那是工具 veto 下的收尾回合，不是工作回合。
+  // 通道按 turnId 精确投递，turnId 必须在 executeTurnCommand 之前生成：预创建 turnId
+  // 并经 startReservation 预约起跑（先例：prompt-admission 的预约-执行同形；reservation
+  // 由 executeTurnCommand 的 finally releaseTurnStart 释放）。队列先入队再预约——预约若
+  // 因并发起轮冲突抛错，残留条目会在下个回合 drain 时按 turnId 不匹配被丢弃。
+  let goalTurnReservation: ActiveTurnStartReservation | undefined;
+  if (isGoalLayerEnabled(this.config)) {
+    const goalTurnId = createTurnId();
+    const goalReminder = buildGoalContinuationReminder(this, continuationTarget);
+    queueTurnSystemReminder.call(this, {
+      body: goalReminder.body,
+      source: "goal_continuation",
+      turnId: goalTurnId,
+    });
+    // 与 executeTurnCommand 无预约分支同形：child(continuationTrace) + queryId/turnId/
+    // turnNumber；inputOrigin 包裹由 executeTurnCommand 按同一 trace 属性补齐。
+    const goalTurnTraceContext = createChildTraceContext(continuationTrace, {
+      queryId: (options.inputId as QueryId | undefined) ?? createQueryId(),
+      sessionId: this.sessionId,
+      turnId: goalTurnId,
+      attributes: { turnNumber: this.turnNumber },
+    });
+    goalTurnReservation = {
+      kind: "regular",
+      traceContext: goalTurnTraceContext,
+      turnId: goalTurnId,
+    };
+    this.reserveTurnStart(goalTurnId, goalTurnTraceContext, "regular");
+  }
+
   this.logger?.info("Goal continuation started", {
     ...traceContextToLogContext(continuationTrace),
     event: "target.continuation.started",
@@ -411,18 +458,23 @@ export async function executeTargetContinuationCommand(
     targetId: continuationTarget.targetID,
   });
 
-  const continuationResult = await this.executeTurnCommand(prompt, undefined, {
-    abortSignal: options.abortSignal,
-    // session/send 期间触发的目标自动续跑仍属于同一次用户提交。
-    // 若这里丢掉 inputId，最终 turn.completed 会回落到 runtime trace，
-    // 桌面端 activeInputId 对不上后会一直停在 streaming/loading。
-    inputId: options.inputId,
-    intent: options.intent,
-    inputSource: "goal-continuation",
-    inputVisibility: "model-only",
-    targetId: continuationTarget.targetID,
-    traceContext: continuationTrace,
-  });
+  const continuationResult = await this.executeTurnCommand(
+    prompt,
+    undefined,
+    {
+      abortSignal: options.abortSignal,
+      // session/send 期间触发的目标自动续跑仍属于同一次用户提交。
+      // 若这里丢掉 inputId，最终 turn.completed 会回落到 runtime trace，
+      // 桌面端 activeInputId 对不上后会一直停在 streaming/loading。
+      inputId: options.inputId,
+      intent: options.intent,
+      inputSource: "goal-continuation",
+      inputVisibility: "model-only",
+      targetId: continuationTarget.targetID,
+      traceContext: continuationTrace,
+    },
+    goalTurnReservation,
+  );
   // 刚结束的回合把 target 翻到 budget_limited 但回合内未交付终局提示时
   // (如 token 在最后一次 ModelComplete 才越线、模型直接收尾),补发一次宽限
   // 终局回合;回合内已交付(veto 置位)或本轮就是终局回合时不重复。
