@@ -170,7 +170,22 @@
         // P6 能力票据：既有权限管线在同一前端门叠加票据 scope（只 deny），
         // 新增入口与 typed 拒绝把文件推过 800 行；不为行数机械拆权限判定链。
         "src/permission/service.ts",
-        "**/packages/ui/src/remote-connection-flow/index.ts"
+        "**/packages/ui/src/remote-connection-flow/index.ts",
+        // 集成收口（2026-11-14）：以下文件被分支增量推过 800 计费行（非空非注释口径），职责完整、不为行数机械拆分。
+        // super-agent 控制面组合根：装配/关闭对称与 owned/human-explicit/would-accept 装配测试同文件；
+        // S0-S4 全链（0b8c85ab，668→832）与批转即派发 spec run（f7044025，832→864）累计推过。
+        "**/apps/zcode-cli/packages/bootstrap/src/app/super-agent-control-plane.ts",
+        // compact 回合收敛方法（含 recoveryPointer 结构化恢复指针）：一方法一文件；
+        // v3.18.2 上游合并保本地特性（06270573，798→840）推过。
+        "**/apps/zcode-cli/packages/core/src/runtime/methods/compact-active.ts",
+        "src/runtime/methods/compact-active.ts",
+        // 工具执行 runner：写前最佳方案门禁（0b82582b，795→849）在副作用调用前拦截，判定与调度同循环，不拆。
+        "**/apps/zcode-cli/packages/core/src/tool/executor/call-runner.ts",
+        "src/tool/executor/call-runner.ts",
+        // AgentRuntime 接口：persistSyntheticToolPart 声明（最佳方案卡合成工具调用持久化）+13 计费行推过；
+        // 实现已落在 methods/message-persistence.ts，接口文件不为行数机械拆分。
+        "**/apps/zcode-cli/packages/core/src/runtime/agent-runtime.ts",
+        "src/runtime/agent-runtime.ts"
       ],
       "rules": {
         "max-lines": ["warn", { "max": 800, "skipBlankLines": true, "skipComments": true }]

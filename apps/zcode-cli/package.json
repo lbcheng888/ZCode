@@ -17,6 +17,7 @@
     "format": "oxfmt --write package.json \"packages/**/*.json\" \"packages/**/*.ts\" \"packages/**/*.mjs\"",
     "format:check": "oxfmt --check package.json \"packages/**/*.json\" \"packages/**/*.ts\" \"packages/**/*.mjs\"",
     "lint": "node ../../scripts/run-cli-lint.mjs",
+    "architecture:check": "cd ../.. && node scripts/architecture/architecture-check.mjs check",
     "lint:count": "node scripts/count-ts-lines.mjs",
     "lint:fix": "turbo run lint:fix",
     "prompt-trajectory:model-io": "pnpm --filter @zcode/prompt-trajectory model-io --",
