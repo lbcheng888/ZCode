@@ -24,6 +24,8 @@ import {
 
 const BEST_PLAN_SUPER_AGENT_QUERY_SOURCE = "best_plan_super_agent";
 const BEST_PLAN_SUPER_AGENT_MAX_OUTPUT_TOKENS = 2_048;
+/** 隐藏 system reminder 的注册源名（core system-reminder/source.ts 的 per-request 源）。 */
+const BEST_PLAN_REMINDER_SOURCE = "best_plan_super_agent";
 
 const BEST_PLAN_SUPER_AGENT_SYSTEM = `You are an independent best-plan super-agent for a coding session. The user message is the current user instruction. Produce the six-field best plan for that instruction and nothing else.
 
@@ -62,6 +64,36 @@ export interface CreateBestPlanSuperAgentDeps {
   runtime: AgentRuntime;
   sessionId: SessionId;
   logger: Logger;
+}
+
+/**
+ * 六字段要点正文：summary / recommendation / verification 保留全文（worker 按它们陈述与执行），
+ * 其余三段压缩成单行。正文只进模型上下文不进 UI，直接对 worker 下执行指令。
+ */
+function buildBestPlanReminderBody(plan: BestPlanInput): string {
+  const candidates = plan.candidateOptions
+    .map((candidate, index) => `${index + 1}. ${candidate.option}（代价：${candidate.cost}）`)
+    .join("；");
+  return [
+    "独立方案 super-agent 已提交本回合最佳方案（ProposeBestPlan 卡片已记录）。",
+    "",
+    `【方案摘要】${plan.summary}`,
+    "",
+    `【推荐方案】${plan.recommendation}`,
+    "",
+    `【验证方式】${plan.verification}`,
+    "",
+    `【现状证据】${compressPlanSection(plan.currentEvidence)}`,
+    `【候选方案】${candidates}`,
+    `【影响面】${compressPlanSection(plan.impact)}`,
+    "",
+    "执行要求：先用一段话向用户陈述推荐方案与选择理由，然后严格按【推荐方案】执行；本回合方案已提交，不要调用 ProposeBestPlan。",
+  ].join("\n");
+}
+
+/** 其余字段压缩成单行：换行折叠为「；」，不截断内容，避免提醒正文膨胀挤占回合上下文。 */
+function compressPlanSection(text: string): string {
+  return text.replaceAll(/\s*\n+\s*/g, "；").trim();
 }
 
 export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): BestPlanSuperAgent {
@@ -165,12 +197,80 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
         input.traceContext,
       );
       // traceContext 携带本回合 turnId：成功记录后写前门禁按同一 turnId 放行。
+      const startedAt = Date.now();
       const executed = await deps.runtime.executeTools([toolCall], schedule, {
         traceContext: input.traceContext,
       });
       const result = executed.results[0];
       if (result?.success !== true) {
         throw new Error(`ProposeBestPlan 注入失败: ${result?.error?.message ?? "工具未返回结果"}`);
+      }
+      const endedAt = Date.now();
+
+      // 卡片只解决写前门禁放行与 UI 呈现；worker 模型要看到方案本身才会按它行动。
+      // 这里把六字段要点作为隐藏 system reminder 入队：本回合下一次模型请求生效，
+      // 一次性消费、不进 UI 消息流。队列失败只 warn，不推翻已成立的卡片注入。
+      try {
+        deps.runtime.queueTurnSystemReminder({
+          turnId: input.turnId,
+          source: BEST_PLAN_REMINDER_SOURCE,
+          body: buildBestPlanReminderBody(plan),
+        });
+        deps.logger.debug("Best plan reminder queued for next model request", {
+          ...traceContextToLogContext(input.traceContext),
+          event: "best_plan.super_agent.reminder_queued",
+          module: "bootstrap",
+          sessionId: String(deps.sessionId),
+          status: "completed",
+          turnId: String(input.turnId),
+        });
+      } catch (error) {
+        deps.logger.warn("Best plan reminder queue failed; card intact, worker runs without inline guidance", {
+          ...traceContextToLogContext(input.traceContext),
+          error: error instanceof Error ? error.message : String(error),
+          event: "best_plan.super_agent.reminder_failed",
+          module: "bootstrap",
+          sessionId: String(deps.sessionId),
+          status: "failed",
+          turnId: String(input.turnId),
+        });
+      }
+
+      // executeTools 只发事件不落 tool part，冷恢复的 hydration 只认 message 的 tool part；
+      // 这里把卡片补成 transcript 事实，刷新/重启后仍在。幂等与 parent 解析由 Core 按
+      // callID/turnId 负责。卡片 live 已在（scheduled/started/result 事件已发），持久化只是
+      // 恢复层：失败响亮告警但不推翻注入——抛错会让 facade 把已成立的注入记成失败。
+      try {
+        await deps.runtime.persistSyntheticToolPart(
+          {
+            turnId: input.turnId,
+            toolCallId: toolCall.id,
+            toolName: BEST_PLAN_TOOL_NAME,
+            input: plan,
+            output: result.output,
+            startedAt,
+            endedAt,
+          },
+          input.traceContext,
+        );
+        deps.logger.debug("Best plan card persisted as transcript fact", {
+          ...traceContextToLogContext(input.traceContext),
+          event: "best_plan.super_agent.persisted",
+          module: "bootstrap",
+          sessionId: String(deps.sessionId),
+          status: "completed",
+          turnId: String(input.turnId),
+        });
+      } catch (error) {
+        deps.logger.warn("Best plan card persistence failed: live card intact, cold recovery loses it", {
+          ...traceContextToLogContext(input.traceContext),
+          error: error instanceof Error ? error.message : String(error),
+          event: "best_plan.super_agent.persist_failed",
+          module: "bootstrap",
+          sessionId: String(deps.sessionId),
+          status: "failed",
+          turnId: String(input.turnId),
+        });
       }
     },
   };

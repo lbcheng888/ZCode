@@ -61,6 +61,7 @@ export const SYSTEM_REMINDER_PER_REQUEST_SOURCES = [
   "diagnostics",
   "target_anchor",
   "target_budget_outcome",
+  "best_plan_super_agent",
 ] as const;
 
 export type SystemReminderPersistedSource = (typeof SYSTEM_REMINDER_PERSISTED_SOURCES)[number];
@@ -223,6 +224,14 @@ const SYSTEM_REMINDER_DESCRIPTORS: Record<SystemReminderSource, DescriptorShape>
     "per_current_turn",
     true,
     "sr.target_budget_outcome",
+  ),
+  // best-plan super-agent 的回合并发注入（queueTurnSystemReminder）：worker 回合内一次性
+  // system reminder，随当前 turn 的 request history 释放，不进持久历史、不出现在 UI 消息流。
+  best_plan_super_agent: descriptor(
+    "current_turn",
+    "per_current_turn",
+    true,
+    "sr.best_plan_super_agent",
   ),
   // 第四批 4a-0（2026-09-12）：原 plugin_ui_state 源已删除，插件给模型的信息改走 ui/update-model-context。
 };

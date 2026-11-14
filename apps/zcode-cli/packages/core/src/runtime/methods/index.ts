@@ -141,6 +141,7 @@ import {
   shouldContinueAfterStopHooks,
 } from "./hooks.js";
 import { executeTurn, executeTurnCommand } from "./turn.js";
+import { queueTurnSystemReminder } from "./turn-system-reminder/index.js";
 import { admitPrompt } from "./prompt-admission.js";
 import { executeManualCompact } from "./compact.js";
 import { autoCompactIfNeeded } from "./compact.js";
@@ -194,6 +195,7 @@ import { persistUserPrompt } from "./message-persistence.js";
 import { persistSyntheticUserNotice } from "./message-persistence.js";
 import { persistSyntheticUserNoticeForSession } from "./message-persistence.js";
 import { persistAssistantMessage } from "./message-persistence.js";
+import { persistSyntheticToolPart } from "./message-persistence.js";
 import { persistMessage } from "./message-persistence.js";
 import { persistPart } from "./message-persistence.js";
 import { rebuildProjection } from "./message-persistence.js";
@@ -357,6 +359,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.runStopHooks = runStopHooks;
   proto.shouldContinueAfterStopHooks = shouldContinueAfterStopHooks;
   proto.executeTurn = executeTurn;
+  proto.queueTurnSystemReminder = queueTurnSystemReminder;
   proto.admitPrompt = admitPrompt;
   proto.executeTurnCommand = function (
     this: AgentRuntimeInternal,
@@ -419,6 +422,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.persistSyntheticUserNoticeForSession = persistSyntheticUserNoticeForSession;
   proto.persistAssistantTimelinePartForSession = persistAssistantTimelinePartForSession;
   proto.persistAssistantMessage = persistAssistantMessage;
+  proto.persistSyntheticToolPart = persistSyntheticToolPart;
   proto.persistMessage = persistMessage;
   proto.persistPart = persistPart;
   proto.rebuildProjection = rebuildProjection;

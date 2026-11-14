@@ -53,6 +53,7 @@ const EXPECTED_SOURCES = [
   "diagnostics",
   "target_anchor",
   "target_budget_outcome",
+  "best_plan_super_agent",
 ] as const satisfies readonly SystemReminderSource[];
 
 function expectExactlyOneSystemReminderWrapper(reminder: string): void {
@@ -111,6 +112,7 @@ describe("system reminder source descriptors", () => {
       "diagnostics",
       "target_anchor",
       "target_budget_outcome",
+      "best_plan_super_agent",
     ]);
 
     const groupedSources = [

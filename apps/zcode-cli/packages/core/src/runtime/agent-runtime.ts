@@ -6,7 +6,7 @@ import {
 } from "../subagent/definitions.js";
 import { DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY, resolveExecutionState } from "@zcode/shared";
 import type { BackgroundBashOutputResult } from "@zcode/shared";
-import type { BackgroundResultOriginMeta, ModelRequestSessionFeature } from "@zcode/contracts";
+import type { BackgroundResultOriginMeta, ModelRequestSessionFeature, PersistSyntheticToolPartInput, PersistSyntheticToolPartResult } from "@zcode/contracts";
 import {
   createDenyPermissionBroker,
   createRootTraceContext,
@@ -721,6 +721,12 @@ export interface AgentRuntime {
   /** 当前 turn 是否已有最佳方案卡；super-agent 在注入前查重。 */
   isBestPlanSatisfied(turnId: TurnId): boolean;
   /**
+   * super-agent 注入的合成工具调用（ProposeBestPlan 卡等）持久化为 transcript 事实：
+   * executeTools 只发事件不落 tool part，冷恢复的 hydration 只从 message 的 tool part
+   * 合成卡片，缺这一步则刷新/重启后消失。同 callID 重放幂等返回既有 id。
+   */
+  persistSyntheticToolPart(input: PersistSyntheticToolPartInput, traceContext?: TraceContext): Promise<PersistSyntheticToolPartResult>;
+  /**
    * 注册表被外部改写后让 getTools 重算。公开它的唯一使用者是 dwf driver 的 submit profile 运行时
    * 守卫：静态 profile 与实际 ask 不符时把
    * typed 的 submit_result 换回通用声明——改的是同一个注册表，缓存不失效就会继续把旧声明发给模型。
@@ -845,6 +851,13 @@ export interface AgentRuntime {
     attachments?: TurnState["attachments"],
     options?: ExecuteTurnOptions,
   ): Promise<TurnResult>;
+  /**
+   * 隐藏 system reminder 一次性入队（methods/turn-system-reminder/）：body 在该 turn 的
+   * 下一次模型请求以 `<system-reminder>` 附件注入，不进 canonical 历史、不出现在 UI 消息流；
+   * turn 结束仍未消费即丢弃。source 必须是已注册的 per-request system-reminder 源。
+   * super-agent 等回合并发车道用它把指导信息送进 worker 上下文。
+   */
+  queueTurnSystemReminder(input: { turnId: TurnId; source: string; body: string }): void;
   scheduleTools(toolCalls: ToolCall[]): Promise<ToolSchedule>;
   executeTools(
     toolCalls: ToolCall[],

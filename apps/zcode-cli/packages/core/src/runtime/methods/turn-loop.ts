@@ -42,6 +42,7 @@ import {
 } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
 import { runModelBackedTurnStep } from "./turn-model-step.js";
+import { drainQueuedTurnSystemReminders } from "./turn-system-reminder/index.js";
 import { latestContextTokens, querySourceForTask } from "./turn-model-step-usage.js";
 import { inputRoleOf, isRealUserPrompt } from "../helpers/provider-entry-origins.js";
 import {
@@ -185,6 +186,10 @@ export async function runRegularTurnLoop(
       recordCompactHistoryRound(state);
     }
     throwIfTurnAborted(state.turnAbortSignal);
+
+    // 隐藏 system reminder 队列（queueTurnSystemReminder）在 compaction 之后、请求投影之前
+    // 消费：匹配当前 turn 的条目一次性注入本次请求，compaction 不会吞掉刚入队的提醒。
+    drainQueuedTurnSystemReminders(this, state);
 
     // 请求前公告在 compaction 之后运行，
     // 不受输入附件跳过规则影响；按类型对历史去重，通常为空。

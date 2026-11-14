@@ -1,6 +1,16 @@
-import type { RuntimeInputPresentation } from "@zcode/contracts";
+import type {
+  PersistSyntheticToolPartInput,
+  PersistSyntheticToolPartResult,
+  RuntimeInputPresentation,
+} from "@zcode/contracts";
 import { createModelId, createModelProviderId } from "@zcode/contracts";
-import { SessionEventType, createPartId, traceContextToLogContext } from "../deps.js";
+import {
+  COMPLETED_TOOL_PART_METADATA_SCHEMA_VERSION,
+  SessionEventType,
+  createMessageId,
+  createPartId,
+  traceContextToLogContext,
+} from "../deps.js";
 import { withConversationQuotes } from "../helpers/conversation-quotes.js";
 import type {
   EnvInfo,
@@ -15,12 +25,14 @@ import type {
   SessionStorePort,
   TraceContext,
   SyntheticUserMessageSource,
-  TurnInputIntentMetadata,
   TurnExecutionKind,
+  TurnId,
+  TurnInputIntentMetadata,
 } from "../deps.js";
 import {
   emptyTokenUsageInfo,
   isHiddenReminderMessage,
+  toRecordInput,
   toTokenUsageInfo,
 } from "../helpers/index.js";
 import type { ResolvedTurnAttachment } from "../types.js";
@@ -353,6 +365,103 @@ export async function persistAssistantMessage(
     },
     traceContext,
   );
+}
+
+/**
+ * super-agent 经 runtime.executeTools 注入的合成工具调用（ProposeBestPlan 卡等）只发
+ * 会话事件、不落 tool part，而冷恢复的 transcript hydration 只从 message 的 tool part
+ * 合成 ToolCallScheduled（bootstrap transcript-hydration.ts synthesizeToolPart），卡片
+ * 刷新/重启后消失。这里把它持久化成 transcript 事实：一条 assistant message + 一个
+ * completed tool part，字段形状与 turn-tools 正常路径（tool-result-settlement）一致。
+ */
+export async function persistSyntheticToolPart(
+  this: AgentRuntimeInternal,
+  input: PersistSyntheticToolPartInput,
+  traceContext?: TraceContext,
+): Promise<PersistSyntheticToolPartResult> {
+  // 幂等：callID 全局唯一，hydration 与产品投影都按它认领同一次工具调用；重放
+  // （刷新自愈、调用方重试）直接返回既有 id。查重必须在 parent 解析之前——重启后
+  // 重放时 store 已有事实，即使当前 turn 查不到 user message 也应短路返回。
+  if (this.sessionStore) {
+    const messages = await this.sessionStore.messages({ sessionID: this.sessionId });
+    for (const message of messages) {
+      const part = message.parts.find(
+        (candidate) => candidate.type === "tool" && candidate.callID === input.toolCallId,
+      );
+      if (part) return { assistantMessageId: part.messageID, partId: part.id };
+    }
+  }
+
+  const parentUserMessageId =
+    input.parentUserMessageId ?? (await findTurnUserMessageId.call(this, input.turnId));
+  if (!parentUserMessageId) {
+    throw new Error(
+      `persistSyntheticToolPart: turn ${input.turnId} 找不到 parent user message；` +
+        "合成工具调用必须挂在真实轮次上，拒绝静默落一条无 parent 的 assistant 消息",
+    );
+  }
+
+  const assistantMessageId = createMessageId();
+  const partId = createPartId();
+  // anchor.turnId 决定冷恢复轮归属；必须以声明的 turnId 入参为准，可选上下文不能改写它。
+  const trace: TraceContext = { ...(traceContext ?? this.rootTraceContext), turnId: input.turnId };
+
+  // time.completed 必须落：assistant 行缺 completed 且无 error 时冷路径判 cancelled。
+  await this.persistAssistantMessage(
+    assistantMessageId,
+    parentUserMessageId,
+    input.startedAt,
+    { completed: input.endedAt },
+    trace,
+  );
+  await this.persistPart(
+    {
+      id: partId,
+      sessionID: this.sessionId,
+      messageID: assistantMessageId,
+      type: "tool",
+      callID: input.toolCallId,
+      tool: input.toolName,
+      state: {
+        status: "completed",
+        input: toRecordInput(input.input),
+        output: syntheticToolOutputToPersistedString(input.output),
+        title: input.toolName,
+        metadata: { schemaVersion: COMPLETED_TOOL_PART_METADATA_SCHEMA_VERSION },
+        time: { start: input.startedAt, end: input.endedAt },
+      },
+    },
+    trace,
+  );
+  return { assistantMessageId, partId };
+}
+
+/** 查当前 turn 的 user message：v4 起 user prompt 把 turnId 落进 anchor（persistUserPrompt）。 */
+async function findTurnUserMessageId(
+  this: AgentRuntimeInternal,
+  turnId: TurnId,
+): Promise<MessageId | undefined> {
+  if (!this.sessionStore) return undefined;
+  const messages = await this.sessionStore.messages({ sessionID: this.sessionId });
+  let found: MessageId | undefined;
+  let created = -Infinity;
+  for (const message of messages) {
+    const info = message.info;
+    if (info.role !== "user" || info.anchor?.turnId !== turnId) continue;
+    // 同 turn 多条 user message（如 guide 内联）取最新一条作 parent。
+    if (info.time.created >= created) {
+      created = info.time.created;
+      found = info.id;
+    }
+  }
+  return found;
+}
+
+/** completed tool part 的 output 是字符串；非字符串按正常路径的结算语义序列化。 */
+function syntheticToolOutputToPersistedString(output: unknown): string {
+  if (typeof output === "string") return output;
+  if (output === undefined) return "";
+  return JSON.stringify(output) ?? "";
 }
 
 export async function persistMessage(

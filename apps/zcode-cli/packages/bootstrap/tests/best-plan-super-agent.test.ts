@@ -72,6 +72,18 @@ interface FakeRuntimeOptions {
   selection?: FakeSelection;
   bestPlanSatisfied?: boolean;
   currentTurnId?: string;
+  executeToolsSuccess?: boolean;
+}
+
+interface PersistSyntheticToolPartInput {
+  turnId: string;
+  parentUserMessageId?: string;
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output: unknown;
+  startedAt: number;
+  endedAt: number;
 }
 
 function createFakeRuntime(options: FakeRuntimeOptions = {}) {
@@ -107,7 +119,10 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
       results: toolCalls.map((toolCall) => ({
         toolCallId: toolCall.id,
         toolName: toolCall.name,
-        success: true,
+        success: options.executeToolsSuccess !== false,
+        ...(options.executeToolsSuccess === false
+          ? { error: { type: "tool_error", message: "injection rejected by gate" } }
+          : {}),
         output: {},
         durationMs: 0,
         startedAt: new Date(0),
@@ -116,9 +131,19 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
       events: [],
     }),
   );
+  const persistSyntheticToolPart = vi.fn(
+    async (
+      _input: PersistSyntheticToolPartInput,
+      _traceContext?: unknown,
+    ): Promise<{ assistantMessageId: string; partId: string }> => ({
+      assistantMessageId: "assistant-persisted",
+      partId: "part-persisted",
+    }),
+  );
   const isBestPlanSatisfied = vi.fn(
     (_turnId: string) => options.bestPlanSatisfied === true,
   );
+  const queueTurnSystemReminder = vi.fn();
   const getProjection = vi.fn(async () => ({
     currentTurnId: options.currentTurnId ?? TURN_ID,
   }));
@@ -133,6 +158,8 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     scheduleTools,
     appendEvent,
     executeTools,
+    persistSyntheticToolPart,
+    queueTurnSystemReminder,
   };
   return {
     runtime,
@@ -140,7 +167,9 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     scheduleTools,
     appendEvent,
     executeTools,
+    persistSyntheticToolPart,
     isBestPlanSatisfied,
+    queueTurnSystemReminder,
     getProjection,
     selection,
   };
@@ -254,7 +283,41 @@ describe("createBestPlanSuperAgent", () => {
     const [executedCalls, , executeOptions] = harness.executeTools.mock.calls[0]!;
     expect(executedCalls).toEqual([scheduledCall]);
     expect(executeOptions).toEqual({ traceContext: input.traceContext });
+
+    // 注入成功后卡片补成 transcript 事实：六字段 plan 为 input，parent 缺省交由 Core 按
+    // turnId 解析；startedAt/endedAt 是注入前后的真实时刻。
+    expect(harness.persistSyntheticToolPart).toHaveBeenCalledTimes(1);
+    const [persistInput, persistTraceContext] = harness.persistSyntheticToolPart.mock.calls[0]!;
+    expect(persistInput.turnId).toBe(TURN_ID);
+    expect(persistInput.parentUserMessageId).toBeUndefined();
+    expect(persistInput.toolCallId).toBe(scheduledCall.id);
+    expect(persistInput.toolName).toBe(BEST_PLAN_TOOL_NAME);
+    expect(persistInput.input).toEqual(scheduledCall.input);
+    expect(Object.keys(persistInput.input as object).sort()).toEqual(PLAN_FIELDS);
+    expect(persistInput.output).toEqual({});
+    expect(typeof persistInput.startedAt).toBe("number");
+    expect(typeof persistInput.endedAt).toBe("number");
+    expect(persistInput.startedAt).toBeLessThanOrEqual(persistInput.endedAt);
+    expect(persistTraceContext).toEqual(input.traceContext);
+    const debugEvents = harness.logger.debug.mock.calls.map(
+      (call) => (call[1] as { event?: string } | undefined)?.event,
+    );
+    expect(debugEvents).toEqual([
+      "best_plan.super_agent.reminder_queued",
+      "best_plan.super_agent.persisted",
+    ]);
     expect(harness.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("注入失败：抛错且不调用持久化（卡片未成立，没有可恢复的事实）", async () => {
+    const harness = createHarness({ executeToolsSuccess: false });
+    await expect(harness.agent.onTurnStarted(turnStartedInput())).rejects.toThrow(
+      "ProposeBestPlan 注入失败: injection rejected by gate",
+    );
+
+    expect(harness.executeTools).toHaveBeenCalledTimes(1);
+    expect(harness.persistSyntheticToolPart).not.toHaveBeenCalled();
+    expect(harness.logger.debug).not.toHaveBeenCalled();
   });
 
   it("坏 JSON：warn 后返回，不调度也不执行工具", async () => {
@@ -406,5 +469,57 @@ describe("createBestPlanSuperAgent turn projection", () => {
     expect(harness.generateWorkspaceText).toHaveBeenCalledTimes(1);
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
+  });
+});
+
+describe("createBestPlanSuperAgent reminder queue", () => {
+  it("executeTools 成功后把六字段要点作为隐藏 system reminder 入队", async () => {
+    const harness = createHarness({
+      generatedText: JSON.stringify({
+        ...VALID_PLAN,
+        currentEvidence: "证据一行\n证据二行",
+      }),
+    });
+    await harness.agent.onTurnStarted(turnStartedInput());
+
+    expect(harness.queueTurnSystemReminder).toHaveBeenCalledTimes(1);
+    const queued = harness.queueTurnSystemReminder.mock.calls[0]![0];
+    expect(queued).toMatchObject({
+      turnId: TURN_ID,
+      source: "best_plan_super_agent",
+    });
+    const body = queued.body as string;
+    // summary / recommendation / verification 全文。
+    expect(body).toContain(VALID_PLAN.summary);
+    expect(body).toContain(
+      "选 super-agent：模型只读生成方案，worker 专注执行，门禁仍兜底",
+    );
+    expect(body).toContain("tsc 与 best-plan-super-agent.test.ts 通过");
+    // 其余字段压缩成单行。
+    expect(body).toContain("证据一行；证据二行");
+    expect(body).toContain(VALID_PLAN.candidateOptions[0]!.option);
+    // worker 执行指令：先陈述推荐方案，再按其执行；不重复调用 ProposeBestPlan。
+    expect(body).toContain("陈述推荐方案");
+    expect(body).toContain("不要调用 ProposeBestPlan");
+    // 成功补 debug 事件。
+    const debugEvents = harness.logger.debug.mock.calls.map(
+      (call) => (call[1] as { event?: string } | undefined)?.event,
+    );
+    expect(debugEvents).toContain("best_plan.super_agent.reminder_queued");
+  });
+
+  it("入队失败只 warn，不抛断回合，卡片持久化照常", async () => {
+    const harness = createHarness();
+    harness.queueTurnSystemReminder.mockImplementation(() => {
+      throw new Error("reminder source not registered");
+    });
+    await expect(harness.agent.onTurnStarted(turnStartedInput())).resolves.toBeUndefined();
+
+    expect(warnedEvents(harness.logger)).toEqual(["best_plan.super_agent.reminder_failed"]);
+    expect(harness.logger.warn.mock.calls[0]![1]).toMatchObject({
+      error: "reminder source not registered",
+    });
+    // 卡片已成立：持久化恢复层不依赖提醒队列。
+    expect(harness.persistSyntheticToolPart).toHaveBeenCalledTimes(1);
   });
 });

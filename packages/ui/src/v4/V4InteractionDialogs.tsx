@@ -193,6 +193,8 @@ export function V4InteractionDialogs({
   } | null>(null);
   const permissionResponseFlight = useRef<string | null>(null);
 
+  // 显式返回类型：useCallback 的泛型推断会把 committedPermissionGrantMode 的字面量联合
+  // 扩宽成 string，下游 setPermissionResponse 的 state 是 "guarded" | "yolo"，会报 TS2322。
   const resolveInteraction = useCallback(
     async (
       interactionId: string,
@@ -202,7 +204,7 @@ export function V4InteractionDialogs({
         action?: "accept" | "decline" | "cancel";
         content?: Record<string, unknown>;
       },
-    ) => {
+    ): Promise<{ accepted: boolean; committedMode?: "guarded" | "yolo" }> => {
       const envelope = createCommandEnvelope({
         type: "resolveInteraction",
         sessionId,
