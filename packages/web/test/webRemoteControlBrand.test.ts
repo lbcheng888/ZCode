@@ -8,7 +8,7 @@ describe("远控页头品牌", () => {
     const html = renderToStaticMarkup(createElement(WebRemoteControlBrand));
     expect(html).toMatch(/<svg[^>]*data-app-logo="zcode"/);
     expect(html).toMatch(/<svg[^>]*aria-hidden="true"/);
-    expect(html).toContain('fill="#B59AFF"');
+    expect(html).toContain('fill="#0B0910"');
     expect(html).not.toContain("<img");
     expect(html).toContain("ChengCode");
     expect(html).not.toContain("<a ");

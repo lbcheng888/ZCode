@@ -10,7 +10,7 @@ describe("手机远控登录页", () => {
     const html = renderToStaticMarkup(createElement(WebLoginPage, { onLogin: () => {} }));
     expect(html).toContain("ChengCode");
     expect(html).toMatch(/<svg[^>]*data-app-logo="zcode"/);
-    expect(html).toContain('fill="#B59AFF"');
+    expect(html).toContain('fill="#0B0910"');
     expect(html).toContain(
       lang === "zh-CN" ? "登录后继续使用 Web 远程控制" : "Sign In To Continue",
     );

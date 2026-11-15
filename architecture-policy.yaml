@@ -2690,3 +2690,7 @@ exceptions:
     rule: unmanaged-new-file
     paths: [apps/zcode-cli/packages/bootstrap/src/app/best-plan-super-agent.ts]
     reason: 写前强制最佳方案的 bootstrap 宿主模块：每个用户回合起步后独立生成六字段方案，并经 ProposeBestPlan 把卡片注入当前回合；只经注入的 runtime 调用 generateWorkspaceText/scheduleTools/executeTools，方案事实与写前门禁仍归 Core 工具层，不新增跨模块 owner。接管整个 zcode-cli bootstrap 目录需要单独的模块边界整理，不在本次范围内。
+  - id: cheng-brand-logo-unmanaged-file
+    rule: unmanaged-new-file
+    paths: [packages/ui/src/components/ui/ChengBrandLogo.tsx]
+    reason: 官方 Cheng 品牌图形组件只收敛 mark/字标绘制与渐变 id，替换 UI 内既有的旧标绘制；图形数据来自 cheng-lang 官网 SVG。不新增状态、服务或跨模块依赖，接管整个 packages/ui/src 未受管模块不在本次范围内。

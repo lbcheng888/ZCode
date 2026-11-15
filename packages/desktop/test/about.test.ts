@@ -92,8 +92,8 @@ describe("about", () => {
       okButtonLabel: "OK",
     });
 
-    expect(html).toContain('fill="#B59AFF"');
-    expect(html).toContain("M83 28 69 14H61L51 4H42L48 15");
+    expect(html).toContain('fill="#0B0910"');
+    expect(html).toContain("M24.66 41.85A38.76 44.18");
     expect(html).not.toContain("M134.4 0.130152");
     expect(html).not.toContain("viewBox=\"0 0 256 218\"");
   });

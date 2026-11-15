@@ -87,6 +87,8 @@ body,
 }
 
 :root {
+  /* 官方字标渐变起点在浅色背景上接近白色，浅色主题改从中段紫色起步，保证 C 可见。 */
+  --cheng-wordmark-gradient-start: #b59aff;
   --shadow-composer-soft: 0 0 #0000;
   --ui-font-size: 14px;
   --color-remote-continuity-panel: #202124;
@@ -375,6 +377,7 @@ body {
 }
 
 .dark {
+  --cheng-wordmark-gradient-start: #f3eeff;
   --animated-gradient-text-strong: rgba(255, 255, 255, 1);
   --animated-gradient-text-soft: rgba(255, 255, 255, 0.2);
   --color-background: var(--color-neutral-900);

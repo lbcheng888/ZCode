@@ -310,7 +310,21 @@ function renderForceUpdatePromptHtml(text: ForceUpdateDialogText, locale: Locale
     <main class="panel" role="dialog" aria-modal="true" aria-labelledby="title">
       <header class="titlebar">
         <div class="brand">
-          <div class="brand-icon">${icon ? `<img src="${icon}" alt="" />` : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-hidden="true" focusable="false"><rect width="100" height="100" rx="21" fill="#B59AFF" /><path fill="#211A2D" fill-rule="evenodd" d="M83 28 69 14H61L51 4H42L48 15C26 15 10 32 10 53 10 76 28 94 51 94 69 94 84 84 91 69L73 61C69 70 61 75 52 75 39 75 30 65 30 52 30 40 39 31 51 31H57L64 38H72L75 44 81 38Q88 38 88 33 88 30 83 28ZM65 21 73 25 65 29Z" /></svg>`}</div>
+          <div class="brand-icon">${icon ? `<img src="${icon}" alt="" />` : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="cheng-force-update-gradient" x1="10" y1="6" x2="104" y2="110" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#F3EEFF" />
+              <stop offset=".45" stop-color="#B59AFF" />
+              <stop offset="1" stop-color="#6E4BF2" />
+            </linearGradient>
+          </defs>
+          <rect width="100" height="100" rx="22" fill="#0B0910" />
+          <g transform="translate(11.5 6) scale(.78)">
+            <path fill="url(#cheng-force-update-gradient)" fill-rule="evenodd" d="M24.66 41.85A38.76 44.18 0 0 0 91.75 85.34C92.73 80.94 93.06 75.92 91.95 72.79C90.49 69.44 85.8 67.87 82.23 69.44C82.68 72.57 83.12 75.92 83.24 79.38A28.37 33.79 0 1 1 80.06 36.11C82.68 37.38 88.04 38.16 93.06 37.49C94.96 37.05 95.41 33.69 95.19 31.46L96.75 28.11C93.62 28.33 89.15 27.66 85.8 25.65C83.57 24.09 81.33 21.18 78.21 18.95C77.09 15.6 75.75 12.25 70.16 10.57C63.46 8.9 52.29 8.34 43.36 10.57C36.65 12.25 31.07 16.72 27.94 20.63C24.93 24.31 19.9 26.99 14.31 26.32C10.96 25.65 9.29 22.86 8.51 19.17C5.38 20.63 2.25 25.65 2.25 31.24C2.25 37.38 7.61 41.85 14.31 42.41C18.22 42.63 21.58 42.18 24.66 41.85ZM26.43 37.91L27.43 35.77L28.54 33.69L29.75 31.68L31.06 29.75L32.48 27.91L33.99 26.15L35.6 24.5L37.3 22.96L39.08 21.53L40.93 20.23L42.86 19.06L44.85 18.01L46.89 17.11L48.98 16.35L51.1 15.74L53.26 15.28L55.43 14.96L57.62 14.8L59.8 14.78L61.98 14.92L64.14 15.2L66.28 15.63L68.39 16.2L70.45 16.9L72.47 17.74L74.44 18.7L76.35 19.79L78.2 20.99L78.28 20.85L76.36 19.76L74.4 18.8L72.4 17.96L70.36 17.25L68.28 16.67L66.19 16.22L64.07 15.9L61.94 15.71L59.81 15.66L57.67 15.73L55.55 15.95L53.43 16.29L51.34 16.77L49.27 17.37L47.23 18.11L45.24 18.97L43.29 19.95L41.38 21.06L39.54 22.28L37.75 23.61L36.03 25.06L34.39 26.61L32.82 28.25L31.33 30L29.93 31.84L28.62 33.76L27.41 35.76L26.29 37.83ZM88.43 28.62L88.31 28.77L88.04 28.88L87.63 28.93L87.11 28.93L86.51 28.88L85.89 28.77L85.27 28.61L84.7 28.42L84.23 28.21L83.87 27.99L83.67 27.79L83.62 27.6L83.74 27.45L84.01 27.34L84.42 27.28L84.94 27.29L85.54 27.34L86.17 27.45L86.78 27.61L87.35 27.8L87.82 28.01L88.18 28.22L88.38 28.43Z" />
+            <path fill="none" stroke="url(#cheng-force-update-gradient)" stroke-width="6.5" d="M46.6 49.53A17 17 0 1 1 46.6 70.47" />
+            <circle cx="60" cy="60" r="5.5" fill="url(#cheng-force-update-gradient)" />
+          </g>
+        </svg>`}</div>
           <div class="brand-title">ChengCode</div>
         </div>
         <button class="close" type="button" data-action="quit" aria-label="${escapeHtml(text.quitButton)}">×</button>

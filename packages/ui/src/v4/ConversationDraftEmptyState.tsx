@@ -13,6 +13,7 @@ import {
 } from "react";
 import darkEmptyStateLogoUrl from "@/assets/Z.svg";
 import { cn } from "@/components/lib/utils.js";
+import { ChengWordmark } from "@/components/ui/ChengBrandLogo.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
 import { logger } from "@/logger.js";
@@ -183,12 +184,9 @@ export function ConversationDraftEmptyState({
     >
       <div
         aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-1/2 top-1/2 aspect-[5/4] w-[min(72vw,25rem)] -mt-10",
-          "-translate-x-1/2 -translate-y-1/2 text-foreground-subtlest",
-        )}
+        className="pointer-events-none relative z-0 w-[min(60vw,14rem)] text-foreground"
       >
-        <ZCodeEmptyStateLogo className="h-full w-full" />
+        <ChengWordmark className="h-auto w-full" />
       </div>
       <p
         ref={greetingContainerRef}
@@ -211,32 +209,5 @@ export function ConversationDraftEmptyState({
         <span>{greeting}</span>
       </p>
     </div>
-  );
-}
-
-function ZCodeEmptyStateLogo({ className }: { className?: string }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className={cn(
-        className,
-        "opacity-70",
-        "[-webkit-mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
-        "[-webkit-mask-repeat:no-repeat] [-webkit-mask-size:100%_100%]",
-        "[mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
-        "[mask-repeat:no-repeat] [mask-size:100%_100%]",
-      )}
-      width="100"
-      height="100"
-      viewBox="0 0 100 100"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <rect width="100" height="100" rx="21" fill="#B59AFF" />
-      <path
-        fill="#211A2D"
-        fillRule="evenodd"
-        d="M83 28 69 14H61L51 4H42L48 15C26 15 10 32 10 53 10 76 28 94 51 94 69 94 84 84 91 69L73 61C69 70 61 75 52 75 39 75 30 65 30 52 30 40 39 31 51 31H57L64 38H72L75 44 81 38Q88 38 88 33 88 30 83 28ZM65 21 73 25 65 29Z"
-      />
-    </svg>
   );
 }
