@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 import {
+  ChengRunModeSchema,
   EventFrameSchema,
   JobFailureSchema,
   JobIdSchema,
@@ -27,9 +28,13 @@ export const JobRecordSchema = z
     finishedAt: z.string().min(1).nullable(),
     specPath: z.string().min(1),
     specsDir: z.string().min(1),
+    bundleDir: z.string().min(1).nullable().optional(),
     task: z.string().min(1),
-    mode: z.literal("diagnostic"),
+    mode: ChengRunModeSchema,
     budget: z.number().int().positive().max(900_000),
+    allowDraftUnowned: z.boolean().optional(),
+    moves: z.enum(["macro"]).nullable().optional(),
+    useLiblearn: z.boolean().optional(),
     cancelRequested: z.boolean(),
     pid: z.number().int().positive().nullable(),
     pgid: z.number().int().positive().nullable(),

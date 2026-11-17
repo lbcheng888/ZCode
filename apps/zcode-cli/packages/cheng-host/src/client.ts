@@ -1,15 +1,21 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { z } from "zod";
 
+import type { ChengLeafProbeReceipt, ChengSurfaceReport } from "@zcode/cheng-contract";
 import { HostError, HostErrorPayloadSchema } from "./errors.js";
 import {
   EventFrameSchema,
   METHOD_SCHEMAS,
   ResponseErrFrameSchema,
   ResponseOkFrameSchema,
+  type BundlePrepareResult,
   type Capabilities,
+  type ChengSpecDraft,
   type EventFrame,
+  type EvolveResult,
+  type GraphDiffResult,
   type HostMethod,
+  type PlanResult,
 } from "./protocol.js";
 import { CONTRACT_MAJOR, MAX_FRAME_BYTES, PROTOCOL_VERSION } from "./version.js";
 
@@ -129,6 +135,34 @@ export class StdioHostClient {
 
   capabilities(): Promise<Capabilities> {
     return this.request("capabilities", {});
+  }
+
+  bundlePrepare(draft: ChengSpecDraft): Promise<BundlePrepareResult> {
+    return this.request("bundle.prepare", { draft });
+  }
+
+  surfaceCheck(filePath: string): Promise<ChengSurfaceReport> {
+    return this.request("surface.check", { filePath });
+  }
+
+  leafProbe(filePath: string, allowClosureProbe = false): Promise<ChengLeafProbeReceipt> {
+    return this.request("leaf.probe", { filePath, allowClosureProbe });
+  }
+
+  plan(jobId: string, task: string): Promise<PlanResult> {
+    return this.request("plan", { jobId, task });
+  }
+
+  graphDiff(runDirA: string, runDirB: string): Promise<GraphDiffResult> {
+    return this.request("graph.diff", { runDirA, runDirB });
+  }
+
+  evolveCounterexample(runDirs: string[] = [], dryRun = false): Promise<EvolveResult> {
+    return this.request("evolve.counterexample", { runDirs, dryRun });
+  }
+
+  evolveSleep(runDirs: string[] = [], dryRun = false): Promise<EvolveResult> {
+    return this.request("evolve.sleep", { runDirs, dryRun });
   }
 
   request<M extends HostMethod>(method: M, params: unknown, deadlineMs?: number): Promise<MethodResult<M>> {
@@ -281,3 +315,5 @@ export class StdioHostClient {
     }
   }
 }
+
+export { StdioHostClient as ChengHostClient };

@@ -12,18 +12,25 @@ import {
 import { fakePin } from "./helpers.js";
 
 const IMPLEMENTED = [
+  "bundle.prepare",
   "capabilities",
+  "evolve.counterexample",
+  "evolve.sleep",
   "generate",
+  "graph.diff",
   "graph.query",
   "job.cancel",
   "job.status",
+  "leaf.probe",
+  "plan",
   "settle",
   "spec.validate",
+  "surface.check",
   "verify",
 ].sort();
 
 describe("protocol", () => {
-  it("freezes exactly the P2 surface", () => {
+  it("freezes the v2 surface", () => {
     const caps = buildCapabilities(fakePin());
     expect(CapabilitiesSchema.parse(caps)).toEqual(caps);
     const implemented = Object.entries(caps.ops)
@@ -33,10 +40,10 @@ describe("protocol", () => {
     expect(implemented).toEqual(IMPLEMENTED);
     expect(caps.ops.parse?.available).toBe(false);
     expect(caps.ops.typecheck?.available).toBe(false);
-    expect(caps.ops.plan?.available).toBe(false);
+    expect(caps.ops.plan?.available).toBe(true);
     expect(caps.ops.decide?.available).toBe(false);
-    expect(caps.ops["graph.diff"]?.available).toBe(false);
-    expect(Object.keys(METHOD_SCHEMAS)).toHaveLength(13);
+    expect(caps.ops["graph.diff"]?.available).toBe(true);
+    expect(Object.keys(METHOD_SCHEMAS)).toHaveLength(18);
     expect(caps.ops.verify).toEqual({ available: true, sync: true, cancellable: false });
     expect(caps.ops.generate).toEqual({ available: true, sync: false, cancellable: false });
   });
@@ -58,11 +65,11 @@ describe("protocol", () => {
       auth: null,
       workspaceRoot: "/tmp/ws",
       workspaceIdentity: "ws-1",
-      contract: 1,
+      contract: 2,
       client: { kind: "cli" },
     };
     expect(HelloFrameSchema.safeParse(hello).success).toBe(true);
-    expect(HelloFrameSchema.safeParse({ ...hello, contract: 2 }).success).toBe(false);
+    expect(HelloFrameSchema.safeParse({ ...hello, contract: 1 }).success).toBe(false);
     expect(HelloFrameSchema.safeParse({ ...hello, extra: true }).success).toBe(false);
   });
 
@@ -102,6 +109,7 @@ describe("protocol", () => {
       baseKey: "e".repeat(64),
       attempt: null,
       state: "succeeded",
+      mode: "diagnostic",
       phase: "done",
       seq: 3,
       createdAt: "2026-11-06T00:00:00.000Z",

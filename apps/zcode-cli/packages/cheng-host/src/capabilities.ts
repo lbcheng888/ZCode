@@ -31,6 +31,28 @@ export function buildCapabilities(pin: RuntimePin): Capabilities {
       runnerSha256: pin.runnerSha256,
       driverSha256: pin.driverSha256,
       gitWorkTree: true,
+      readyModes: [...pin.readyModes],
+      productionSlot:
+        pin.productionSlot === null
+          ? null
+          : {
+              driverPath: pin.productionSlot.driverPath,
+              driverSha256: pin.productionSlot.driverSha256,
+              linkerPath: pin.productionSlot.linkerPath,
+              linkerSha256: pin.productionSlot.linkerSha256,
+              provenanceReportSha256: pin.productionSlot.provenanceReportSha256,
+              donorsListSha256: pin.productionSlot.donorsListSha256,
+              donorProvenanceSha256: pin.productionSlot.donorProvenanceSha256,
+              donorCount: pin.productionSlot.donorCount,
+            },
+      diagnosticSlot:
+        pin.diagnosticSlot === null
+          ? null
+          : {
+              driverPath: pin.diagnosticSlot.driverPath,
+              driverSha256: pin.diagnosticSlot.driverSha256,
+            },
+      activeSeedPin: pin.activeSeedPin,
     },
     ops,
   };

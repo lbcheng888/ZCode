@@ -9,6 +9,8 @@ export * from "./job-store.js";
 export * from "./job-engine.js";
 export * from "./runner.js";
 export * from "./projections.js";
+export * from "./bundle-builder.js";
+export * from "./ops-v3.js";
 export type { ChengPlanResult } from "@zcode/cheng-contract";
 export * from "./server.js";
 export * from "./client.js";

@@ -1,9 +1,20 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { HostError } from "./errors.js";
-import type { RuntimePin } from "./runtime.js";
+import type { ChengRunMode, RuntimePin } from "./runtime.js";
 
 export interface RunnerOutcome {
   readonly exitCode: number | null;
@@ -27,24 +38,67 @@ export interface StartRunnerInput {
   readonly pin: RuntimePin;
   readonly jobDir: string;
   readonly specsDir: string;
+  readonly bundleDir?: string | null;
   readonly task: string;
+  readonly mode: ChengRunMode;
   readonly budget: number;
+  readonly allowDraftUnowned?: boolean;
+  readonly moves?: "macro" | null;
+  readonly useLiblearn?: boolean;
   readonly env: Record<string, string>;
 }
 
 export function buildRunnerArgs(input: {
+  pin: RuntimePin;
   outDir: string;
   specsDir: string;
+  bundleDir?: string | null;
   task: string;
+  mode: ChengRunMode;
   budget: number;
+  allowDraftUnowned?: boolean;
+  moves?: "macro" | null;
+  useLiblearn?: boolean;
 }): string[] {
-  return [
+  const args = [
     `--out:${input.outDir}`,
     `--specs:${input.specsDir}`,
     `--tasks:${input.task}`,
     `--budget:${String(input.budget)}`,
-    "--diagnostic",
   ];
+
+  if (input.mode === "production") {
+    const slot = input.pin.productionSlot;
+    if (slot === null) {
+      throw new HostError("host.runtimeUnavailable", "production slot is not available in runtime pin");
+    }
+    args.push(`--core0-driver:${slot.driverPath}`);
+    args.push(`--core0-driver-sha:${slot.driverSha256}`);
+    for (const donorPath of slot.donorPaths) {
+      args.push(`--link-donor:${donorPath}`);
+    }
+    args.push(`--link-donor-provenance:${slot.donorProvenancePath}`);
+  } else {
+    if (input.pin.diagnosticSlot === null) {
+      throw new HostError("host.runtimeUnavailable", "diagnostic slot is not available in runtime pin");
+    }
+    args.push("--diagnostic");
+  }
+
+  if (input.bundleDir !== undefined && input.bundleDir !== null && input.bundleDir.length > 0) {
+    args.push(`--bundle-root:${input.bundleDir}`);
+  }
+  if (input.allowDraftUnowned === true) {
+    args.push("--allow-draft-unowned");
+  }
+  if (input.moves === "macro") {
+    args.push("--moves:macro");
+  }
+  if (input.useLiblearn === true && input.pin.activeSeedPin !== null) {
+    args.push(`--liblearn:${input.pin.activeSeedPin.path}`);
+  }
+
+  return args;
 }
 
 /**
@@ -54,16 +108,33 @@ export function buildRunnerArgs(input: {
 export function startRunner(input: StartRunnerInput): RunnerHandle {
   const outDir = join(input.jobDir, "out");
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  // Pure Cheng selfhost system-link-exec has a ~255-byte CLI arg buffer on --out/--report-out;
+  // stage in a short /tmp dir when outDir > 100 bytes, then move runs/ back into outDir on exit.
+  const useShortStage = Buffer.byteLength(outDir, "utf8") > 100;
+  const stageOutDir = useShortStage
+    ? `/tmp/ch-${createHash("sha256").update(outDir).digest("hex").slice(0, 12)}-${String(process.pid)}`
+    : outDir;
+  if (useShortStage) {
+    rmSync(stageOutDir, { recursive: true, force: true });
+    mkdirSync(stageOutDir, { recursive: true, mode: 0o700 });
+  }
+
   const stdoutPath = join(input.jobDir, "runner.stdout.log");
   const stderrPath = join(input.jobDir, "runner.stderr.log");
   const stdoutFd = openSync(stdoutPath, "a");
   const stderrFd = openSync(stderrPath, "a");
 
   const args = buildRunnerArgs({
-    outDir,
+    pin: input.pin,
+    outDir: stageOutDir,
     specsDir: input.specsDir,
+    ...(input.bundleDir === undefined ? {} : { bundleDir: input.bundleDir }),
     task: input.task,
+    mode: input.mode,
     budget: input.budget,
+    ...(input.allowDraftUnowned === undefined ? {} : { allowDraftUnowned: input.allowDraftUnowned }),
+    ...(input.moves === undefined ? {} : { moves: input.moves }),
+    ...(input.useLiblearn === undefined ? {} : { useLiblearn: input.useLiblearn }),
   });
 
   const child = spawn(input.pin.runnerPath, args, {
@@ -77,6 +148,9 @@ export function startRunner(input: StartRunnerInput): RunnerHandle {
   closeSync(stderrFd);
 
   if (child.pid === undefined) {
+    if (useShortStage) {
+      rmSync(stageOutDir, { recursive: true, force: true });
+    }
     throw new HostError("host.internal", "runner did not return a pid", {
       evidence: [`runner=${input.pin.runnerPath}`],
     });
@@ -92,6 +166,15 @@ export function startRunner(input: StartRunnerInput): RunnerHandle {
         return;
       }
       settled = true;
+      if (useShortStage && existsSync(stageOutDir)) {
+        try {
+          cpSync(stageOutDir, outDir, { recursive: true, force: true, verbatimSymlinks: true });
+        } catch {
+          // Best-effort copy; resolveRunVolume below will fail closed if missing.
+        } finally {
+          rmSync(stageOutDir, { recursive: true, force: true });
+        }
+      }
       const resolved = resolveRunVolume(outDir);
       resolve({
         exitCode,
@@ -201,10 +284,5 @@ export function isProcessGroupAlive(pgid: number): boolean {
 }
 
 function isNoSuchProcess(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ESRCH"
-  );
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
 }

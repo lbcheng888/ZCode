@@ -24,6 +24,13 @@ export function fakePin(overrides: Partial<RuntimePin> = {}): RuntimePin {
     runnerSha256: "b".repeat(64),
     driverPath: "/tmp/fake-driver",
     driverSha256: "c".repeat(64),
+    productionSlot: null,
+    diagnosticSlot: {
+      driverPath: "/tmp/fake-driver",
+      driverSha256: "c".repeat(64),
+    },
+    readyModes: ["diagnostic"],
+    activeSeedPin: null,
     ...overrides,
   };
 }

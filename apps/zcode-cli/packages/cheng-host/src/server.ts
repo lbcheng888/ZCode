@@ -1,23 +1,38 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { readChengSpecRef } from "@zcode/cheng-contract";
 
+import { prepareSpecBundle } from "./bundle-builder.js";
 import { buildCapabilities } from "./capabilities.js";
 import { HostError, toHostError } from "./errors.js";
 import type { Emit, JobEngine } from "./job-engine.js";
+import { runEvolveOp, runLeafProbe, runSurfaceCheck } from "./ops-v3.js";
 import { resolveAllowedPath } from "./paths.js";
-import { projectGraph, projectSettle, projectVerify } from "./projections.js";
 import {
+  evaluateVerifyPlan,
+  projectGraph,
+  projectGraphDiff,
+  projectSettle,
+  projectVerify,
+  resolveJobSpecRef,
+} from "./projections.js";
+import {
+  BundlePrepareParamsSchema,
+  EvolveParamsSchema,
   GenerateParamsSchema,
+  GraphDiffParamsSchema,
   GraphParamsSchema,
   HelloFrameSchema,
   JobParamsSchema,
+  LeafProbeParamsSchema,
   METHOD_SCHEMAS,
+  PlanParamsSchema,
   RequestFrameSchema,
   SettleParamsSchema,
   SpecValidateParamsSchema,
+  SurfaceCheckParamsSchema,
   isHostMethod,
   type Capabilities,
   type EventFrame,
@@ -40,15 +55,23 @@ export interface HostCoreOptions {
   readonly engine: JobEngine;
   readonly workspaceRoot: string;
   readonly specRoots: readonly string[];
+  readonly artifactRoot?: string;
 }
 
 export function createHostCore(options: HostCoreOptions): HostCore {
   const capabilities = buildCapabilities(options.pin);
+  const artifactRoot = options.artifactRoot ?? options.engine.artifactRoot;
+  const bundlesRoot = join(artifactRoot, "bundles");
+  mkdirSync(bundlesRoot, { recursive: true, mode: 0o700 });
+  const realBundlesRoot = realpathSync(bundlesRoot);
+  const specRoots = [...options.specRoots, realBundlesRoot].filter(
+    (path, index, all) => all.indexOf(path) === index,
+  );
 
   return {
     capabilities,
     workspaceRoot: options.workspaceRoot,
-    specRoots: options.specRoots,
+    specRoots,
     async dispatch(method, params, emit): Promise<unknown> {
       const schema = METHOD_SCHEMAS[method];
       if (!schema.available) {
@@ -69,25 +92,45 @@ export function createHostCore(options: HostCoreOptions): HostCore {
         case "capabilities":
           return capabilities;
         case "spec.validate":
-          return validateSpec(SpecValidateParamsSchema.parse(parsedParams.data), options.specRoots);
+          return validateSpec(SpecValidateParamsSchema.parse(parsedParams.data), specRoots);
+        case "bundle.prepare": {
+          const input = BundlePrepareParamsSchema.parse(parsedParams.data);
+          return prepareSpecBundle({
+            artifactRoot,
+            draft: input.draft,
+            activeBundleDirs: options.engine.activeBundleDirs(),
+          });
+        }
         case "generate": {
           const input = GenerateParamsSchema.parse(parsedParams.data);
           if (!TASK_PATTERN.test(input.task)) {
             throw new HostError("host.invalidParams", `invalid task name: ${input.task}`);
           }
-          const specPath = resolveAllowedPath(input.specPath, options.specRoots, {
+          const specPath = resolveAllowedPath(input.specPath, specRoots, {
             kind: "file",
             code: "host.specRootNotAllowed",
           });
-          const specsDir = resolveAllowedPath(dirname(specPath), options.specRoots, {
+          const specsDir = resolveAllowedPath(dirname(specPath), specRoots, {
             kind: "directory",
             code: "host.specRootNotAllowed",
           });
+          const bundleDir =
+            input.bundleDir === undefined
+              ? undefined
+              : resolveAllowedPath(input.bundleDir, specRoots, {
+                  kind: "directory",
+                  code: "host.specRootNotAllowed",
+                });
           return options.engine.generate({
             specPath,
             specsDir,
+            ...(bundleDir === undefined ? {} : { bundleDir }),
             task: input.task,
+            mode: input.mode,
             budget: input.budget,
+            ...(input.allowDraftUnowned === undefined ? {} : { allowDraftUnowned: input.allowDraftUnowned }),
+            ...(input.moves === undefined ? {} : { moves: input.moves }),
+            ...(input.useLiblearn === undefined ? {} : { useLiblearn: input.useLiblearn }),
             ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
             emit,
           });
@@ -102,15 +145,69 @@ export function createHostCore(options: HostCoreOptions): HostCore {
         }
         case "verify": {
           const input = JobParamsSchema.parse(parsedParams.data);
-          return projectVerify(options.engine.record(input.jobId));
+          const record = options.engine.record(input.jobId);
+          return projectVerify(record, {
+            chengRoot: options.pin.chengRoot,
+            expectedDriverSha256:
+              record.mode === "production"
+                ? (options.pin.productionSlot?.driverSha256 ?? options.pin.driverSha256)
+                : (options.pin.diagnosticSlot?.driverSha256 ?? options.pin.driverSha256),
+          });
         }
         case "settle": {
           const input = SettleParamsSchema.parse(parsedParams.data);
           return projectSettle(options.engine.record(input.jobId), input.task);
         }
+        case "plan": {
+          const input = PlanParamsSchema.parse(parsedParams.data);
+          const record = options.engine.record(input.jobId);
+          const verify = projectVerify(record, {
+            chengRoot: options.pin.chengRoot,
+            expectedDriverSha256:
+              record.mode === "production"
+                ? (options.pin.productionSlot?.driverSha256 ?? options.pin.driverSha256)
+                : (options.pin.diagnosticSlot?.driverSha256 ?? options.pin.driverSha256),
+          });
+          const specRef = resolveJobSpecRef(record, options.pin.chengRoot);
+          return evaluateVerifyPlan({
+            receipt: verify.receipt,
+            settle: verify.settle,
+            structure: verify.structure,
+            runtimeManifest: verify.runtimeManifest,
+            zeroC: verify.zeroC,
+            specRef,
+            task: input.task,
+            jobId: input.jobId,
+          });
+        }
         case "graph.query": {
           const input = GraphParamsSchema.parse(parsedParams.data);
           return projectGraph(options.engine.record(input.jobId), input.task, input.view);
+        }
+        case "graph.diff": {
+          const input = GraphDiffParamsSchema.parse(parsedParams.data);
+          return projectGraphDiff(input.runDirA, input.runDirB);
+        }
+        case "surface.check": {
+          const input = SurfaceCheckParamsSchema.parse(parsedParams.data);
+          return runSurfaceCheck(options.pin, input.filePath);
+        }
+        case "leaf.probe": {
+          const input = LeafProbeParamsSchema.parse(parsedParams.data);
+          return runLeafProbe(
+            options.pin,
+            artifactRoot,
+            input.filePath,
+            input.allowClosureProbe ?? false,
+          );
+        }
+        case "evolve.counterexample": {
+          const input = EvolveParamsSchema.parse(parsedParams.data);
+          return runEvolveOp(options.pin, "counterexample", input.dryRun ?? false);
+        }
+        case "evolve.sleep": {
+          const input = EvolveParamsSchema.parse(parsedParams.data);
+          return runEvolveOp(options.pin, "sleep", input.dryRun ?? false);
         }
         default:
           throw new HostError("host.opUnavailable", `${method} is not available in this runtime`, {

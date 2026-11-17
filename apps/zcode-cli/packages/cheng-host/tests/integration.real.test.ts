@@ -159,15 +159,15 @@ function socketRpc(socket: Socket): SocketRpc {
     });
 }
 
-function helloFrame(token: string | null): string {
+function helloFrame(token: string | null, workspaceRoot = REAL_ROOT): string {
   return `${JSON.stringify({
     v: 1,
     t: "hello",
     id: "hello",
     auth: token,
-    workspaceRoot: REAL_ROOT,
+    workspaceRoot,
     workspaceIdentity: "cheng-lang",
-    contract: 1,
+    contract: 2,
     client: { kind: "cli" },
   })}\n`;
 }
@@ -206,15 +206,17 @@ realDescribe("real cheng runtime", () => {
           events.push({ method: event.method, jobId: event.params.jobId, state: event.params.state });
         });
 
+        const mode = caps.runtime.readyModes.includes("production") ? "production" : "diagnostic";
+        const expectedExit = mode === "production" ? 0 : 41;
         const started = await client.request("generate", {
           specPath: SPEC,
           task: TASK,
-          mode: "diagnostic",
+          mode,
           budget: 30_000,
         });
         const terminal = await waitTerminal(client, started.jobId);
         expect(terminal.state).toBe("succeeded");
-        expect(terminal.exitCode).toBe(41);
+        expect(terminal.exitCode).toBe(expectedExit);
         expect(terminal.runId).not.toBeNull();
         expect(terminal.runDir).not.toBeNull();
 
@@ -229,8 +231,14 @@ realDescribe("real cheng runtime", () => {
 
         const runDir = terminal.runDir as string;
         const verify = await client.request("verify", { jobId: started.jobId });
-        expect(verify.receipt.acceptance.level).toBe("DIAGNOSTIC_NOT_ACCEPTANCE");
-        expect(verify.receipt.acceptance.productionAcceptance).toBe(false);
+        if (mode === "production") {
+          expect(verify.receipt.acceptance.level).toBe("PRODUCTION");
+          expect(verify.receipt.acceptance.productionAcceptance).toBe(true);
+          expect(verify.gate).toEqual({ ok: true, level: "PRODUCTION", reasons: [] });
+        } else {
+          expect(verify.receipt.acceptance.level).toBe("DIAGNOSTIC_NOT_ACCEPTANCE");
+          expect(verify.receipt.acceptance.productionAcceptance).toBe(false);
+        }
         expect(verify.settle?.settles.length).toBeGreaterThan(0);
         expect(verify.structure).toBeNull();
         expect(verify.structureReason).toContain("modules.tsv");
@@ -258,15 +266,32 @@ realDescribe("real cheng runtime", () => {
         // match byte-for-byte (run.env/report carry run ids and are excluded).
         const directOut = join(dataBase, "direct-p02");
         mkdirSync(directOut, { recursive: true });
+        const directArgs = [
+          `--out:${directOut}`,
+          `--specs:${SPECS_DIR}`,
+          `--tasks:${TASK}`,
+          "--budget:30000",
+        ];
+        if (mode === "production") {
+          const slot = caps.runtime.productionSlot!;
+          directArgs.push(`--core0-driver:${slot.driverPath}`);
+          directArgs.push(`--core0-driver-sha:${slot.driverSha256}`);
+          const donorsList = readFileSync(join(REAL_ROOT, "artifacts", "csg_donors", "donors.list"), "utf8")
+            .split(/\r?\n/u)
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+          for (const d of donorsList) {
+            directArgs.push(`--link-donor:${join(REAL_ROOT, d)}`);
+          }
+          directArgs.push(
+            `--link-donor-provenance:${join(REAL_ROOT, "artifacts", "csg_donors", "donor_provenance.tsv")}`,
+          );
+        } else {
+          directArgs.push("--diagnostic");
+        }
         const direct = spawnSync(
           join(REAL_ROOT, "tools", "csg_spec_v2_cli_run"),
-          [
-            `--out:${directOut}`,
-            `--specs:${SPECS_DIR}`,
-            `--tasks:${TASK}`,
-            "--budget:30000",
-            "--diagnostic",
-          ],
+          directArgs,
           {
             cwd: REAL_ROOT,
             env: { ...process.env, ZCODE_CHENG_ROOT: REAL_ROOT },
@@ -274,7 +299,7 @@ realDescribe("real cheng runtime", () => {
             timeout: 300_000,
           },
         );
-        expect(direct.status).toBe(41);
+        expect(direct.status).toBe(expectedExit);
         const directRun = latestRunDir(directOut);
         for (const relative of [
           "judge/judge.tsv",
@@ -304,7 +329,7 @@ realDescribe("real cheng runtime", () => {
         const second = await client.request("generate", {
           specPath: SPEC,
           task: TASK,
-          mode: "diagnostic",
+          mode,
           budget: 900_000,
         });
         const cancelled = await client.request("job.cancel", { jobId: second.jobId });
@@ -328,13 +353,14 @@ realDescribe("workspace host restart", () => {
     "marks an in-flight job failed(hostRestarted) and reaps its process group",
     async () => {
       const dataBase = tempDir("data-");
+      const wsRoot = tempDir("ws-");
       const spawnHost = (): ChildProcess =>
         spawn(
           process.execPath,
           [
             HOST_BIN,
             "--scope=workspace",
-            `--workspace-root=${REAL_ROOT}`,
+            `--workspace-root=${wsRoot}`,
             `--data-base-dir=${dataBase}`,
           ],
           {
@@ -356,13 +382,16 @@ realDescribe("workspace host restart", () => {
         socket.once("connect", () => resolveConnect());
         socket.once("error", rejectConnect);
       });
-      socket.write(helloFrame(token));
+      socket.write(helloFrame(token, wsRoot));
       const rpc = socketRpc(socket);
-      await rpc("c1", "capabilities", {});
+      const caps2 = (await rpc("c1", "capabilities", {})) as {
+        runtime: { readyModes: string[] };
+      };
+      const mode2 = caps2.runtime.readyModes.includes("production") ? "production" : "diagnostic";
       const started = (await rpc("g1", "generate", {
         specPath: SPEC,
         task: TASK,
-        mode: "diagnostic",
+        mode: mode2,
         budget: 900_000,
       })) as { jobId: string; state: string };
       expect(started.state).toBe("running");
@@ -383,7 +412,7 @@ realDescribe("workspace host restart", () => {
         socketAgain.once("connect", () => resolveConnect());
         socketAgain.once("error", rejectConnect);
       });
-      socketAgain.write(helloFrame(readFileSync(infoAgain.tokenPath, "utf8").trim()));
+      socketAgain.write(helloFrame(readFileSync(infoAgain.tokenPath, "utf8").trim(), wsRoot));
       const rpcAgain = socketRpc(socketAgain);
       await rpcAgain("c1", "capabilities", {});
       const status = (await rpcAgain("s1", "job.status", { jobId: started.jobId })) as {
@@ -398,7 +427,7 @@ realDescribe("workspace host restart", () => {
         ".chengcode",
         "v2",
         "cheng",
-        workspaceHash(REAL_ROOT),
+        workspaceHash(wsRoot),
         "jobs",
         started.jobId,
       );

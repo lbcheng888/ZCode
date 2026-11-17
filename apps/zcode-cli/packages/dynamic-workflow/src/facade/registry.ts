@@ -52,7 +52,10 @@ export const WORLD_READ_REGISTRY = [
   // verify/graph 是只读投影。站点身份与其他 world-read 同构，所以只加行、不碰消费方。
   { container: "cheng", member: "generate", op: "cheng-generate" },
   { container: "cheng", member: "verify", op: "cheng-verify" },
+  { container: "cheng", member: "plan", op: "cheng-plan" },
   { container: "cheng", member: "graph", op: "cheng-graph" },
+  { container: "cheng", member: "checkSurface", op: "cheng-surface-check" },
+  { container: "cheng", member: "probeLeaf", op: "cheng-leaf-probe" },
 ] as const satisfies readonly WorldReadRow[];
 
 /**

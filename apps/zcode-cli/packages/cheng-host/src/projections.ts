@@ -1,26 +1,37 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   evaluateChengGate,
   planChengNextAction,
+  readChengSpecRef,
   readDerivationGraph,
   readRunVolume,
+  readRuntimeManifest,
   readSettleReceipt,
   readStructureReceipt,
+  readZeroCReceipt,
   type ChengGateResult,
   type ChengPlanResult,
+  type ChengSpecRef,
   type RunVolumeReceipt,
+  type RuntimeManifest,
   type SettleReceipt,
   type StructureReceipt,
+  type ZeroCReceipt,
 } from "@zcode/cheng-contract";
 
 import { HostError } from "./errors.js";
 import type { JobRecord } from "./job-store.js";
-import type { GraphResult, VerifyResult } from "./protocol.js";
+import type { GraphDiffResult, GraphResult, VerifyResult } from "./protocol.js";
 import { sha256File } from "./runtime.js";
 
 const TERMINAL_OK = "succeeded";
+
+export interface ProjectVerifyOptions {
+  readonly chengRoot?: string;
+  readonly expectedDriverSha256?: string | null;
+}
 
 export function projectSettle(record: JobRecord, task: string): SettleReceipt {
   requireSucceeded(record);
@@ -38,11 +49,37 @@ export function projectSettle(record: JobRecord, task: string): SettleReceipt {
   }
 }
 
-export function projectVerify(record: JobRecord): VerifyResult {
+export function resolveJobSpecRef(
+  record: Pick<JobRecord, "specPath" | "bundleDir">,
+  chengRoot?: string,
+): ChengSpecRef | null {
+  if (!existsSync(record.specPath)) {
+    return null;
+  }
+  const candidates: string[] = [];
+  if (record.bundleDir !== undefined && record.bundleDir !== null) {
+    candidates.push(join(record.bundleDir, "index.json"));
+  }
+  candidates.push(join(dirname(record.specPath), "..", "index.json"));
+  if (chengRoot !== undefined && chengRoot.length > 0) {
+    candidates.push(join(chengRoot, "data", "spec_v2", "index.json"));
+  }
+  const indexPath = candidates.find((p) => existsSync(p));
+  try {
+    return readChengSpecRef(record.specPath, indexPath);
+  } catch (error) {
+    throw wrap("host.verifyUnavailable", "spec ref projection failed", error);
+  }
+}
+
+export function projectVerify(
+  record: JobRecord,
+  options: ProjectVerifyOptions = {},
+): VerifyResult {
   requireSucceeded(record);
   const runDir = requireRunDir(record);
 
-  let receipt;
+  let receipt: RunVolumeReceipt;
   try {
     receipt = readRunVolume(runDir);
   } catch (error) {
@@ -59,7 +96,7 @@ export function projectVerify(record: JobRecord): VerifyResult {
     }
   }
 
-  let structure = null;
+  let structure: StructureReceipt | null = null;
   let structureReason: string | null = null;
   const modulesPath = findModulesPath(runDir);
   if (modulesPath === null) {
@@ -72,31 +109,70 @@ export function projectVerify(record: JobRecord): VerifyResult {
     }
   }
 
+  let runtimeManifest: RuntimeManifest | null = null;
+  if (existsSync(join(runDir, "run.env")) && existsSync(join(runDir, "hashes.tsv"))) {
+    try {
+      runtimeManifest = readRuntimeManifest(runDir);
+    } catch (error) {
+      throw wrap("host.verifyUnavailable", "runtime manifest projection failed", error);
+    }
+  }
+
+  let zeroC: ZeroCReceipt | null = null;
+  if (existsSync(join(runDir, "zero_c.tsv"))) {
+    try {
+      const expectedDriverSha256 =
+        options.expectedDriverSha256 ?? runtimeManifest?.runEnv.driverSha256 ?? null;
+      zeroC = readZeroCReceipt(runDir, { expectedDriverSha256 });
+    } catch (error) {
+      throw wrap("host.verifyUnavailable", "zero-c receipt projection failed", error);
+    }
+  }
+
+  const specRef = resolveJobSpecRef(record, options.chengRoot);
+  const gate = evaluateVerifyGate({
+    receipt,
+    settle,
+    structure,
+    runtimeManifest,
+    zeroC,
+    specRef,
+  });
+
   return {
     receipt,
     settle,
     structure,
     structureReason,
+    runtimeManifest,
+    zeroC,
+    gate,
     artifactRef: runDir,
   };
 }
 
 /**
- * 真实 ChengGate 评估（P4 contract）：直接吃已校验的原始回执，不从 verify 摘要二次推断。
- * unknown mode 按 production fail-closed；生产档 manifest 完整性不在 verify 投影里，
- * 缺失即按 false 拒绝，不虚报绿。
+ * 真实 ChengGate 评估（P4/v3 contract）：直接吃已校验的原始回执，不从 verify 摘要二次推断。
+ * unknown mode 按 production fail-closed；生产档校验 runtimeManifestComplete、zeroCProductionOk 与 specRef。
  */
 export function evaluateVerifyGate(input: {
   receipt: RunVolumeReceipt;
   settle: SettleReceipt | null;
   structure: StructureReceipt | null;
+  runtimeManifest?: RuntimeManifest | null;
+  zeroC?: ZeroCReceipt | null;
+  specRef?: ChengSpecRef | null;
 }): ChengGateResult {
+  const mode = input.receipt.acceptance.mode === "diagnostic" ? "diagnostic" : "production";
   return evaluateChengGate({
     error: null,
     run: input.receipt,
     settle: input.settle,
     structure: input.structure,
-    mode: input.receipt.acceptance.mode === "diagnostic" ? "diagnostic" : "production",
+    mode,
+    runtimeManifestComplete: input.runtimeManifest?.checks.manifestComplete ?? false,
+    ...(input.specRef === undefined ? {} : { specRef: input.specRef }),
+    ...(mode === "production" ? { zeroC: input.zeroC ?? null } : {}),
   });
 }
 
@@ -105,6 +181,9 @@ export function evaluateVerifyPlan(input: {
   receipt: RunVolumeReceipt;
   settle: SettleReceipt | null;
   structure: StructureReceipt | null;
+  runtimeManifest?: RuntimeManifest | null;
+  zeroC?: ZeroCReceipt | null;
+  specRef?: ChengSpecRef | null;
   task: string;
   jobId?: string;
 }): ChengPlanResult {
@@ -115,6 +194,9 @@ export function evaluateVerifyPlan(input: {
     settle: input.settle,
     structure: input.structure,
     mode,
+    runtimeManifestComplete: input.runtimeManifest?.checks.manifestComplete ?? false,
+    ...(input.specRef === undefined ? {} : { specRef: input.specRef }),
+    ...(mode === "production" ? { zeroC: input.zeroC ?? null } : {}),
     task: input.task,
     ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
   });
@@ -179,6 +261,59 @@ export function projectGraph(record: JobRecord, task: string, view: "structure" 
       roots: structure.specModules.length,
       gateOk: structure.checks.structureGateOk,
     },
+  };
+}
+
+export function projectGraphDiff(runDirA: string, runDirB: string): GraphDiffResult {
+  const hashesA = join(runDirA, "hashes.tsv");
+  const hashesB = join(runDirB, "hashes.tsv");
+  if (!existsSync(hashesA) || !existsSync(hashesB)) {
+    throw new HostError("host.runVolumeMissing", "graph.diff requires hashes.tsv in both run directories", {
+      evidence: [`runDirA=${runDirA}`, `runDirB=${runDirB}`],
+    });
+  }
+  let mfA: RuntimeManifest;
+  let mfB: RuntimeManifest;
+  try {
+    mfA = readRuntimeManifest(runDirA);
+    mfB = readRuntimeManifest(runDirB);
+  } catch (error) {
+    throw wrap("host.verifyUnavailable", "graph.diff manifest projection failed", error);
+  }
+  const mapA = new Map<string, string>(
+    Object.entries(mfA.hashes ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+  const mapB = new Map<string, string>(
+    Object.entries(mfB.hashes ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
+
+  for (const [k, shaB] of mapB) {
+    const shaA = mapA.get(k);
+    if (shaA === undefined) {
+      added.push(k);
+    } else if (shaA !== shaB) {
+      changed.push(k);
+    }
+  }
+  for (const k of mapA.keys()) {
+    if (!mapB.has(k)) {
+      removed.push(k);
+    }
+  }
+  added.sort();
+  removed.sort();
+  changed.sort();
+
+  return {
+    added,
+    removed,
+    changed,
+    digestA: sha256File(hashesA),
+    digestB: sha256File(hashesB),
   };
 }
 

@@ -22,7 +22,7 @@ import {
   type RunnerOutcome,
   type StartRunnerInput,
 } from "./runner.js";
-import { sha256Text, type RuntimePin } from "./runtime.js";
+import { sha256Text, type ChengRunMode, type RuntimePin } from "./runtime.js";
 
 export type Emit = (event: EventFrame) => void;
 
@@ -35,8 +35,13 @@ const TERMINAL_STATES: ReadonlySet<JobRecord["state"]> = new Set([
 export interface GenerateInput {
   readonly specPath: string;
   readonly specsDir: string;
+  readonly bundleDir?: string;
   readonly task: string;
+  readonly mode?: ChengRunMode;
   readonly budget: number;
+  readonly allowDraftUnowned?: boolean;
+  readonly moves?: "macro";
+  readonly useLiblearn?: boolean;
   readonly attempt?: string;
   readonly emit: Emit;
 }
@@ -91,6 +96,20 @@ export class JobEngine {
     this.killGraceMs = options.killGraceMs ?? 5_000;
   }
 
+  get artifactRoot(): string {
+    return this.store.root;
+  }
+
+  activeBundleDirs(): Set<string> {
+    const active = new Set<string>();
+    for (const rec of this.store.list()) {
+      if ((rec.state === "queued" || rec.state === "running") && rec.bundleDir) {
+        active.add(rec.bundleDir);
+      }
+    }
+    return active;
+  }
+
   /**
    * Mark in-flight jobs from a previous host as failed. A process group is
    * killed only when `ps` still reports the recorded start stamp; an
@@ -120,26 +139,46 @@ export class JobEngine {
     if (this.closing) {
       throw new HostError("host.shutdown", "host is shutting down");
     }
+    const mode: ChengRunMode = input.mode ?? "diagnostic";
+    if (!this.pin.readyModes.includes(mode)) {
+      throw new HostError(
+        "host.runtimeUnavailable",
+        `requested mode ${mode} is not ready in runtime pin (readyModes=${this.pin.readyModes.join(",")})`,
+        { evidence: [`requested=${mode}`, `readyModes=${this.pin.readyModes.join(",")}`] },
+      );
+    }
     const specSha = createHash("sha256").update(readFileSync(input.specPath)).digest("hex");
+    const liblearnSha256 =
+      input.useLiblearn === true && this.pin.activeSeedPin !== null
+        ? this.pin.activeSeedPin.sha256
+        : null;
     const baseKey = sha256Text(
       canonicalJson({
-        v: 1,
+        v: 2,
         specSha256: specSha,
+        bundleDir: input.bundleDir ?? null,
         task: input.task,
-        mode: "diagnostic",
+        mode,
+        allowDraftUnowned: input.allowDraftUnowned ?? false,
+        moves: input.moves ?? null,
+        liblearnSha256,
         budget: input.budget,
         headSha: this.pin.headSha,
+        driverSha256:
+          mode === "production"
+            ? (this.pin.productionSlot?.driverSha256 ?? this.pin.driverSha256)
+            : (this.pin.diagnosticSlot?.driverSha256 ?? this.pin.driverSha256),
       }),
     );
     const attempt = input.attempt ?? null;
-    const jobId = sha256Text(canonicalJson({ v: 1, baseKey, attempt }));
+    const jobId = sha256Text(canonicalJson({ v: 2, baseKey, attempt }));
 
     if (this.store.has(jobId)) {
       const existing = this.store.read(jobId);
       if (!TERMINAL_STATES.has(existing.state)) {
         this.emitters.set(jobId, input.emit);
       }
-      return { jobId, dedupKey: baseKey, state: existing.state };
+      return { jobId, dedupKey: baseKey, state: existing.state, mode: existing.mode };
     }
 
     if (this.queue.length >= this.maxQueued) {
@@ -161,9 +200,13 @@ export class JobEngine {
       finishedAt: null,
       specPath: input.specPath,
       specsDir: input.specsDir,
+      bundleDir: input.bundleDir ?? null,
       task: input.task,
-      mode: "diagnostic",
+      mode,
       budget: input.budget,
+      allowDraftUnowned: input.allowDraftUnowned ?? false,
+      moves: input.moves ?? null,
+      useLiblearn: input.useLiblearn ?? false,
       cancelRequested: false,
       pid: null,
       pgid: null,
@@ -177,7 +220,7 @@ export class JobEngine {
     this.emitters.set(jobId, input.emit);
     this.queue.push(jobId);
     this.pump();
-    return { jobId, dedupKey: baseKey, state: this.store.read(jobId).state };
+    return { jobId, dedupKey: baseKey, state: this.store.read(jobId).state, mode };
   }
 
   status(jobId: string): JobStatus {
@@ -332,8 +375,13 @@ export class JobEngine {
         pin: this.pin,
         jobDir: this.store.jobDir(jobId),
         specsDir: record.specsDir,
+        ...(record.bundleDir === undefined ? {} : { bundleDir: record.bundleDir }),
         task: record.task,
+        mode: record.mode,
         budget: record.budget,
+        ...(record.allowDraftUnowned === undefined ? {} : { allowDraftUnowned: record.allowDraftUnowned }),
+        ...(record.moves === undefined ? {} : { moves: record.moves }),
+        ...(record.useLiblearn === undefined ? {} : { useLiblearn: record.useLiblearn }),
         env: this.env,
       });
     } catch (error) {
@@ -396,13 +444,16 @@ export class JobEngine {
       return;
     }
 
-    if (outcome.exitCode === 41) {
+    const expectedSuccessExit = record.mode === "production" ? 0 : 41;
+    if (outcome.exitCode === expectedSuccessExit) {
       if (outcome.runId === null || outcome.runDir === null) {
         this.failRecord(
           this.store.read(jobId),
-          new HostError("host.runVolumeMissing", "diagnostic run exited 41 but produced no run volume", {
-            evidence: ["exit=41", `stdout_tail=${outcome.stdoutTail.slice(-500)}`],
-          }),
+          new HostError(
+            "host.runVolumeMissing",
+            `${record.mode} run exited ${String(expectedSuccessExit)} but produced no run volume`,
+            { evidence: [`exit=${String(expectedSuccessExit)}`, `stdout_tail=${outcome.stdoutTail.slice(-500)}`] },
+          ),
         );
         return;
       }
@@ -411,7 +462,7 @@ export class JobEngine {
         state: "succeeded",
         phase: "done",
         finishedAt: this.now().toISOString(),
-        exitCode: 41,
+        exitCode: expectedSuccessExit,
         runId: outcome.runId,
         runDir: outcome.runDir,
       });
@@ -419,13 +470,25 @@ export class JobEngine {
       return;
     }
 
-    if (outcome.exitCode === 0) {
+    if (record.mode === "diagnostic" && outcome.exitCode === 0) {
       this.failRecord(
         this.store.read(jobId),
         new HostError(
           "host.unexpectedExit",
-          "diagnostic mode returned 0; production PASS is not accepted in P2",
+          "diagnostic mode returned 0; production PASS requires mode=production",
           { evidence: ["exit=0", `stdout_tail=${outcome.stdoutTail.slice(-500)}`] },
+        ),
+      );
+      return;
+    }
+
+    if (record.mode === "production" && outcome.exitCode === 41) {
+      this.failRecord(
+        this.store.read(jobId),
+        new HostError(
+          "host.unexpectedExit",
+          "production mode returned diagnostic exit 41",
+          { evidence: ["exit=41", `stdout_tail=${outcome.stdoutTail.slice(-500)}`] },
         ),
       );
       return;
@@ -551,6 +614,7 @@ function toStatus(record: JobRecord): JobStatus {
     baseKey: record.baseKey,
     attempt: record.attempt,
     state: record.state,
+    mode: record.mode,
     phase: record.phase,
     seq: record.seq,
     createdAt: record.createdAt,

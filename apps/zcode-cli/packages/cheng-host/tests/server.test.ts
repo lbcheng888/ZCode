@@ -116,7 +116,7 @@ function hello(workspaceRoot: string, auth: string | null = null) {
     auth,
     workspaceRoot,
     workspaceIdentity: "test-workspace",
-    contract: 1,
+    contract: 2,
     client: { kind: "cli" },
   };
 }

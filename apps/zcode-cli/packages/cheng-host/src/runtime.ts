@@ -1,11 +1,40 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+
+import { parseDonorsTsv } from "@zcode/cheng-contract";
 
 import { HostError } from "./errors.js";
 
-export interface RuntimePin {
+export type ChengRunMode = "production" | "diagnostic";
+
+export interface ProductionSlot {
+  readonly driverPath: string;
+  readonly driverSha256: string;
+  readonly provenancePath: string;
+  readonly provenanceReportSha256: string;
+  readonly linkerPath: string;
+  readonly linkerSha256: string;
+  readonly donorsListPath: string;
+  readonly donorsListSha256: string;
+  readonly donorProvenancePath: string;
+  readonly donorProvenanceSha256: string;
+  readonly donorCount: number;
+  readonly donorPaths: readonly string[];
+}
+
+export interface DiagnosticSlot {
+  readonly driverPath: string;
+  readonly driverSha256: string;
+}
+
+export interface ActiveSeedPin {
+  readonly path: string;
+  readonly sha256: string;
+}
+
+export interface ToolchainPinV2 {
   /** Real path of the pinned cheng-lang checkout. */
   readonly chengRoot: string;
   readonly headSha: string;
@@ -13,10 +42,21 @@ export interface RuntimePin {
   readonly runnerSha256: string;
   readonly driverPath: string;
   readonly driverSha256: string;
+  readonly productionSlot: ProductionSlot | null;
+  readonly diagnosticSlot: DiagnosticSlot | null;
+  readonly readyModes: readonly ChengRunMode[];
+  readonly activeSeedPin: ActiveSeedPin | null;
 }
 
-/** Diagnostic driver pinned by the runner script itself. */
-export const DIAGNOSTIC_DRIVER_REL = "artifacts/bootstrap/cheng.stage3.bak.bd9a95ce";
+export type RuntimePin = ToolchainPinV2;
+
+export const PRODUCTION_DRIVER_REL = "artifacts/bootstrap/cheng.stage3";
+export const PRODUCTION_PROVENANCE_REL = "artifacts/bootstrap/cheng.stage3.provenance.txt";
+export const PRODUCTION_LINKER_REL = "artifacts/bootstrap/cheng.linker";
+export const DONORS_LIST_REL = "artifacts/csg_donors/donors.list";
+export const DONOR_PROVENANCE_REL = "artifacts/csg_donors/donor_provenance.tsv";
+export const DIAGNOSTIC_DRIVER_REL = "artifacts/bootstrap/cheng.stage3.diagnostic";
+export const ACTIVE_SEED_REL = ".c0run/four_layer_r2/sleep_prior/m5_prior.seed";
 
 const RUNNER_REL = "tools/csg_spec_v2_cli_run";
 
@@ -55,13 +95,14 @@ export function assertExpectedPins(pin: RuntimePin, expected: ExpectedPins): voi
 }
 
 /**
- * Resolve and verify the runtime checkout. Any missing fact is a startup
- * failure: no compiled runtime fallback, no "latest binary", no guessing.
+ * Resolve and verify the runtime checkout with dual-slot probing (ToolchainPinV2).
+ * Succeeds if at least one slot (production or diagnostic) is valid; any SHA
+ * mismatch or missing both slots fails closed with host.runtimeUnavailable.
  */
 export function probeRuntime(
   env: NodeJS.ProcessEnv = process.env,
   options: { platform?: NodeJS.Platform } = {},
-): RuntimePin {
+): ToolchainPinV2 {
   const platform = options.platform ?? process.platform;
   if (platform !== "darwin" && platform !== "linux") {
     throw new HostError(
@@ -108,17 +149,237 @@ export function probeRuntime(
 
   const runnerPath = join(root, RUNNER_REL);
   assertExecutable(runnerPath, "runner");
-  const driverPath = join(root, DIAGNOSTIC_DRIVER_REL);
-  assertExecutable(driverPath, "diagnostic driver");
+  const runnerSha256 = sha256File(runnerPath);
+
+  const productionSlot = probeProductionSlot(root);
+  const diagnosticSlot = probeDiagnosticSlot(root, env);
+
+  const readyModes: ChengRunMode[] = [];
+  if (productionSlot !== null) readyModes.push("production");
+  if (diagnosticSlot !== null) readyModes.push("diagnostic");
+
+  if (readyModes.length === 0) {
+    throw new HostError(
+      "host.runtimeUnavailable",
+      "neither productionSlot nor diagnosticSlot is available",
+      {
+        evidence: [
+          `productionDriver=${join(root, PRODUCTION_DRIVER_REL)}`,
+          `diagnosticDriver=${env.ZCODE_CHENG_DIAGNOSTIC_DRIVER ?? join(root, DIAGNOSTIC_DRIVER_REL)}`,
+        ],
+      },
+    );
+  }
+
+  const activeSeedCandidate = join(root, ACTIVE_SEED_REL);
+  let activeSeedPin: ActiveSeedPin | null = null;
+  if (existsSync(activeSeedCandidate)) {
+    try {
+      if (statSync(activeSeedCandidate).isFile()) {
+        activeSeedPin = {
+          path: activeSeedCandidate,
+          sha256: sha256File(activeSeedCandidate),
+        };
+      }
+    } catch {
+      activeSeedPin = null;
+    }
+  }
+
+  const primaryDriverPath = productionSlot?.driverPath ?? diagnosticSlot!.driverPath;
+  const primaryDriverSha256 = productionSlot?.driverSha256 ?? diagnosticSlot!.driverSha256;
 
   return {
     chengRoot: root,
     headSha,
     runnerPath,
-    runnerSha256: sha256File(runnerPath),
-    driverPath,
-    driverSha256: sha256File(driverPath),
+    runnerSha256,
+    driverPath: primaryDriverPath,
+    driverSha256: primaryDriverSha256,
+    productionSlot,
+    diagnosticSlot,
+    readyModes,
+    activeSeedPin,
   };
+}
+
+function probeProductionSlot(root: string): ProductionSlot | null {
+  const driverPath = join(root, PRODUCTION_DRIVER_REL);
+  const provenancePath = join(root, PRODUCTION_PROVENANCE_REL);
+  const linkerPath = join(root, PRODUCTION_LINKER_REL);
+  const donorsListPath = join(root, DONORS_LIST_REL);
+  const donorProvenancePath = join(root, DONOR_PROVENANCE_REL);
+
+  const requiredFiles = [
+    driverPath,
+    provenancePath,
+    linkerPath,
+    donorsListPath,
+    donorProvenancePath,
+  ];
+  const anyPresent = requiredFiles.some((p) => existsSync(p));
+  if (!anyPresent) {
+    return null;
+  }
+  for (const p of requiredFiles) {
+    if (!existsSync(p)) {
+      throw new HostError("host.runtimeUnavailable", `production slot incomplete: missing ${p}`, {
+        evidence: [`missing=${p}`],
+      });
+    }
+  }
+
+  assertExecutable(driverPath, "production driver");
+  assertExecutable(linkerPath, "production linker");
+
+  const driverSha256 = sha256File(driverPath);
+  const linkerSha256 = sha256File(linkerPath);
+  const provenanceText = readFileSync(provenancePath, "utf8");
+  const provenanceReportSha256 = sha256Text(provenanceText);
+  const kv = parseProvenanceKeyValues(provenanceText, provenancePath);
+
+  if (kv.get("compiler_executable_sha256") !== driverSha256) {
+    throw new HostError(
+      "host.runtimeUnavailable",
+      "production provenance compiler_executable_sha256 mismatch",
+      {
+        evidence: [
+          `expected=${driverSha256}`,
+          `actual=${kv.get("compiler_executable_sha256") ?? "<missing>"}`,
+        ],
+      },
+    );
+  }
+  if (kv.get("cold_system_link_exec") !== "0") {
+    throw new HostError(
+      "host.runtimeUnavailable",
+      "production provenance cold_system_link_exec must be 0",
+      { evidence: [`actual=${kv.get("cold_system_link_exec") ?? "<missing>"}`] },
+    );
+  }
+
+  const donorsListText = readFileSync(donorsListPath, "utf8");
+  const donorsListSha256 = sha256Text(donorsListText);
+  const rawDonorLines = donorsListText
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (rawDonorLines.length === 0) {
+    throw new HostError("host.runtimeUnavailable", "production donors.list is empty", {
+      evidence: [`donorsListPath=${donorsListPath}`],
+    });
+  }
+
+  const donorPaths = rawDonorLines.map((entry) =>
+    isAbsolute(entry) ? entry : resolve(root, entry),
+  );
+  for (const objPath of donorPaths) {
+    if (!existsSync(objPath) || !statSync(objPath).isFile()) {
+      throw new HostError("host.runtimeUnavailable", `production donor object missing: ${objPath}`, {
+        evidence: [`donor=${objPath}`],
+      });
+    }
+  }
+
+  const donorProvenanceText = readFileSync(donorProvenancePath, "utf8");
+  const donorProvenanceSha256 = sha256Text(donorProvenanceText);
+  let provenanceRows;
+  try {
+    provenanceRows = parseDonorsTsv(donorProvenanceText, donorProvenancePath);
+  } catch (error) {
+    throw new HostError(
+      "host.runtimeUnavailable",
+      `production donor_provenance.tsv invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { evidence: [`donorProvenancePath=${donorProvenancePath}`] },
+    );
+  }
+
+  if (provenanceRows.length !== donorPaths.length) {
+    throw new HostError(
+      "host.runtimeUnavailable",
+      `donor count mismatch: donors.list=${donorPaths.length} vs donor_provenance.tsv=${provenanceRows.length}`,
+      { evidence: [`donorsList=${donorPaths.length}`, `provenance=${provenanceRows.length}`] },
+    );
+  }
+
+  for (let i = 0; i < donorPaths.length; i += 1) {
+    const objPath = donorPaths[i]!;
+    const row = provenanceRows[i]!;
+    const actualSha = sha256File(objPath);
+    if (actualSha !== row.objectSha256) {
+      throw new HostError(
+        "host.runtimeUnavailable",
+        `donor object sha256 mismatch at index ${row.index}: ${objPath}`,
+        { evidence: [`expected=${row.objectSha256}`, `actual=${actualSha}`] },
+      );
+    }
+    if (row.compilerSha256 !== driverSha256) {
+      throw new HostError(
+        "host.runtimeUnavailable",
+        `donor compiler_sha256 mismatch at index ${row.index}`,
+        { evidence: [`expected=${driverSha256}`, `actual=${row.compilerSha256}`] },
+      );
+    }
+  }
+
+  return {
+    driverPath,
+    driverSha256,
+    provenancePath,
+    provenanceReportSha256,
+    linkerPath,
+    linkerSha256,
+    donorsListPath,
+    donorsListSha256,
+    donorProvenancePath,
+    donorProvenanceSha256,
+    donorCount: donorPaths.length,
+    donorPaths,
+  };
+}
+
+function probeDiagnosticSlot(root: string, env: NodeJS.ProcessEnv): DiagnosticSlot | null {
+  const override = env.ZCODE_CHENG_DIAGNOSTIC_DRIVER?.trim() ?? "";
+  if (override.length > 0) {
+    const resolved = resolve(override);
+    assertExecutable(resolved, "diagnostic driver (ZCODE_CHENG_DIAGNOSTIC_DRIVER)");
+    return {
+      driverPath: resolved,
+      driverSha256: sha256File(resolved),
+    };
+  }
+  const defaultPath = join(root, DIAGNOSTIC_DRIVER_REL);
+  if (!existsSync(defaultPath)) {
+    return null;
+  }
+  assertExecutable(defaultPath, "diagnostic driver");
+  return {
+    driverPath: defaultPath,
+    driverSha256: sha256File(defaultPath),
+  };
+}
+
+function parseProvenanceKeyValues(text: string, sourcePath: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+    const idx = line.indexOf("=");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = line.slice(0, idx).trim();
+    const val = line.slice(idx + 1).trim();
+    if (key.length > 0) {
+      map.set(key, val);
+    }
+  }
+  if (map.size === 0) {
+    throw new HostError("host.runtimeUnavailable", `empty provenance report: ${sourcePath}`);
+  }
+  return map;
 }
 
 function assertExecutable(path: string, label: string): void {

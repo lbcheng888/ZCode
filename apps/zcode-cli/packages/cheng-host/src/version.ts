@@ -2,10 +2,10 @@
 export const PROTOCOL_VERSION = 1 as const;
 
 /** Contract major of `@zcode/cheng-contract` consumed by this host. */
-export const CONTRACT_MAJOR = 1 as const;
+export const CONTRACT_MAJOR = 2 as const;
 
 /** Host package version; mirrors package.json and is pinned in capabilities. */
-export const HOST_VERSION = "0.1.0";
+export const HOST_VERSION = "0.2.0";
 
 /** Frame cap for inbound requests (plan §4.3: 1 MiB). */
 export const MAX_FRAME_BYTES = 1024 * 1024;

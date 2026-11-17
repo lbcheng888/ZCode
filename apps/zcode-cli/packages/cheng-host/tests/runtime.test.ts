@@ -30,7 +30,7 @@ function makeRepo(): string {
   const runner = join(dir, "tools", "csg_spec_v2_cli_run");
   writeFileSync(runner, "#!/bin/sh\nexit 41\n");
   chmodSync(runner, 0o755);
-  const driver = join(dir, "artifacts", "bootstrap", "cheng.stage3.bak.bd9a95ce");
+  const driver = join(dir, "artifacts", "bootstrap", "cheng.stage3.diagnostic");
   writeFileSync(driver, "#!/bin/sh\nexit 0\n");
   chmodSync(driver, 0o755);
   return dir;
