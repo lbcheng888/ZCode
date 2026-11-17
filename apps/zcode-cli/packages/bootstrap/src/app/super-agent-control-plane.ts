@@ -20,6 +20,12 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import {
+  runChengEvolutionFlywheelCycle,
+  type ActiveSeedPinRecord,
+  type ChengEvolutionHostPort,
+  type FourLayerCycleReceiptSummary,
+} from "../super-agent/cheng-evolution-flywheel.js";
 import { CHENG_PLAN_TOOL_NAME, goalChengPlanId } from "@zcode/contracts";
 import type {
   ModelInputMessage,
@@ -216,6 +222,15 @@ export interface CreateSuperAgentControlPlaneOptions {
    * 只有 daemon plane 组合根传 true；会话 app 不传（避免误杀其他会话的在途 job）。
    */
   reconcileChengJobsOnStartup?: boolean;
+  /** Wave 4：Off-Peak 四层自进化飞轮配置（缺席时不启动飞轮调度）。 */
+  chengEvolution?: {
+    chengHost: ChengEvolutionHostPort;
+    runsRoots: readonly string[];
+    activeSeedPinFile?: string;
+    approved?: boolean;
+    intervalMs?: number;
+    onSeedPinUpdated?: (pin: ActiveSeedPinRecord) => void | Promise<void>;
+  };
 }
 
 export interface SuperAgentControlPlaneContracts {
@@ -241,6 +256,8 @@ export interface SuperAgentControlPlane {
   listPendingWouldAccept(): PendingWouldAcceptCard[];
   /** v4 快照 `backgroundRuns[]`（S0）：registry 表有界投影，running 优先；显式 [] = 零行。 */
   listBackgroundRuns(): BackgroundRunView[];
+  /** Wave 4：手动或 off-peak 触发一次四层自进化飞轮周期。 */
+  runChengEvolutionCycle?(): Promise<FourLayerCycleReceiptSummary | null>;
   /**
    * would-accept 一键批转 auto（spec §2.1 `promoteWouldAccept(cardId)` / design M4）：
    * 写显式 mandate(tier=auto) 行 + decision_log(would_accept_convert) 行，读面随即过滤该卡。
@@ -1072,6 +1089,35 @@ export async function createSuperAgentControlPlane(
     };
   };
 
+  let evolutionTimer: ReturnType<typeof setInterval> | undefined;
+  let evolutionInFlight = false;
+  const runChengEvolutionCycle = options.chengEvolution
+    ? async (): Promise<FourLayerCycleReceiptSummary | null> => {
+        if (closed || !leader || evolutionInFlight || !options.chengEvolution) return null;
+        evolutionInFlight = true;
+        try {
+          return await runChengEvolutionFlywheelCycle({
+            workspaceIdentity,
+            chengHost: options.chengEvolution.chengHost,
+            decisionLog,
+            runsRoots: options.chengEvolution.runsRoots,
+            ...(options.chengEvolution.activeSeedPinFile === undefined
+              ? {}
+              : { activeSeedPinFile: options.chengEvolution.activeSeedPinFile }),
+            ...(options.chengEvolution.approved === undefined
+              ? {}
+              : { approved: options.chengEvolution.approved }),
+            ...(options.chengEvolution.onSeedPinUpdated === undefined
+              ? {}
+              : { onSeedPinUpdated: options.chengEvolution.onSeedPinUpdated }),
+            now,
+          });
+        } finally {
+          evolutionInFlight = false;
+        }
+      }
+    : undefined;
+
   return {
     triggerSink,
     database: db,
@@ -1088,6 +1134,7 @@ export async function createSuperAgentControlPlane(
     isLeader: () => leader,
     listPendingWouldAccept,
     listBackgroundRuns,
+    ...(runChengEvolutionCycle ? { runChengEvolutionCycle } : {}),
     promoteWouldAccept,
     resolveAdmissionMandateFacts,
     releaseLeadership(): number {
@@ -1104,6 +1151,15 @@ export async function createSuperAgentControlPlane(
       heartbeatTimer = setInterval(tickLeadership, CONTROL_PLANE_HEARTBEAT_INTERVAL_MS);
       // 不阻塞宿主进程退出（CLI 会话结束即退；控制面随进程生命周期，spec §2.2）。
       heartbeatTimer.unref?.();
+      if (runChengEvolutionCycle !== undefined) {
+        const intervalMs = options.chengEvolution?.intervalMs ?? 30 * 60 * 1000;
+        evolutionTimer = setInterval(() => {
+          void runChengEvolutionCycle().catch((error: unknown) => {
+            options.onError(error, "super_agent.cheng_evolution_flywheel");
+          });
+        }, intervalMs);
+        evolutionTimer.unref?.();
+      }
     },
     stop() {
       if (closed) return;
@@ -1113,6 +1169,10 @@ export async function createSuperAgentControlPlane(
       if (heartbeatTimer !== undefined) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
+      }
+      if (evolutionTimer !== undefined) {
+        clearInterval(evolutionTimer);
+        evolutionTimer = undefined;
       }
       if (leader) {
         adjudication.stop();

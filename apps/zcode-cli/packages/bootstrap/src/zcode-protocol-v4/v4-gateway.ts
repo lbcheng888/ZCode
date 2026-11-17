@@ -721,7 +721,38 @@ export class ConversationV4Gateway {
   private readonly telemetryNormalizer = new ConversationTelemetryFactNormalizer();
   private readonly cuaPermissionNormalizer = new CuaPermissionObservationNormalizer();
   private readonly telemetryEventIds = new Set<string>();
+  private readonly backgroundRunsDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
+
+  /**
+   * backgroundRuns[] live delta（Wave 3）：防抖（<= 250ms）合批推送 started / progress / terminal。
+   */
+  scheduleBackgroundRunsRefresh(sessionId?: string, debounceMs = 150): void {
+    if (this.disposed) return;
+    const clampedMs = Math.min(250, Math.max(0, debounceMs));
+    const key = sessionId ?? "*";
+    const existing = this.backgroundRunsDebounceTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.backgroundRunsDebounceTimers.delete(key);
+      this.refreshBackgroundRunsPublishers(sessionId);
+    }, clampedMs);
+    this.backgroundRunsDebounceTimers.set(key, timer);
+  }
+
+  refreshBackgroundRunsPublishers(targetSessionId?: string): void {
+    if (this.disposed) return;
+    for (const [sessionId, publisher] of this.publishers) {
+      if (targetSessionId !== undefined && sessionId !== targetSessionId) continue;
+      const runs = this.host.getSessionBackgroundRunsSeed?.(sessionId);
+      if (runs === null || runs === undefined) continue;
+      if (!publisher.publishBackgroundRuns(runs)) continue;
+      for (const [routeKey, state] of this.flushStates) {
+        if (state.sessionId !== sessionId) continue;
+        this.scheduleFlush(routeKey, state, publisher);
+      }
+    }
+  }
 
   /**
    * would-accept 权威投影变化（控制面裁决产出 / 批转成功）：逐 publisher 现读控制面
@@ -3253,6 +3284,10 @@ export class ConversationV4Gateway {
     for (const state of this.flushStates.values()) {
       if (state.timer) clearTimeout(state.timer);
     }
+    for (const timer of this.backgroundRunsDebounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.backgroundRunsDebounceTimers.clear();
     this.flushStates.clear();
     this.publishers.clear();
     this.hydratedSessions.clear();

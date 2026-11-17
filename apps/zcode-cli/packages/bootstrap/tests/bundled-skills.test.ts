@@ -123,6 +123,9 @@ describe("resolveBundledSkillRoots", () => {
     expect(root).toMatchObject({ scope: "system", source: "bundled" });
     expect(root?.path.endsWith(join("bundled-skills", "skills"))).toBe(true);
     expect(existsSync(join(root!.path, DYNAMIC_WORKFLOW_SKILL_NAME, "SKILL.md"))).toBe(true);
+    expect(existsSync(join(root!.path, "cheng-language", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(root!.path, "cheng-models", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(root!.path, "csg-ast", "SKILL.md"))).toBe(true);
     // 非 SEA 形态不落盘：storage 里不应出现任何解压产物。
     expect(existsSync(join(tempRoot, "cli", "bundled-skills"))).toBe(false);
   });

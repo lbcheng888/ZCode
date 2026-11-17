@@ -13,7 +13,7 @@ import {
 import type { AgentRuntime } from "@zcode/core";
 import {
   createBestPlanSuperAgent,
-  type BestPlanSuperAgentTurnStartedInput,
+  type BestPlanGroundedInput,
 } from "../src/app/best-plan-super-agent.js";
 import { createInputFacade } from "../src/app/input-facade.js";
 
@@ -199,14 +199,23 @@ function createHarness(options: FakeRuntimeOptions = {}) {
   return { agent, logger, ...runtime };
 }
 
-function turnStartedInput(
-  overrides: Partial<BestPlanSuperAgentTurnStartedInput> = {},
-): BestPlanSuperAgentTurnStartedInput {
+function groundedInput(
+  overrides: Partial<BestPlanGroundedInput> = {},
+): BestPlanGroundedInput {
   return {
     turnId: TURN_ID as never,
     requestText: "ship the feature",
+    toolName: "Write",
+    toolInput: { filePath: "src/foo.ts" },
+    evidence: [
+      {
+        toolName: "Read",
+        target: "src/foo.ts",
+        summary: "Read 20 lines of src/foo.ts",
+      } as never,
+    ],
+    evidenceDigest: "digest-1",
     traceContext: traceContextForTurn(),
-    userOrigin: true,
     ...overrides,
   };
 }
@@ -216,20 +225,11 @@ function warnedEvents(logger: { warn: ReturnType<typeof vi.fn> }): Array<string 
 }
 
 describe("createBestPlanSuperAgent", () => {
-  it("非用户回合不调用模型，也不注入工具", async () => {
-    const harness = createHarness();
-    await harness.agent.onTurnStarted(turnStartedInput({ userOrigin: false }));
-
-    expect(harness.generateWorkspaceText).not.toHaveBeenCalled();
-    expect(harness.scheduleTools).not.toHaveBeenCalled();
-    expect(harness.executeTools).not.toHaveBeenCalled();
-    expect(harness.logger.warn).not.toHaveBeenCalled();
-  });
-
   it("工具面没有 ProposeBestPlan 时静默跳过（能力缺席，不伪造卡）", async () => {
     const harness = createHarness({ hasProposeBestPlan: false });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.generateWorkspaceText).not.toHaveBeenCalled();
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
@@ -237,19 +237,21 @@ describe("createBestPlanSuperAgent", () => {
 
   it("会话模型选型缺席时 warn 后返回，不调模型也不注入", async () => {
     const harness = createHarness({ selection: undefined });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.generateWorkspaceText).not.toHaveBeenCalled();
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
     expect(warnedEvents(harness.logger)).toEqual(["best_plan.super_agent.selection_missing"]);
   });
 
-  it("合法 JSON：schedule 并执行 ProposeBestPlan，input 是六字段方案", async () => {
+  it("合法 JSON：将 TurnEvidenceBuffer 与 ChengPlan 喂入模型，schedule 并执行 ProposeBestPlan", async () => {
     const harness = createHarness();
-    const input = turnStartedInput();
-    await harness.agent.onTurnStarted(input);
+    const input = groundedInput();
+    const res = await harness.agent.synthesizeGroundedBestPlan(input);
 
+    expect(res).toEqual({ satisfied: true });
     expect(harness.generateWorkspaceText).toHaveBeenCalledTimes(1);
     const [generateInput, generateOptions] = harness.generateWorkspaceText.mock.calls[0]!;
     expect(generateInput).toMatchObject({
@@ -261,11 +263,12 @@ describe("createBestPlanSuperAgent", () => {
     expect(generateOptions).toEqual({ traceContext: input.traceContext });
     expect(generateInput.messages[0]?.role).toBe("system");
     expect(generateInput.messages[0]?.content).toContain("six-field");
-    expect(generateInput.messages[0]?.content).toContain("do not call tools");
-    expect(generateInput.messages[1]).toEqual({
-      role: "user",
-      content: expect.stringContaining("ship the feature"),
-    });
+    expect(generateInput.messages[0]?.content).toContain("TurnEvidenceBuffer");
+    expect(generateInput.messages[0]?.content).not.toContain("You cannot inspect the workspace in this call");
+    expect(generateInput.messages[1]?.role).toBe("user");
+    expect(generateInput.messages[1]?.content).toContain("ship the feature");
+    expect(generateInput.messages[1]?.content).toContain("Read 20 lines of src/foo.ts");
+    expect(generateInput.messages[1]?.content).toContain("Pending first side-effect tool");
 
     expect(harness.scheduleTools).toHaveBeenCalledTimes(1);
     const scheduledCall = harness.scheduleTools.mock.calls[0]![0][0]!;
@@ -311,7 +314,7 @@ describe("createBestPlanSuperAgent", () => {
 
   it("注入失败：抛错且不调用持久化（卡片未成立，没有可恢复的事实）", async () => {
     const harness = createHarness({ executeToolsSuccess: false });
-    await expect(harness.agent.onTurnStarted(turnStartedInput())).rejects.toThrow(
+    await expect(harness.agent.synthesizeGroundedBestPlan(groundedInput())).rejects.toThrow(
       "ProposeBestPlan 注入失败: injection rejected by gate",
     );
 
@@ -322,8 +325,9 @@ describe("createBestPlanSuperAgent", () => {
 
   it("坏 JSON：warn 后返回，不调度也不执行工具", async () => {
     const harness = createHarness({ generatedText: "not json at all" });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
     expect(harness.appendEvent).not.toHaveBeenCalled();
@@ -337,8 +341,9 @@ describe("createBestPlanSuperAgent", () => {
         candidateOptions: [VALID_PLAN.candidateOptions[0]],
       }),
     });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
     expect(harness.appendEvent).not.toHaveBeenCalled();
@@ -346,10 +351,9 @@ describe("createBestPlanSuperAgent", () => {
   });
 });
 
-describe("input-facade best-plan super-agent wiring", () => {
-  it("TurnStarted 命中 inputId 时触发，并传入回合 turnId、原始文本与 userOrigin", async () => {
+describe("input-facade TurnStarted (Two-Phase BestPlan: 0 calls on pure Q&A)", () => {
+  it("TurnStarted 不再盲调 BestPlan 模型", async () => {
     let sink: { onSessionEvent(event: SessionEvent): Promise<void> | void } | undefined;
-    const onTurnStarted = vi.fn().mockResolvedValue(undefined);
     const runtime = {
       subscribeEvents: vi.fn(
         (next: { onSessionEvent(event: SessionEvent): Promise<void> | void }) => {
@@ -364,7 +368,6 @@ describe("input-facade best-plan super-agent wiring", () => {
       }),
     };
     const facade = createInputFacade({
-      bestPlanSuperAgent: { onTurnStarted },
       logger: { warn: vi.fn() } as never,
       prepareUserExecutionBoundary: async () => {
         await sink?.onSessionEvent({
@@ -379,63 +382,8 @@ describe("input-facade best-plan super-agent wiring", () => {
       traceContext: createRootTraceContext({ sessionId: SESSION_ID as never }),
     });
 
-    await facade.sendInput("propose the plan", { inputId: "cmd-1", triggerSource: "user" });
-
-    expect(runtime.subscribeEvents).toHaveBeenCalledTimes(1);
-    expect(onTurnStarted).toHaveBeenCalledTimes(1);
-    const input = onTurnStarted.mock.calls[0]![0] as BestPlanSuperAgentTurnStartedInput;
-    expect(input.turnId).toBe(TURN_ID);
-    expect(input.requestText).toBe("propose the plan");
-    expect(input.userOrigin).toBe(true);
-    expect(input.traceContext).toMatchObject({
-      traceId: "trace-turn",
-      sessionId: SESSION_ID,
-      turnId: TURN_ID,
-    });
-  });
-
-  it("super-agent 失败经 logger.warn 暴露，不吞成无声", async () => {
-    let sink: { onSessionEvent(event: SessionEvent): Promise<void> | void } | undefined;
-    const logger = { warn: vi.fn() };
-    const runtime = {
-      subscribeEvents: vi.fn(
-        (next: { onSessionEvent(event: SessionEvent): Promise<void> | void }) => {
-          sink = next;
-          return () => {};
-        },
-      ),
-      admitPrompt: vi.fn().mockResolvedValue({
-        completion: Promise.resolve({}),
-        kind: "started",
-        turnId: TURN_ID,
-      }),
-    };
-    const facade = createInputFacade({
-      bestPlanSuperAgent: {
-        onTurnStarted: vi.fn().mockRejectedValue(new Error("model unavailable")),
-      },
-      logger: logger as never,
-      prepareUserExecutionBoundary: async () => {
-        await sink?.onSessionEvent({
-          type: SessionEventType.TurnStarted,
-          turnId: TURN_ID,
-          traceId: "trace-turn",
-          payload: { inputId: "cmd-1" },
-        } as unknown as SessionEvent);
-      },
-      runtime: runtime as never,
-      sessionId: SESSION_ID as never,
-      traceContext: createRootTraceContext({ sessionId: SESSION_ID as never }),
-    });
-
-    await facade.sendInput("propose the plan", { inputId: "cmd-1" });
-
-    await vi.waitFor(() => expect(logger.warn).toHaveBeenCalledTimes(1));
-    expect(logger.warn.mock.calls[0]?.[0]).toBe("Best plan super-agent failed");
-    expect(logger.warn.mock.calls[0]?.[1]).toMatchObject({
-      error: "model unavailable",
-      event: "best_plan.super_agent.failed",
-    });
+    await facade.sendInput("what is cheng?", { inputId: "cmd-1", triggerSource: "user" });
+    expect(runtime.admitPrompt).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -444,8 +392,9 @@ describe("createBestPlanSuperAgent turn lifecycle", () => {
     const harness = createHarness();
     const controller = new AbortController();
     controller.abort();
-    await harness.agent.onTurnStarted(turnStartedInput({ signal: controller.signal }));
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput({ signal: controller.signal }));
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.generateWorkspaceText).not.toHaveBeenCalled();
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
@@ -453,8 +402,9 @@ describe("createBestPlanSuperAgent turn lifecycle", () => {
 
   it("worker 已经自行提交方案时不再注入第二张卡", async () => {
     const harness = createHarness({ bestPlanSatisfied: true });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: true });
     expect(harness.generateWorkspaceText).not.toHaveBeenCalled();
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
@@ -464,8 +414,9 @@ describe("createBestPlanSuperAgent turn lifecycle", () => {
 describe("createBestPlanSuperAgent turn projection", () => {
   it("注入前发现当前回合已不是本 turn 时丢弃卡片", async () => {
     const harness = createHarness({ currentTurnId: "turn-next" });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
+    expect(res).toEqual({ satisfied: false });
     expect(harness.generateWorkspaceText).toHaveBeenCalledTimes(1);
     expect(harness.scheduleTools).not.toHaveBeenCalled();
     expect(harness.executeTools).not.toHaveBeenCalled();
@@ -480,7 +431,7 @@ describe("createBestPlanSuperAgent reminder queue", () => {
         currentEvidence: "证据一行\n证据二行",
       }),
     });
-    await harness.agent.onTurnStarted(turnStartedInput());
+    await harness.agent.synthesizeGroundedBestPlan(groundedInput());
 
     expect(harness.queueTurnSystemReminder).toHaveBeenCalledTimes(1);
     const queued = harness.queueTurnSystemReminder.mock.calls[0]![0];
@@ -513,7 +464,9 @@ describe("createBestPlanSuperAgent reminder queue", () => {
     harness.queueTurnSystemReminder.mockImplementation(() => {
       throw new Error("reminder source not registered");
     });
-    await expect(harness.agent.onTurnStarted(turnStartedInput())).resolves.toBeUndefined();
+    await expect(harness.agent.synthesizeGroundedBestPlan(groundedInput())).resolves.toEqual({
+      satisfied: true,
+    });
 
     expect(warnedEvents(harness.logger)).toEqual(["best_plan.super_agent.reminder_failed"]);
     expect(harness.logger.warn.mock.calls[0]![1]).toMatchObject({

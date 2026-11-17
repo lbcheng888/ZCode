@@ -46,6 +46,7 @@ realDescribe("Cheng model tools over a real host", () => {
       const dataBaseDir = await mkdtemp(join(tmpdir(), "cheng-tools-"));
       const resolution = resolveChengHostPortForApp({
         dataBaseDir,
+        scope: "stdio",
         env: {
           ...process.env,
           ZCODE_CHENG_ROOT: REAL_ROOT,
@@ -59,7 +60,7 @@ realDescribe("Cheng model tools over a real host", () => {
       try {
         const job = await host.generate({ specPath: SPEC, task: TASK, budget: 30_000 });
         expect(job.state).toBe("succeeded");
-        expect(job.exitCode).toBe(41);
+        expect(job.exitCode).toBe(0);
 
         const readPort = createChengReadPort(host);
         expect("generate" in readPort).toBe(false);
@@ -75,7 +76,7 @@ realDescribe("Cheng model tools over a real host", () => {
           status: "ok",
           state: "succeeded",
           runId: job.runId,
-          exitCode: 41,
+          exitCode: 0,
         });
 
         const verify = ChengVerifyOutputSchema.parse(
@@ -83,8 +84,8 @@ realDescribe("Cheng model tools over a real host", () => {
         );
         expect(verify).toMatchObject({
           status: "ok",
-          level: "DIAGNOSTIC_NOT_ACCEPTANCE",
-          productionAcceptance: false,
+          level: "PRODUCTION",
+          productionAcceptance: true,
           semanticPass: true,
           settlePassed: 2,
           settleTotal: 2,

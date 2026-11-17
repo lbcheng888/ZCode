@@ -5,16 +5,18 @@
 // ProposeBestPlan 工具把卡片注入当前回合。worker 模型不必自愿调用；本调用失败时硬门禁
 // 仍会把它引回 ProposeBestPlan（能力缺席时错误可见，不伪造卡）。
 
-import type { AgentRuntime, WorkspaceGenerateTextInput } from "@zcode/core";
+import type { AgentRuntime, TurnEvidenceEntry, WorkspaceGenerateTextInput } from "@zcode/core";
 import {
   BEST_PLAN_TOOL_NAME,
   BestPlanInputJsonSchema,
   BestPlanInputSchema,
+  createRootTraceContext,
   createSessionEvent,
   createToolCallId,
   SessionEventType,
   traceContextToLogContext,
   type BestPlanInput,
+  type GoalContinuationChengPlanCard,
   type JsonSchema,
   type Logger,
   type SessionId,
@@ -35,8 +37,8 @@ const BEST_PLAN_SUPER_AGENT_SYSTEM = `You are an independent best-plan super-age
 Rules:
 - Return one JSON object with exactly these fields: summary, currentEvidence, candidateOptions, recommendation, impact, verification.
 - candidateOptions must contain at least two entries. Each entry is {"option": what would be done, "cost": what it costs or risks compared with the alternatives}.
-- currentEvidence must state verified current-state evidence (file:line references or actual command output), not assumptions.
-- You cannot inspect the workspace in this call. Do not invent file:line references or command output; if no verified evidence was supplied, say so in currentEvidence.
+- currentEvidence must state verified current-state evidence (file:line references, tool summaries, or actual command output) grounded in the supplied TurnEvidenceBuffer and ChengPlan, not assumptions.
+- Ground currentEvidence and impact in the real observed evidence supplied in the prompt. Never fabricate file:line references or command output; if the evidence buffer is empty, state that no prior read-only evidence was gathered before this side-effect call.
 - recommendation must name the option to execute and why it beats the other candidates.
 - impact must list the files and packages touched, protocol/storage compatibility, and how to roll back.
 - verification must give the commands or steps that prove the work, plus a clear success criterion.
@@ -50,23 +52,27 @@ type BestPlanGenerateTextInput = WorkspaceGenerateTextInput & {
   responseJsonSchema: JsonSchema;
 };
 
-export interface BestPlanSuperAgentTurnStartedInput {
-  turnId: TurnId;
-  requestText: string;
-  traceContext: TraceContext;
-  userOrigin: boolean;
-  /** 回合结束即取消：注入必须发生在 turn 仍 running 时，否则投影会丢弃卡片。 */
-  signal?: AbortSignal;
+export interface BestPlanGroundedInput {
+  readonly turnId: TurnId;
+  readonly requestText: string;
+  readonly toolName: string;
+  readonly toolInput: unknown;
+  readonly evidence: readonly TurnEvidenceEntry[];
+  readonly evidenceDigest: string;
+  readonly traceContext?: TraceContext;
+  readonly signal?: AbortSignal;
 }
 
 export interface BestPlanSuperAgent {
-  onTurnStarted(input: BestPlanSuperAgentTurnStartedInput): Promise<void>;
+  synthesizeGroundedBestPlan(input: BestPlanGroundedInput): Promise<{ satisfied: boolean }>;
 }
 
 export interface CreateBestPlanSuperAgentDeps {
   runtime: AgentRuntime;
   sessionId: SessionId;
   logger: Logger;
+  /** 当 SessionGoal 绑定 chengRef 时，读取确定性 ChengPlan 摘要置入方案输入首段。 */
+  resolveChengPlanSummary?: () => Promise<GoalContinuationChengPlanCard | undefined>;
 }
 
 /**
@@ -99,53 +105,117 @@ function compressPlanSection(text: string): string {
   return text.replaceAll(/\s*\n+\s*/g, "；").trim();
 }
 
+function formatGroundedPrompt(
+  input: BestPlanGroundedInput,
+  chengPlan: GoalContinuationChengPlanCard | undefined,
+): string {
+  const sections: string[] = [];
+  if (chengPlan !== undefined) {
+    sections.push(
+      [
+        "Deterministic ChengPlan (SessionGoal.chengRef):",
+        `- planId: ${chengPlan.planId}${chengPlan.runId ? `, runId: ${chengPlan.runId}` : ""}`,
+        `- frontier: stage=${chengPlan.frontier.stage}, target=${chengPlan.frontier.target}`,
+        `- recommended: action=${chengPlan.recommended.action}, target=${chengPlan.recommended.target}`,
+        ...(chengPlan.evidenceRefs.length > 0
+          ? [`- evidenceRefs: ${chengPlan.evidenceRefs.join("; ")}`]
+          : []),
+      ].join("\n"),
+    );
+  }
+  sections.push(`Current user instruction:\n${input.requestText || "(none)"}`);
+  const inputSummary = (() => {
+    try {
+      const json = JSON.stringify(input.toolInput);
+      return json && json.length > 600 ? `${json.slice(0, 600)}...` : (json ?? "{}");
+    } catch {
+      return "{}";
+    }
+  })();
+  sections.push(`Pending first side-effect tool:\n- ${input.toolName}: ${inputSummary}`);
+  if (input.evidence.length === 0) {
+    sections.push(
+      "Observed TurnEvidenceBuffer: (empty — no read-only tool evidence gathered yet in this turn)",
+    );
+  } else {
+    const lines = input.evidence.map((entry, index) => {
+      const record = entry as unknown as Record<string, unknown>;
+      const tool = String(record.toolName ?? "read");
+      const target =
+        typeof record.target === "string"
+          ? record.target
+          : typeof record.filePath === "string"
+            ? record.filePath
+            : "";
+      const summary = typeof record.summary === "string" ? record.summary : JSON.stringify(entry);
+      return `${index + 1}. [${tool}]${target ? ` (${target})` : ""} ${summary}`;
+    });
+    sections.push(
+      `Observed TurnEvidenceBuffer (${input.evidence.length} entries, digest=${input.evidenceDigest}):\n${lines.join("\n")}`,
+    );
+  }
+  return sections.join("\n\n");
+}
+
 export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): BestPlanSuperAgent {
   return {
-    async onTurnStarted(input) {
-      // 只有人类发起的回合法案卡；trigger/automation 回合不替用户生成方案。
-      if (!input.userOrigin) return;
+    async synthesizeGroundedBestPlan(input) {
       // 子代理/worker 的工具面没有 ProposeBestPlan，注入会直接失败；能力缺席即跳过。
-      if (!deps.runtime.getToolRegistry().has(BEST_PLAN_TOOL_NAME)) return;
+      if (!deps.runtime.getToolRegistry().has(BEST_PLAN_TOOL_NAME)) {
+        return { satisfied: false };
+      }
+
+      const traceContext =
+        input.traceContext ??
+        createRootTraceContext({
+          sessionId: deps.sessionId,
+          turnId: input.turnId,
+          attributes: { querySource: BEST_PLAN_SUPER_AGENT_QUERY_SOURCE },
+        });
 
       const selection = deps.runtime.getSessionModelSelection();
       if (!selection) {
         deps.logger.warn("Best plan super-agent skipped: no session model selection", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           event: "best_plan.super_agent.selection_missing",
           module: "bootstrap",
           sessionId: String(deps.sessionId),
           status: "failed",
           turnId: String(input.turnId),
         });
-        return;
+        return { satisfied: false };
       }
 
-      // worker 可能已先被写前门禁引回 ProposeBestPlan；已经交过方案就不再花一次模型请求。
-      if (deps.runtime.isBestPlanSatisfied(input.turnId)) return;
+      // 已经交过方案就不再花一次模型请求。
+      if (deps.runtime.isBestPlanSatisfied(input.turnId)) {
+        return { satisfied: true };
+      }
+
+      const chengPlan = await deps.resolveChengPlanSummary?.().catch(() => undefined);
 
       const generateInput: BestPlanGenerateTextInput = {
         selection,
         messages: [
           { role: "system", content: BEST_PLAN_SUPER_AGENT_SYSTEM },
-          { role: "user", content: `Current user instruction:\n${input.requestText}` },
+          { role: "user", content: formatGroundedPrompt(input, chengPlan) },
         ],
         querySource: BEST_PLAN_SUPER_AGENT_QUERY_SOURCE,
         maxOutputTokens: BEST_PLAN_SUPER_AGENT_MAX_OUTPUT_TOKENS,
         responseJsonSchema: BestPlanInputJsonSchema,
       };
-      if (input.signal?.aborted) return;
+      if (input.signal?.aborted) return { satisfied: false };
       let generated;
       try {
         generated = await deps.runtime.generateWorkspaceText(generateInput, {
           ...(input.signal === undefined ? {} : { abortSignal: input.signal }),
-          traceContext: input.traceContext,
+          traceContext,
         });
       } catch (error) {
-        if (input.signal?.aborted) return;
+        if (input.signal?.aborted) return { satisfied: false };
         throw error;
       }
       // 主回合可能在模型调用期间结束；TurnComplete 后投影会丢弃同 turn 的 tool 事件。
-      if (input.signal?.aborted) return;
+      if (input.signal?.aborted) return { satisfied: false };
 
       let plan: BestPlanInput;
       try {
@@ -153,7 +223,7 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
       } catch (error) {
         // 解析失败不兜底造卡：worker 会撞上写前硬门禁，被引回 ProposeBestPlan 自行提交。
         deps.logger.warn("Best plan super-agent returned unusable JSON", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           error: error instanceof Error ? error.message : String(error),
           event: "best_plan.super_agent.parse_failed",
           module: "bootstrap",
@@ -161,16 +231,16 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
           status: "failed",
           turnId: String(input.turnId),
         });
-        return;
+        return { satisfied: false };
       }
 
       // 投影按 toolCallId 在整会话内定位工具行；固定 id 会让下一轮的卡片覆盖上一轮的行，
       // 所以 id 带上 turnId，保证每个回合各得一张独立卡片。
       // worker 被门禁拒绝后可能已自行调用 ProposeBestPlan；同一 turn 只允许一张卡。
-      if (deps.runtime.isBestPlanSatisfied(input.turnId)) return;
+      if (deps.runtime.isBestPlanSatisfied(input.turnId)) return { satisfied: true };
       // 投影的 currentTurnId 是回合是否仍在跑的权威读面：TurnComplete 后注入会被丢弃。
       const projection = await deps.runtime.getProjection();
-      if (projection.currentTurnId !== input.turnId) return;
+      if (projection.currentTurnId !== input.turnId) return { satisfied: false };
 
       const toolCall = {
         id: createToolCallId(`best-plan-super-agent:${input.turnId}`),
@@ -195,14 +265,14 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
               executionOrder: schedule.executionOrder,
             },
           },
-          { turnId: input.turnId, traceId: input.traceContext.traceId },
+          { turnId: input.turnId, traceId: traceContext.traceId },
         ),
-        input.traceContext,
+        traceContext,
       );
       // traceContext 携带本回合 turnId：成功记录后写前门禁按同一 turnId 放行。
       const startedAt = Date.now();
       const executed = await deps.runtime.executeTools([toolCall], schedule, {
-        traceContext: input.traceContext,
+        traceContext,
       });
       const result = executed.results[0];
       if (result?.success !== true) {
@@ -220,7 +290,7 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
           body: buildBestPlanReminderBody(plan),
         });
         deps.logger.debug("Best plan reminder queued for next model request", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           event: "best_plan.super_agent.reminder_queued",
           module: "bootstrap",
           sessionId: String(deps.sessionId),
@@ -229,7 +299,7 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
         });
       } catch (error) {
         deps.logger.warn("Best plan reminder queue failed; card intact, worker runs without inline guidance", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           error: error instanceof Error ? error.message : String(error),
           event: "best_plan.super_agent.reminder_failed",
           module: "bootstrap",
@@ -254,10 +324,10 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
             startedAt,
             endedAt,
           },
-          input.traceContext,
+          traceContext,
         );
         deps.logger.debug("Best plan card persisted as transcript fact", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           event: "best_plan.super_agent.persisted",
           module: "bootstrap",
           sessionId: String(deps.sessionId),
@@ -266,7 +336,7 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
         });
       } catch (error) {
         deps.logger.warn("Best plan card persistence failed: live card intact, cold recovery loses it", {
-          ...traceContextToLogContext(input.traceContext),
+          ...traceContextToLogContext(traceContext),
           error: error instanceof Error ? error.message : String(error),
           event: "best_plan.super_agent.persist_failed",
           module: "bootstrap",
@@ -275,6 +345,7 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
           turnId: String(input.turnId),
         });
       }
+      return { satisfied: true };
     },
   };
 }

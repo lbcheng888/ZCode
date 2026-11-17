@@ -43,6 +43,14 @@ export class BackgroundRunRegistry {
   private readonly rows = new Map<string, BackgroundRunRow>();
   /** 终态行插入序（FIFO 淘汰用）。 */
   private readonly terminalOrder: string[] = [];
+  private readonly changeListeners = new Set<() => void>();
+
+  subscribe(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
 
   constructor(
     private readonly terminalRowRetention: number,
@@ -203,6 +211,9 @@ export class BackgroundRunRegistry {
 
   private persist(row: BackgroundRunRow): void {
     this.persistence?.write({ ...row });
+    for (const listener of this.changeListeners) {
+      listener();
+    }
   }
 
   private pushTerminalOrder(id: string): void {

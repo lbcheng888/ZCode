@@ -409,6 +409,7 @@ export interface ZCodeApp {
    * legacy 直路，spec §5.4）。app.close 对称 stop（心跳/驱动器/域库）。
    */
   readonly superAgentControlPlane?: SuperAgentControlPlane;
+  readonly subscribeBackgroundRunsChanged?: (listener: () => void) => () => void;
   getMode(): CollaborationMode;
   getModel(): string;
   /** current-only 协议快照精确读取当前 Registry 模型，避免枚举整个目录。 */

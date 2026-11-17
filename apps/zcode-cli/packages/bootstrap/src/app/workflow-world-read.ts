@@ -101,7 +101,10 @@ export async function executeWorldRead(
       return await worldRun(deps, args);
     case "cheng-generate":
     case "cheng-verify":
-    case "cheng-graph": {
+    case "cheng-plan":
+    case "cheng-graph":
+    case "cheng-surface-check":
+    case "cheng-leaf-probe": {
       // op 词汇表由 registry 推导；isChengWorldReadOp 收窄后 executeChengWorldRead 只接受这三种。
       if (!isChengWorldReadOp(op)) {
         throw new WorkflowError("DriverError", `Unsupported Cheng op "${op}".`);

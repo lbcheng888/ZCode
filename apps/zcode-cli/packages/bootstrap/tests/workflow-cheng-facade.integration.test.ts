@@ -54,6 +54,7 @@ realDescribe("CreateWorkflow production path: cheng facade", () => {
 
       const resolution = resolveChengHostPortForApp({
         dataBaseDir: join(tempRoot, "data"),
+        scope: "stdio",
         env: {
           ...process.env,
           ZCODE_CHENG_ROOT: REAL_ROOT,
@@ -93,7 +94,7 @@ realDescribe("CreateWorkflow production path: cheng facade", () => {
 
         expect(settlement.artifact).toMatchObject({
           state: "succeeded",
-          level: "DIAGNOSTIC_NOT_ACCEPTANCE",
+          level: "PRODUCTION",
         });
         expect(journal.getRun(runId)?.status).toBe("completed");
 

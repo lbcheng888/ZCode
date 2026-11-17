@@ -1,5 +1,16 @@
 import { WorkflowError } from "@zcode/dynamic-workflow";
-import type { ChengPlanResult } from "@zcode/cheng-host";
+import type {
+  BundlePrepareResult,
+  Capabilities,
+  ChengPlanResult,
+  ChengSpecDraft,
+  EvolveResult,
+  GraphDiffResult,
+} from "@zcode/cheng-host";
+import type {
+  ChengLeafProbeReceipt,
+  ChengSurfaceReport,
+} from "@zcode/cheng-contract";
 import type { GoalContinuationChengPlanCard } from "@zcode/contracts";
 
 /**
@@ -15,7 +26,10 @@ import type { GoalContinuationChengPlanCard } from "@zcode/contracts";
 export const CHENG_WORLD_READ_OPS = [
   "cheng-generate",
   "cheng-verify",
+  "cheng-plan",
   "cheng-graph",
+  "cheng-surface-check",
+  "cheng-leaf-probe",
 ] as const;
 
 export type ChengWorldReadOp = (typeof CHENG_WORLD_READ_OPS)[number];
@@ -31,6 +45,10 @@ export interface ChengGenerateInput {
   specPath: string;
   task: string;
   budget: number;
+  mode?: "production" | "diagnostic";
+  moves?: "macro";
+  useLiblearn?: boolean;
+  allowDraftUnowned?: boolean;
   attempt?: string;
 }
 
@@ -102,6 +120,20 @@ export interface ChengHostPort {
     task: string,
     view: "structure" | "decision",
   ): Promise<ChengGraphResult>;
+  /** 准备内容寻址密封 Spec Bundle（Wave 1）。 */
+  bundlePrepare?(draft: ChengSpecDraft): Promise<BundlePrepareResult>;
+  /** <5ms 写后表面/预算门禁（Wave 2）。 */
+  checkSurface?(filePath: string): Promise<ChengSurfaceReport>;
+  /** <30s 受控单叶子 obj 探针（Wave 2）。 */
+  probeLeaf?(filePath: string, allowClosureProbe?: boolean): Promise<ChengLeafProbeReceipt>;
+  /** 结构/决策图差分（Wave 4）。 */
+  graphDiff?(runDirA: string, runDirB: string): Promise<GraphDiffResult>;
+  /** I1 反例闭环进化（Wave 4）。 */
+  evolveCounterexample?(runDirs?: readonly string[], dryRun?: boolean): Promise<EvolveResult>;
+  /** L4 Sleep 宏库压缩（Wave 4）。 */
+  evolveSleep?(runDirs?: readonly string[], dryRun?: boolean): Promise<EvolveResult>;
+  /** 查询宿主能力与双档就绪度。 */
+  capabilities?(): Promise<Capabilities>;
   /** 取消单个 job；host 只有在进程树确认消失后才返回 cancelled。 */
   cancel(jobId: string): Promise<"queued" | "running" | "succeeded" | "failed" | "cancelled">;
   /** 取消本端口当前在途的所有 job（workflow run 取消的接缝）。返回请求数。 */
@@ -168,9 +200,33 @@ export async function executeChengWorldRead(
       return await port.generate(parseGenerateArgs(op, args));
     case "cheng-verify":
       return await port.verify(singleStringArg(op, args, "jobId"));
+    case "cheng-plan": {
+      if (args.length !== 2 || typeof args[0] !== "string" || typeof args[1] !== "string") {
+        throw driverError(op, "expects (jobId, task)");
+      }
+      return await port.plan(args[0], args[1]);
+    }
     case "cheng-graph": {
       const [jobId, task, view] = graphArgs(op, args);
       return await port.graph(jobId, task, view);
+    }
+    case "cheng-surface-check": {
+      if (port.checkSurface === undefined) {
+        throw new WorkflowError("ChengHostUnavailable", "Cheng checkSurface is not wired on this port.");
+      }
+      return await port.checkSurface(singleStringArg(op, args, "filePath"));
+    }
+    case "cheng-leaf-probe": {
+      if (port.probeLeaf === undefined) {
+        throw new WorkflowError("ChengHostUnavailable", "Cheng probeLeaf is not wired on this port.");
+      }
+      if (args.length < 1 || args.length > 2 || typeof args[0] !== "string") {
+        throw driverError(op, "expects (filePath, allowClosureProbe?)");
+      }
+      if (args.length === 2 && typeof args[1] !== "boolean") {
+        throw driverError(op, "allowClosureProbe must be boolean");
+      }
+      return await port.probeLeaf(args[0], args[1] as boolean | undefined);
     }
     default: {
       const unknownOp: never = op;
@@ -189,7 +245,16 @@ function parseGenerateArgs(op: ChengWorldReadOp, args: unknown[]): ChengGenerate
     throw driverError(op, "expects one object argument");
   }
   const record = raw as Record<string, unknown>;
-  const allowed = new Set(["specPath", "task", "budget", "attempt"]);
+  const allowed = new Set([
+    "specPath",
+    "task",
+    "budget",
+    "mode",
+    "moves",
+    "useLiblearn",
+    "allowDraftUnowned",
+    "attempt",
+  ]);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
       throw driverError(op, `unexpected argument "${key}"`);
@@ -201,10 +266,21 @@ function parseGenerateArgs(op: ChengWorldReadOp, args: unknown[]): ChengGenerate
     record.budget === undefined ? CHENG_DEFAULT_BUDGET : boundedBudget(op, record.budget);
   const attempt =
     record.attempt === undefined ? undefined : attemptNonce(op, record.attempt);
+  const mode =
+    record.mode === "production" || record.mode === "diagnostic" ? record.mode : undefined;
+  const moves = record.moves === "macro" ? "macro" : undefined;
+  const useLiblearn =
+    typeof record.useLiblearn === "boolean" ? record.useLiblearn : undefined;
+  const allowDraftUnowned =
+    typeof record.allowDraftUnowned === "boolean" ? record.allowDraftUnowned : undefined;
   return {
     specPath,
     task,
     budget,
+    ...(mode === undefined ? {} : { mode }),
+    ...(moves === undefined ? {} : { moves }),
+    ...(useLiblearn === undefined ? {} : { useLiblearn }),
+    ...(allowDraftUnowned === undefined ? {} : { allowDraftUnowned }),
     ...(attempt === undefined ? {} : { attempt }),
   };
 }

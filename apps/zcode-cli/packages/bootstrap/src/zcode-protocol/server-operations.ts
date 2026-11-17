@@ -4063,10 +4063,12 @@ async function createRecord(
   let subscribed = true;
   let unsubscribeSessionEvents = () => {};
   let unsubscribeContextComposition = () => {};
+  let unsubscribeBackgroundRuns = () => {};
   record.unsubscribe = () => {
     subscribed = false;
     unsubscribeSessionEvents();
     unsubscribeContextComposition();
+    unsubscribeBackgroundRuns();
   };
   unsubscribeSessionEvents = app.runtime.subscribeEvents({
     // 解除订阅前已排队的 callback 仍可能迟到，不能污染重启后的同名 session 投影。
@@ -4079,6 +4081,10 @@ async function createRecord(
     sessionId,
     app.runtime,
   );
+  unsubscribeBackgroundRuns =
+    app.subscribeBackgroundRunsChanged?.(() => {
+      if (subscribed) context.v4Gateway?.scheduleBackgroundRunsRefresh(sessionId);
+    }) ?? (() => {});
   // 绑定归属会话，供 automation-port 读取本会话实时 model/mode/thought。
   ownSessionRecord = record;
   return record;

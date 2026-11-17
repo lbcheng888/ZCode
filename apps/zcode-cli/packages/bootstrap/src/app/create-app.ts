@@ -120,7 +120,7 @@ import { createWorkflowFacade } from "./workflow-facade.js";
 import { resolveChengHostPortForApp } from "./cheng-host-config.js";
 import { createChengReadPort } from "./workflow-cheng-read-port.js";
 import { createInputFacade } from "./input-facade.js";
-import { createBestPlanSuperAgent } from "./best-plan-super-agent.js";
+import { createBestPlanSuperAgent, type BestPlanSuperAgent } from "./best-plan-super-agent.js";
 import { createPluginFacadeForApp } from "./plugin-facade.js";
 import { resolvePluginRuntimeFeatures } from "./plugin-runtime-features.js";
 import { OFFICIAL_VISUALIZE_PLUGIN_ID } from "./official-plugin-definitions.js";
@@ -1032,6 +1032,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     };
     const chengHostAssembly = resolveChengHostPortForApp({
       dataBaseDir: resolveDataBaseDir(options.env),
+      workspaceRoot: workingDirectory,
       ...(options.env === undefined ? {} : { env: options.env }),
       ...(options.chengHostEntry === undefined ? {} : { hostEntry: options.chengHostEntry }),
       observer: chengJobObserver,
@@ -1167,19 +1168,114 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     const chengReadPort =
       chengHostAssembly.kind === "wired" ? createChengReadPort(chengHostAssembly.port) : undefined;
 
-    // ChengGenerate 的生成端口：同一 host，窄化只暴露 generate（inspect/cancel/close 不出）。
+    // ChengGenerate 的生成端口：同一 host，窄化只暴露 generate/bundlePrepare（inspect/cancel/close 不出）。
     // budget 缺省按 host 缺省档补齐；回执只保留摘要三字段，只读四件套继续走 chengReadPort。
     const chengGeneratePort =
       chengHostAssembly.kind === "wired"
         ? {
-            generate: async (input: { specPath: string; task: string; budget?: number }) => {
+            generate: async (input: {
+              specPath: string;
+              task: string;
+              budget?: number;
+              mode?: "production" | "diagnostic";
+              moves?: "macro";
+              useLiblearn?: boolean;
+              allowDraftUnowned?: boolean;
+            }) => {
               const { jobId, runId, state } = await chengHostAssembly.port.generate({
                 specPath: input.specPath,
                 task: input.task,
                 budget: input.budget ?? CHENG_DEFAULT_BUDGET,
+                ...(input.mode === undefined ? {} : { mode: input.mode }),
+                ...(input.moves === undefined ? {} : { moves: input.moves }),
+                ...(input.useLiblearn === undefined ? {} : { useLiblearn: input.useLiblearn }),
+                ...(input.allowDraftUnowned === undefined
+                  ? {}
+                  : { allowDraftUnowned: input.allowDraftUnowned }),
               });
               return { jobId, runId, state };
             },
+            ...(chengHostAssembly.port.bundlePrepare
+              ? {
+                  bundlePrepare: async (input: {
+                    draft: Parameters<
+                      NonNullable<typeof chengHostAssembly.port.bundlePrepare>
+                    >[0];
+                  }) => await chengHostAssembly.port.bundlePrepare!(input.draft),
+                }
+              : {}),
+          }
+        : undefined;
+
+    const chengHostToolPort =
+      chengHostAssembly.kind === "wired" &&
+      chengReadPort !== undefined &&
+      chengGeneratePort !== undefined
+        ? {
+            ...chengReadPort,
+            ...chengGeneratePort,
+            ...(chengHostAssembly.port.checkSurface
+              ? {
+                  checkSurface: async (input: { filePath: string }) => {
+                    const report = await chengHostAssembly.port.checkSurface!(input.filePath);
+                    return {
+                      ...report,
+                      violations: report.violations.map((v) => ({
+                        ruleId: v.code,
+                        line: v.line,
+                        ...(v.column === undefined ? {} : { column: v.column }),
+                        message: v.message,
+                        source: v.source,
+                      })),
+                    };
+                  },
+                }
+              : {}),
+            ...(chengHostAssembly.port.probeLeaf
+              ? {
+                  probeLeaf: async (input: {
+                    filePath: string;
+                    allowClosureProbe?: boolean;
+                  }) => {
+                    const receipt = await chengHostAssembly.port.probeLeaf!(
+                      input.filePath,
+                      input.allowClosureProbe,
+                    );
+                    return {
+                      schema: receipt.schema,
+                      filePath: receipt.filePath,
+                      driverSha256: receipt.driverSha256,
+                      exitCode: receipt.exitCode,
+                      objPath: receipt.objPath,
+                      objBytes: receipt.objBytes,
+                      compileMaxRssBytes: receipt.compileMaxRssBytes,
+                      wallMs: receipt.wallMs,
+                      ok: receipt.ok,
+                      ...(receipt.admissionTicketId === null
+                        ? {}
+                        : { admissionTicketId: receipt.admissionTicketId }),
+                      firstError: receipt.firstError,
+                    };
+                  },
+                }
+              : {}),
+            ...(chengHostAssembly.port.graphDiff
+              ? {
+                  graphDiff: async (input: { runDirA: string; runDirB: string }) => {
+                    const diff = await chengHostAssembly.port.graphDiff!(
+                      input.runDirA,
+                      input.runDirB,
+                    );
+                    return {
+                      added: diff.added.length,
+                      removed: diff.removed.length,
+                      changed: diff.changed.length,
+                      digestA: diff.digestA,
+                      digestB: diff.digestB,
+                    };
+                  },
+                }
+              : {}),
           }
         : undefined;
 
@@ -1412,6 +1508,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       registry: options.providerRegistry,
       currentSelection: () => getRuntime().getSessionModelSelection(),
     });
+    let bestPlanSuperAgent: BestPlanSuperAgent | undefined;
     // S1 写租约：runtime 先于控制面构造，两个值在 createApp 返回前完成绑定。
     runtime = new AgentRuntime(sessionId, runtimeConfig, {
       ...(options.readSubagentRuntimeConfig
@@ -1513,6 +1610,11 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       dynamicWorkflowSnippetPort,
       ...(chengReadPort === undefined ? {} : { chengReadPort }),
       ...(chengGeneratePort === undefined ? {} : { chengGeneratePort }),
+      ...(chengHostToolPort === undefined ? {} : { chengHostPort: chengHostToolPort }),
+      synthesizeGroundedBestPlan: async (input) =>
+        bestPlanSuperAgent
+          ? await bestPlanSuperAgent.synthesizeGroundedBestPlan(input)
+          : { satisfied: false },
       modelCatalogPort,
       sessionControl,
       automationPort: options.automationPort,
@@ -1533,8 +1635,18 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
       workingDirectory,
     });
     scheduleStartupLogRetentionCleanup(loggerFactory, logger);
+    bestPlanSuperAgent = createBestPlanSuperAgent({
+      runtime,
+      sessionId,
+      logger,
+      resolveChengPlanSummary: async () => {
+        if (resolveGoalChengPlan === undefined) return undefined;
+        const target = await sessionStore.readTarget?.({ sessionID: sessionId });
+        if (!target?.chengRef) return undefined;
+        return await resolveGoalChengPlan(target);
+      },
+    });
     const inputFacade = createInputFacade({
-      bestPlanSuperAgent: createBestPlanSuperAgent({ runtime, sessionId, logger }),
       cliDefaultSelection,
       artifactStore,
       customCommandPromptResolver: async (text, resolverOptions) => {
@@ -1813,6 +1925,40 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           ? {
               resolveSpecRunGate: async (jobId: string) =>
                 (await chengHostAssembly.port.verify(jobId)).gate,
+              ...(chengHostAssembly.port.evolveCounterexample &&
+              chengHostAssembly.port.evolveSleep
+                ? {
+                    chengEvolution: {
+                      chengHost: {
+                        evolveCounterexample: async ({
+                          runDirs,
+                          dryRun,
+                        }: {
+                          runDirs: readonly string[];
+                          dryRun?: boolean;
+                        }) =>
+                          await chengHostAssembly.port.evolveCounterexample!(runDirs, dryRun),
+                        evolveSleep: async ({
+                          runDirs,
+                          dryRun,
+                        }: {
+                          runDirs: readonly string[];
+                          dryRun?: boolean;
+                        }) => await chengHostAssembly.port.evolveSleep!(runDirs, dryRun),
+                      },
+                      runsRoots: [
+                        join(chengHostAssembly.chengRoot, ".c0run", "four_layer_r2", "csg_prod", "prod_run", "runs"),
+                      ],
+                      activeSeedPinFile: join(
+                        chengHostAssembly.dataBaseDir,
+                        ".chengcode",
+                        "v2",
+                        "cheng",
+                        "active_seed_pin.json",
+                      ),
+                    },
+                  }
+                : {}),
             }
           : {}),
         onError: (error, context) => {
@@ -2327,6 +2473,12 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
           }),
       ...createPluginFacadeForApp({ configResult, options, workingDirectory }),
       ...(superAgentControlPlane ? { superAgentControlPlane } : {}),
+      ...(backgroundRunRegistry
+        ? {
+            subscribeBackgroundRunsChanged: (listener: () => void) =>
+              backgroundRunRegistry.subscribe(listener),
+          }
+        : {}),
       getPluginReferenceCatalog: () => pluginReferenceCatalog,
       getSkillCatalog: async () => {
         // Skill 目录属于 context 初始化结果。冷恢复必须先恢复 Session 边界，再读取

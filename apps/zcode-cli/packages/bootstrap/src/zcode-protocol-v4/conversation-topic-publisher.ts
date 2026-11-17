@@ -333,6 +333,22 @@ export class ConversationTopicPublisher {
   }
 
   /**
+   * 已订阅会话的 backgroundRuns[] live delta 推送（Wave 3）：
+   * started / progress / terminal 变化时发 state.updated delta；内容无变化不发帧。
+   */
+  publishBackgroundRuns(runs: readonly BackgroundRunView[]): boolean {
+    const before = this.projection.getSnapshot().backgroundRuns;
+    this.projection.seedBackgroundRuns(runs);
+    const after = this.projection.getSnapshot().backgroundRuns;
+    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) return false;
+    this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+    this.appendDeltas(this.currentSeq, [
+      { op: "state.updated", patch: statePatchSchema.parse({ backgroundRuns: after }) },
+    ]);
+    return true;
+  }
+
+  /**
    * 已订阅会话的 would-accept 权威投影更新（裁决产出卡片 / 批转成功后由宿主驱动）。
    * 与种子不同：这里必须产 `state.updated` delta，否则已订阅客户端永远看不到新卡；
    * 键值未变时不产帧（reject-only 批、幂等重复批转都收敛为零帧）。

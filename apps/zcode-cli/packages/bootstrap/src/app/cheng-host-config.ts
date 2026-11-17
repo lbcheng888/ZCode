@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { CHENG_HOST_COMMAND, CHENG_HOST_VIA_CLI_ENV } from "@zcode/contracts";
 
@@ -20,6 +22,10 @@ import type { ChengJobObserver } from "../super-agent/cheng-job-observer.js";
 export interface ResolveChengHostPortInput {
   /** 全局数据根（不是 storageRoot；host 自己会拼 `.chengcode/v2/cheng/...`）。 */
   readonly dataBaseDir: string;
+  /** 当前工作区根目录，用于本地 cheng-lang 自动发现与 per-workspace socket 身份。 */
+  readonly workspaceRoot?: string;
+  /** 测试缝：覆盖 os.homedir()。 */
+  readonly homeDir?: string;
   /** 宿主显式给的 host 入口（dist/main.js），优先于环境变量与 CLI 子命令。 */
   readonly hostEntry?: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -27,6 +33,8 @@ export interface ResolveChengHostPortInput {
   readonly pathExists?: (path: string) => boolean;
   /** 测试缝：CLI 运行时探测（SEA/argv/execPath）；默认读当前进程。 */
   readonly runtime?: ChengHostRuntimeProbe;
+  /** 连接作用域：默认 macOS/Linux 用 `"workspace"`，Windows/Spec Lane/隔离测试可传 `"stdio"`。 */
+  readonly scope?: "workspace" | "stdio";
   /** S0：job 生命周期观察者；wired 时原样交给 host 端口。 */
   readonly observer?: ChengJobObserver;
 }
@@ -37,6 +45,15 @@ export interface ChengHostRuntimeProbe {
   readonly argv?: readonly string[];
 }
 
+export interface ChengToolchainHealthSummary {
+  readonly configured: boolean;
+  readonly chengRoot: string | null;
+  readonly readyModes: readonly ("diagnostic" | "production")[];
+  readonly driverSha256: string | null;
+  readonly donorCount: number;
+  readonly reason?: string;
+}
+
 export type ChengHostPortResolution =
   | {
       readonly kind: "wired";
@@ -45,12 +62,137 @@ export type ChengHostPortResolution =
       readonly dataBaseDir: string;
       readonly hostEntry?: string;
       readonly cliCommand?: readonly string[];
+      readonly health: ChengToolchainHealthSummary;
       readonly port: ChengHostPort;
     }
   | {
       readonly kind: "skipped";
       readonly reason: string;
+      readonly health: ChengToolchainHealthSummary;
     };
+
+export function resolveChengRoot(input: {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly workspaceRoot?: string;
+  readonly homeDir?: string;
+  readonly pathExists?: (path: string) => boolean;
+}): { readonly chengRoot?: string; readonly reason?: string } {
+  const env = input.env ?? process.env;
+  const pathExists = input.pathExists ?? existsSync;
+
+  if (env.ZCODE_CHENG_DISABLE === "1") {
+    return { reason: "ZCODE_CHENG_DISABLE=1" };
+  }
+
+  const explicitRoot =
+    env.ZCODE_CHENG_ROOT?.trim() || env.CHENGCODE_CHENG_ROOT?.trim() || "";
+  if (explicitRoot.length > 0) {
+    if (!pathExists(explicitRoot)) {
+      const envName =
+        env.ZCODE_CHENG_ROOT?.trim() ? "ZCODE_CHENG_ROOT" : "CHENGCODE_CHENG_ROOT";
+      return { reason: `${envName} does not exist: ${explicitRoot}` };
+    }
+    return { chengRoot: explicitRoot };
+  }
+
+  if (
+    input.workspaceRoot !== undefined &&
+    input.workspaceRoot.trim().length > 0 &&
+    pathExists(join(input.workspaceRoot, "tools", "csg_spec_v2_cli_run"))
+  ) {
+    return { chengRoot: input.workspaceRoot };
+  }
+
+  const homeChengRoot = join(input.homeDir ?? homedir(), "cheng-lang");
+  if (pathExists(join(homeChengRoot, "tools", "csg_spec_v2_cli_run"))) {
+    return { chengRoot: homeChengRoot };
+  }
+
+  return {
+    reason:
+      "ZCODE_CHENG_ROOT / CHENGCODE_CHENG_ROOT is unset and local cheng-lang was not discovered",
+  };
+}
+
+export function inspectChengToolchainHealth(input: {
+  readonly chengRoot?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly workspaceRoot?: string;
+  readonly homeDir?: string;
+  readonly pathExists?: (path: string) => boolean;
+  readonly readText?: (path: string) => string;
+}): ChengToolchainHealthSummary {
+  const pathExists = input.pathExists ?? existsSync;
+  const readText = input.readText ?? ((p: string) => readFileSync(p, "utf8"));
+  const resolved =
+    input.chengRoot !== undefined
+      ? pathExists(input.chengRoot)
+        ? { chengRoot: input.chengRoot }
+        : { reason: `chengRoot does not exist: ${input.chengRoot}` }
+      : resolveChengRoot(input);
+
+  if (resolved.chengRoot === undefined) {
+    return {
+      configured: false,
+      chengRoot: null,
+      readyModes: [],
+      driverSha256: null,
+      donorCount: 0,
+      ...(resolved.reason === undefined ? {} : { reason: resolved.reason }),
+    };
+  }
+
+  const root = resolved.chengRoot;
+  const readyModes: ("diagnostic" | "production")[] = [];
+  if (pathExists(join(root, "tools", "csg_spec_v2_cli_run"))) {
+    readyModes.push("diagnostic");
+  }
+
+  let driverSha256: string | null = null;
+  let donorCount = 0;
+  const provenancePath = join(root, "artifacts", "bootstrap", "cheng.stage3.provenance.txt");
+  const donorsListPath = join(root, "artifacts", "csg_donors", "donors.list");
+  if (pathExists(provenancePath)) {
+    try {
+      const content = readText(provenancePath);
+      const match = /^compiler_executable_sha256=([a-f0-9]{64})$/m.exec(content);
+      if (match?.[1]) {
+        driverSha256 = match[1];
+      }
+    } catch {
+      driverSha256 = null;
+    }
+  }
+  if (pathExists(donorsListPath)) {
+    try {
+      const lines = readText(donorsListPath)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"));
+      donorCount = lines.length;
+    } catch {
+      donorCount = 0;
+    }
+  }
+
+  const productionSlotReady =
+    pathExists(join(root, "artifacts", "bootstrap", "cheng.stage3")) &&
+    pathExists(join(root, "artifacts", "bootstrap", "cheng.linker")) &&
+    pathExists(join(root, "artifacts", "csg_donors", "donor_provenance.tsv")) &&
+    driverSha256 !== null &&
+    donorCount > 0;
+  if (productionSlotReady) {
+    readyModes.push("production");
+  }
+
+  return {
+    configured: true,
+    chengRoot: root,
+    readyModes,
+    driverSha256,
+    donorCount,
+  };
+}
 
 export function resolveChengHostPortForApp(
   input: ResolveChengHostPortInput,
@@ -58,23 +200,34 @@ export function resolveChengHostPortForApp(
   const env = input.env ?? process.env;
   const pathExists = input.pathExists ?? existsSync;
 
-  const chengRoot = env.ZCODE_CHENG_ROOT?.trim() ?? "";
-  if (chengRoot.length === 0) {
-    return skipped("ZCODE_CHENG_ROOT is unset");
+  const rootResolution = resolveChengRoot({
+    env,
+    ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+    ...(input.homeDir === undefined ? {} : { homeDir: input.homeDir }),
+    pathExists,
+  });
+  const health = inspectChengToolchainHealth({
+    ...(rootResolution.chengRoot === undefined ? {} : { chengRoot: rootResolution.chengRoot }),
+    env,
+    ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+    ...(input.homeDir === undefined ? {} : { homeDir: input.homeDir }),
+    pathExists,
+  });
+
+  if (rootResolution.chengRoot === undefined) {
+    return skipped(rootResolution.reason ?? "Cheng root unavailable", health);
   }
-  if (!pathExists(chengRoot)) {
-    return skipped(`ZCODE_CHENG_ROOT does not exist: ${chengRoot}`);
-  }
+  const chengRoot = rootResolution.chengRoot;
 
   const dataBaseDir = input.dataBaseDir.trim();
   if (dataBaseDir.length === 0) {
-    return skipped("data base dir is empty");
+    return skipped("data base dir is empty", health);
   }
 
   const explicitEntry = (input.hostEntry ?? env.ZCODE_CHENG_HOST_ENTRY ?? "").trim();
   if (explicitEntry.length > 0) {
     if (!pathExists(explicitEntry)) {
-      return skipped(`cheng host entry does not exist: ${explicitEntry}`);
+      return skipped(`cheng host entry does not exist: ${explicitEntry}`, health);
     }
     return {
       kind: "wired",
@@ -82,9 +235,12 @@ export function resolveChengHostPortForApp(
       chengRoot,
       dataBaseDir,
       hostEntry: explicitEntry,
+      health,
       port: createChengHostPort({
         chengRoot,
         dataBaseDir,
+        ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+        ...(input.scope === undefined ? {} : { scope: input.scope }),
         hostEntry: explicitEntry,
         env,
         ...(input.observer === undefined ? {} : { observer: input.observer }),
@@ -98,6 +254,7 @@ export function resolveChengHostPortForApp(
   if (env[CHENG_HOST_VIA_CLI_ENV] !== "1") {
     return skipped(
       "cheng host entry is unset (options.chengHostEntry / ZCODE_CHENG_HOST_ENTRY) and CLI re-exec is not advertised",
+      health,
     );
   }
 
@@ -105,6 +262,7 @@ export function resolveChengHostPortForApp(
   if (cliCommand === undefined) {
     return skipped(
       "CLI re-exec is unavailable (run from a packaged CLI or set ZCODE_CHENG_HOST_ENTRY)",
+      health,
     );
   }
   return {
@@ -113,9 +271,12 @@ export function resolveChengHostPortForApp(
     chengRoot,
     dataBaseDir,
     cliCommand,
+    health,
     port: createChengHostPort({
       chengRoot,
       dataBaseDir,
+      ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
       cliCommand,
       env,
       ...(input.observer === undefined ? {} : { observer: input.observer }),
@@ -150,6 +311,6 @@ function detectSeaRuntime(): boolean {
   }
 }
 
-function skipped(reason: string): ChengHostPortResolution {
-  return { kind: "skipped", reason };
+function skipped(reason: string, health: ChengToolchainHealthSummary): ChengHostPortResolution {
+  return { kind: "skipped", reason, health: { ...health, reason } };
 }

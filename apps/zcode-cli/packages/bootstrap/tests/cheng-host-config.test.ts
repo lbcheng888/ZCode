@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { CHENG_HOST_COMMAND, CHENG_HOST_VIA_CLI_ENV } from "@zcode/contracts";
 
-import { resolveChengHostPortForApp } from "../src/app/cheng-host-config.js";
+import { inspectChengToolchainHealth, resolveChengHostPortForApp } from "../src/app/cheng-host-config.js";
 import { chengHostSpawnArgs } from "../src/app/workflow-cheng-host-port.js";
 import { resolveDataBaseDir } from "../src/app/paths.js";
 
@@ -61,8 +61,10 @@ describe("Cheng production assembly", () => {
 
   it("skips with a named reason instead of silently degrading", () => {
     const { chengRoot, dataBaseDir, hostEntry } = fixtures();
+    const emptyHome = tempDir("empty-home-");
     const cases: Array<[Parameters<typeof resolveChengHostPortForApp>[0], RegExp]> = [
-      [{ dataBaseDir, env: { ZCODE_CHENG_HOST_ENTRY: hostEntry } }, /ZCODE_CHENG_ROOT is unset/],
+      [{ dataBaseDir, homeDir: emptyHome, env: { ZCODE_CHENG_HOST_ENTRY: hostEntry } }, /ZCODE_CHENG_ROOT \/ CHENGCODE_CHENG_ROOT is unset/],
+      [{ dataBaseDir, env: { ZCODE_CHENG_DISABLE: "1", ZCODE_CHENG_ROOT: chengRoot, ZCODE_CHENG_HOST_ENTRY: hostEntry } }, /ZCODE_CHENG_DISABLE=1/],
       [
         { dataBaseDir, env: { ZCODE_CHENG_ROOT: join(chengRoot, "nope"), ZCODE_CHENG_HOST_ENTRY: hostEntry } },
         /ZCODE_CHENG_ROOT does not exist/,
@@ -84,6 +86,85 @@ describe("Cheng production assembly", () => {
         expect(result.reason).toMatch(reason);
       }
     }
+  });
+
+  it("supports CHENGCODE_CHENG_ROOT and deterministic local auto-discovery", () => {
+    const { chengRoot, dataBaseDir, hostEntry } = fixtures();
+    const emptyHome = tempDir("empty-home-");
+
+    // 1. CHENGCODE_CHENG_ROOT
+    const fromChengCodeEnv = resolveChengHostPortForApp({
+      dataBaseDir,
+      homeDir: emptyHome,
+      hostEntry,
+      env: { CHENGCODE_CHENG_ROOT: chengRoot },
+    });
+    expect(fromChengCodeEnv.kind).toBe("wired");
+    expect(fromChengCodeEnv.health.configured).toBe(true);
+    expect(fromChengCodeEnv.health.chengRoot).toBe(chengRoot);
+
+    // 2. workspaceRoot with tools/csg_spec_v2_cli_run
+    const wsRoot = tempDir("ws-cheng-");
+    mkdirSync(join(wsRoot, "tools"), { recursive: true });
+    writeFileSync(join(wsRoot, "tools", "csg_spec_v2_cli_run"), "#!/bin/sh\n");
+    const fromWorkspace = resolveChengHostPortForApp({
+      dataBaseDir,
+      workspaceRoot: wsRoot,
+      homeDir: emptyHome,
+      hostEntry,
+      env: {},
+    });
+    expect(fromWorkspace.kind).toBe("wired");
+    if (fromWorkspace.kind === "wired") {
+      expect(fromWorkspace.chengRoot).toBe(wsRoot);
+      expect(fromWorkspace.health.readyModes).toEqual(["diagnostic"]);
+    }
+
+    // 3. fallback to homeDir/cheng-lang when workspaceRoot lacks tools/csg_spec_v2_cli_run
+    const fakeHome = tempDir("fake-home-");
+    const homeCheng = join(fakeHome, "cheng-lang");
+    mkdirSync(join(homeCheng, "tools"), { recursive: true });
+    writeFileSync(join(homeCheng, "tools", "csg_spec_v2_cli_run"), "#!/bin/sh\n");
+    const fromHome = resolveChengHostPortForApp({
+      dataBaseDir,
+      workspaceRoot: chengRoot, // lacks tools/csg_spec_v2_cli_run
+      homeDir: fakeHome,
+      hostEntry,
+      env: {},
+    });
+    expect(fromHome.kind).toBe("wired");
+    if (fromHome.kind === "wired") {
+      expect(fromHome.chengRoot).toBe(homeCheng);
+    }
+  });
+
+  it("summarizes toolchain health including production slot sha256 and donorCount", () => {
+    const { chengRoot } = fixtures();
+    mkdirSync(join(chengRoot, "tools"), { recursive: true });
+    mkdirSync(join(chengRoot, "artifacts", "bootstrap"), { recursive: true });
+    mkdirSync(join(chengRoot, "artifacts", "csg_donors"), { recursive: true });
+    writeFileSync(join(chengRoot, "tools", "csg_spec_v2_cli_run"), "#!/bin/sh\n");
+    writeFileSync(join(chengRoot, "artifacts", "bootstrap", "cheng.stage3"), "bin");
+    writeFileSync(join(chengRoot, "artifacts", "bootstrap", "cheng.linker"), "bin");
+    const sha = "a".repeat(64);
+    writeFileSync(
+      join(chengRoot, "artifacts", "bootstrap", "cheng.stage3.provenance.txt"),
+      `compiler_executable_sha256=${sha}\n`,
+    );
+    writeFileSync(
+      join(chengRoot, "artifacts", "csg_donors", "donors.list"),
+      "artifacts/csg_donors/donors/a.o\nartifacts/csg_donors/donors/b.o\n",
+    );
+    writeFileSync(join(chengRoot, "artifacts", "csg_donors", "donor_provenance.tsv"), "1\tpure\n");
+
+    const health = inspectChengToolchainHealth({ chengRoot });
+    expect(health).toEqual({
+      configured: true,
+      chengRoot,
+      readyModes: ["diagnostic", "production"],
+      driverSha256: sha,
+      donorCount: 2,
+    });
   });
 
   it("resolves the global data root with ZCODE_DATA_BASE_DIR before HOME", () => {
