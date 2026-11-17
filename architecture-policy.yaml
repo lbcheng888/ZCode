@@ -2694,3 +2694,18 @@ exceptions:
     rule: unmanaged-new-file
     paths: [packages/ui/src/components/ui/ChengBrandLogo.tsx]
     reason: 官方 Cheng 品牌图形组件只收敛 mark/字标绘制与渐变 id，替换 UI 内既有的旧标绘制；图形数据来自 cheng-lang 官网 SVG。不新增状态、服务或跨模块依赖，接管整个 packages/ui/src 未受管模块不在本次范围内。
+  - id: cheng-superagent-v3-unmanaged-files
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/bootstrap/src/app/bundled-skills.ts
+      - apps/zcode-cli/packages/bootstrap/src/super-agent/cheng-evolution-flywheel.ts
+      - apps/zcode-cli/packages/cheng-contract/src/adapters/zero-c.ts
+      - apps/zcode-cli/packages/cheng-contract/src/four-layer-receipt.ts
+      - apps/zcode-cli/packages/cheng-contract/src/leaf-probe-receipt.ts
+      - apps/zcode-cli/packages/cheng-contract/src/surface-report.ts
+      - apps/zcode-cli/packages/cheng-contract/src/zero-c-receipt.ts
+      - apps/zcode-cli/packages/cheng-host/src/bundle-builder.ts
+      - apps/zcode-cli/packages/cheng-host/src/ops-v3.ts
+      - apps/zcode-cli/packages/core/src/runtime/helpers/turn-evidence-buffer.ts
+      - apps/zcode-cli/packages/core/src/tool/executor/cheng-surface-hook.ts
+    reason: Cheng x Super-Agent v3 双轨生产集成（docs/architecture/cheng-superagent-seamless-integration-v3.md）在既有的 cheng-contract/cheng-host/core/bootstrap 目录补充零 C 回执契约、密封 SpecBundle 构造器、表面门与单叶子探针、有界回合取证缓冲及闲时自进化飞轮，并在 post-fork 存量 bundled-skills.ts 中补齐内置 Cheng 技能清单；各状态唯一 owner 不变，接管整个 zcode-cli 未受管包不在本次范围内。
