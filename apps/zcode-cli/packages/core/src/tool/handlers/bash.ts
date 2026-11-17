@@ -38,6 +38,7 @@ import {
   type ToolRuntimePermissionCapabilityContext,
 } from "../types.js";
 import { resolveToolWorkingDirectory } from "../path-policy.js";
+import { assertSwarmBashCommandSafe } from "../../runtime/swarm/agent-swarm-bash-guard.js";
 import { decideBashCwdPolicy } from "./bash-cwd-policy.js";
 export {
   getBashActivityDescription,
@@ -183,6 +184,13 @@ async function executeBashHandler(
     commandTelemetry?.finishCompleted();
     return emptyBashOutput(parsed);
   }
+
+  assertSwarmBashCommandSafe(parsed.command, {
+    workspaceRoot: context.workspaceRoot,
+    workingDirectory: context.workingDirectory,
+    allowedWritePaths: context.allowedWritePaths,
+    workspaceWriteLeaseActive: context.workspaceWriteLeaseAdmission !== undefined,
+  });
 
   // 写租约 admission：只读命令（core 现有确定性分类器）放行；非只读命令在 spawn 前
   // 与 Write/Edit/ApplyPatch 走同一闸。不是 OS 沙箱：分类器判为只读的命令仍可能产生

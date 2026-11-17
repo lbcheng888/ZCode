@@ -62,7 +62,7 @@ import type {
   WorkflowSubmitPort,
 } from "@zcode/contracts";
 import type { RuntimeTaskRegistry } from "../runtime-task/registry.js";
-import type { ChengGeneratePort, ChengReadPort } from "./cheng-read-port.js";
+import type { ChengGeneratePort, ChengHostToolPort, ChengReadPort } from "./cheng-read-port.js";
 import type { SystemReminderSource } from "../system-reminder/source.js";
 import type {
   PersistedReadFileStateMetadata,
@@ -235,6 +235,8 @@ export interface ToolExecutionContext {
   chengReadPort?: ChengReadPort;
   /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
   chengGeneratePort?: ChengGeneratePort;
+  /** Cheng 完整工具端口（可选 v2 扩展：bundlePrepare / checkSurface / probeLeaf / graphDiff）。 */
+  chengHostPort?: ChengHostToolPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;

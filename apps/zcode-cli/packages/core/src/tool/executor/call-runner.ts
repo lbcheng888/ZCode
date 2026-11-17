@@ -63,6 +63,10 @@ import {
 } from "./turn-control.js";
 import { mergeToolExecutionTelemetry, readToolExecutionTelemetry } from "../handlers/tool-perf.js";
 import { runWithCapabilityTicketAuthorization } from "../capability-ticket-context.js";
+import {
+  appendNoticeToModelContent,
+  runChengPostWriteSurfaceGate,
+} from "./cheng-surface-hook.js";
 import type { ToolExecuteOptions, ToolExecutorDeps } from "./types.js";
 import { validateInitialModelToolInput, validateInput, validateOutput } from "./validation.js";
 import type { ExecutableToolCall } from "../types.js";
@@ -199,42 +203,62 @@ async function executeToolCallImpl(
     deps.isBestPlanSatisfied?.(turnId) !== true &&
     toolRequiresBestPlan(entry, canonicalToolCall.name, bestPlanCapability)
   ) {
-    const result = createErrorResult(
-      canonicalToolCall,
-      createCoreError(
-        CoreErrorType.InvalidStateTransition,
-        "Call ProposeBestPlan before the first workspace, execution, network or delegation tool in this user turn. The user must see the six-field best plan card first; then retry this tool.",
-        {
-          context: { toolCallId: canonicalToolCall.id, toolName: canonicalToolCall.name },
-          recoverable: true,
-        },
-      ),
-    );
-    result.modelContent = `<tool_use_error>Error: Call ProposeBestPlan first. This tool changes or executes something; the current user turn has no best-plan card yet. Call ProposeBestPlan with the six fields, then retry this tool.</tool_use_error>`;
-    // deferred 后 ProposeBestPlan 的 schema 可能尚未加载；被拦时顺带告知加载路径，门禁判定不变。
-    const search = options?.toolSearch;
-    if (
-      search?.enabled &&
-      !search.discovered.has(BEST_PLAN_TOOL_NAME) &&
-      search.catalog.some((tool) => tool.name === BEST_PLAN_TOOL_NAME && tool.deferred)
-    ) {
-      result.modelContent =
-        (result.modelContent ?? "") +
-        ` Load the tool first: call ${toolSearchNameForMode(search.mode)} with query "select:${BEST_PLAN_TOOL_NAME}", then call it with the six fields.` +
-        (search.mode === "local"
-          ? `\nCall DeferredToolCall with {name: "${BEST_PLAN_TOOL_NAME}", input: {...}}.`
-          : "");
+    let groundedSatisfied = false;
+    if (deps.synthesizeGroundedBestPlan !== undefined) {
+      const evidenceBuffer = deps.getTurnEvidenceBuffer?.(turnId) ?? deps.turnEvidenceBuffer;
+      const evidence = evidenceBuffer ? [...evidenceBuffer.entries()] : [];
+      const evidenceDigest = evidenceBuffer ? evidenceBuffer.getDigest() : "";
+      const synthResult = await deps.synthesizeGroundedBestPlan({
+        turnId,
+        requestText: deps.getTurnRequestText?.(turnId) ?? "",
+        toolName: canonicalToolCall.name,
+        toolInput: canonicalToolCall.input,
+        evidence,
+        evidenceDigest,
+      });
+      groundedSatisfied =
+        (typeof synthResult === "boolean" ? synthResult : synthResult.satisfied) ||
+        deps.isBestPlanSatisfied?.(turnId) === true;
     }
-    await emitToolCallError(deps, canonicalToolCall.id, traceContext, turnId, result.error);
-    deps.logger?.warn("Tool call blocked until ProposeBestPlan is recorded", {
-      ...traceContextToLogContext(traceContext),
-      event: "tool.call.best_plan_required",
-      module: "core.tool.executor",
-      status: "failed",
-      toolCallId: canonicalToolCall.id,
-      toolName: canonicalToolCall.name,
-    });
-    return result;
+
+    if (!groundedSatisfied) {
+      const result = createErrorResult(
+        canonicalToolCall,
+        createCoreError(
+          CoreErrorType.InvalidStateTransition,
+          "Call ProposeBestPlan before the first workspace, execution, network or delegation tool in this user turn. The user must see the six-field best plan card first; then retry this tool.",
+          {
+            context: { toolCallId: canonicalToolCall.id, toolName: canonicalToolCall.name },
+            recoverable: true,
+          },
+        ),
+      );
+      result.modelContent = `<tool_use_error>Error: Call ProposeBestPlan first. This tool changes or executes something; the current user turn has no best-plan card yet. Call ProposeBestPlan with the six fields, then retry this tool.</tool_use_error>`;
+      // deferred 后 ProposeBestPlan 的 schema 可能尚未加载；被拦时顺带告知加载路径，门禁判定不变。
+      const search = options?.toolSearch;
+      if (
+        search?.enabled &&
+        !search.discovered.has(BEST_PLAN_TOOL_NAME) &&
+        search.catalog.some((tool) => tool.name === BEST_PLAN_TOOL_NAME && tool.deferred)
+      ) {
+        result.modelContent =
+          (result.modelContent ?? "") +
+          ` Load the tool first: call ${toolSearchNameForMode(search.mode)} with query "select:${BEST_PLAN_TOOL_NAME}", then call it with the six fields.` +
+          (search.mode === "local"
+            ? `\nCall DeferredToolCall with {name: "${BEST_PLAN_TOOL_NAME}", input: {...}}.`
+            : "");
+      }
+      await emitToolCallError(deps, canonicalToolCall.id, traceContext, turnId, result.error);
+      deps.logger?.warn("Tool call blocked until ProposeBestPlan is recorded", {
+        ...traceContextToLogContext(traceContext),
+        event: "tool.call.best_plan_required",
+        module: "core.tool.executor",
+        status: "failed",
+        toolCallId: canonicalToolCall.id,
+        toolName: canonicalToolCall.name,
+      });
+      return result;
+    }
   }
 
   let lifetime: ReturnType<NonNullable<ToolEntry["retainExecution"]>> | undefined;
@@ -598,6 +622,7 @@ async function executeToolCallImpl(
         dynamicWorkflowSnippetPort: deps.dynamicWorkflowSnippetPort,
         chengReadPort: deps.chengReadPort,
         chengGeneratePort: deps.chengGeneratePort,
+        chengHostPort: deps.chengHostPort,
         modelCatalogPort: deps.modelCatalogPort,
         runtimeTaskRegistry: deps.runtimeTaskRegistry,
         readFileState: deps.readFileState,
@@ -670,6 +695,21 @@ async function executeToolCallImpl(
         canonicalToolCall.id,
         executionAbortController.signal,
       );
+      const surfaceNotice = await runChengPostWriteSurfaceGate(
+        canonicalToolCall.name,
+        output,
+        context,
+      );
+      if (surfaceNotice !== undefined) {
+        const updatedModelContent = appendNoticeToModelContent(
+          serialization.modelContent ?? serialization.content,
+          surfaceNotice,
+        );
+        serialization = {
+          ...serialization,
+          modelContent: updatedModelContent,
+        };
+      }
       failureStage = "post_hook";
       const postToolHookResult = await runPostToolUseHooks(
         deps,
@@ -760,6 +800,19 @@ async function executeToolCallImpl(
 
       if (canonicalToolCall.name === BEST_PLAN_TOOL_NAME && turnId !== undefined) {
         deps.markBestPlan?.(turnId);
+      }
+
+      if (turnId !== undefined && (entry.metadata.readOnly === true || bestPlanCapability?.readOnly === true)) {
+        const evidenceBuffer = deps.getTurnEvidenceBuffer?.(turnId) ?? deps.turnEvidenceBuffer;
+        if (evidenceBuffer !== undefined) {
+          evidenceBuffer.record({
+            toolCallId: canonicalToolCall.id,
+            toolName: canonicalToolCall.name,
+            targetFiles: extractEvidenceTargetFiles(executionInput, output),
+            digest: extractEvidenceDigest(finalModelContent),
+            recordedAtMs: Date.now(),
+          });
+        }
       }
 
       await emitToolCallResult(
@@ -901,6 +954,43 @@ function resolveModelOutputEntry(entry: ToolEntry, output: unknown): ToolEntry {
       preview: { direction: "head" },
     },
   };
+}
+
+function extractEvidenceTargetFiles(input: unknown, output: unknown): string[] {
+  const files = new Set<string>();
+  const collect = (obj: unknown) => {
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return;
+    const rec = obj as Record<string, unknown>;
+    for (const key of ["file_path", "filePath", "path"]) {
+      const val = rec[key];
+      if (typeof val === "string" && val.length > 0) files.add(val);
+    }
+    if (Array.isArray(rec.filePaths)) {
+      for (const item of rec.filePaths) {
+        if (typeof item === "string" && item.length > 0) files.add(item);
+      }
+    }
+  };
+  collect(input);
+  collect(output);
+  return [...files];
+}
+
+function extractEvidenceDigest(content: unknown): string {
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((block) =>
+              typeof block === "object" && block !== null && "text" in block
+                ? String((block as { text?: unknown }).text ?? "")
+                : "",
+            )
+            .filter(Boolean)
+            .join(" ")
+        : "";
+  return text.length > 512 ? `${text.slice(0, 509)}...` : text;
 }
 
 function isEmptyToolName(toolName: string): boolean {

@@ -43,7 +43,8 @@ import type { HookRunner } from "../../hooks/index.js";
 import type { PermissionService } from "../../permission/service.js";
 import type { RuntimeTaskRegistry } from "../../runtime-task/registry.js";
 import type { ToolRegistry } from "../registry.js";
-import type { ChengGeneratePort, ChengReadPort } from "../cheng-read-port.js";
+import type { ChengGeneratePort, ChengHostToolPort, ChengReadPort } from "../cheng-read-port.js";
+import type { TurnEvidenceBuffer, TurnEvidenceEntry } from "../../runtime/helpers/turn-evidence-buffer.js";
 import type { ToolSchedule } from "../scheduler.js";
 import type {
   BackgroundTaskControlPort,
@@ -98,6 +99,17 @@ export interface ToolExecutorOptions {
    * 必须先成功调用 ProposeBestPlan；否则该调用被拒并回注原因。
    */
   bestPlanGate?: boolean;
+  turnEvidenceBuffer?: TurnEvidenceBuffer;
+  getTurnEvidenceBuffer?: (turnId: TurnId) => TurnEvidenceBuffer | undefined;
+  getTurnRequestText?: (turnId: TurnId) => string | undefined;
+  synthesizeGroundedBestPlan?: (input: {
+    turnId: TurnId;
+    requestText: string;
+    toolName: string;
+    toolInput: unknown;
+    evidence: readonly TurnEvidenceEntry[];
+    evidenceDigest: string;
+  }) => Promise<boolean | { satisfied: boolean }>;
   defaultTimeoutMs?: number;
   permissionTimeoutMs?: number;
   logger?: Logger;
@@ -141,6 +153,8 @@ export interface ToolExecutorOptions {
   chengReadPort?: ChengReadPort;
   /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
   chengGeneratePort?: ChengGeneratePort;
+  /** Cheng 完整工具端口（可选 v2 扩展：bundlePrepare / checkSurface / probeLeaf / graphDiff）。 */
+  chengHostPort?: ChengHostToolPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;
@@ -252,6 +266,17 @@ export interface ToolExecutorDeps {
   sessionId: SessionId;
   turnId?: TurnId;
   bestPlanGate?: boolean;
+  turnEvidenceBuffer?: TurnEvidenceBuffer;
+  getTurnEvidenceBuffer?: (turnId: TurnId) => TurnEvidenceBuffer | undefined;
+  getTurnRequestText?: (turnId: TurnId) => string | undefined;
+  synthesizeGroundedBestPlan?: (input: {
+    turnId: TurnId;
+    requestText: string;
+    toolName: string;
+    toolInput: unknown;
+    evidence: readonly TurnEvidenceEntry[];
+    evidenceDigest: string;
+  }) => Promise<boolean | { satisfied: boolean }>;
   isBestPlanSatisfied?: (turnId: TurnId) => boolean;
   markBestPlan?: (turnId: TurnId) => void;
   defaultTimeoutMs: number;
@@ -297,6 +322,8 @@ export interface ToolExecutorDeps {
   chengReadPort?: ChengReadPort;
   /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
   chengGeneratePort?: ChengGeneratePort;
+  /** Cheng 完整工具端口（可选 v2 扩展：bundlePrepare / checkSurface / probeLeaf / graphDiff）。 */
+  chengHostPort?: ChengHostToolPort;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;

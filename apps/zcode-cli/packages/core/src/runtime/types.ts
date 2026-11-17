@@ -43,7 +43,8 @@ import type { ZCodeProviderAccountAccess } from "@zcode/shared";
 import type { EffectiveModelSelectionResult } from "@zcode/shared/model-selection";
 import type { RuntimeMessageEntry } from "../agent/message-history.js";
 import type { ProviderToolRound } from "./provider-tool-rounds/contract.js";
-import type { ChengGeneratePort, ChengReadPort } from "../tool/cheng-read-port.js";
+import type { ChengGeneratePort, ChengHostToolPort, ChengReadPort } from "../tool/cheng-read-port.js";
+import type { TurnEvidenceBuffer, TurnEvidenceEntry } from "./helpers/turn-evidence-buffer.js";
 import type {
   CompactPhase,
   CompactReason,
@@ -504,6 +505,19 @@ export interface AgentRuntimeDeps {
   chengReadPort?: ChengReadPort;
   /** Cheng 生成端口（窄化只暴露 generate）；缺席则 ChengGenerate 返回 capability_absent。 */
   chengGeneratePort?: ChengGeneratePort;
+  /** Cheng 完整工具端口（可选 v2 扩展：bundlePrepare / checkSurface / probeLeaf / graphDiff）。 */
+  chengHostPort?: ChengHostToolPort;
+  /** Wave 3: 可选两阶段有据 BestPlan 回调与取证缓冲覆盖。 */
+  getTurnEvidenceBuffer?: (turnId: TurnId) => TurnEvidenceBuffer | undefined;
+  getTurnRequestText?: (turnId: TurnId) => string | undefined;
+  synthesizeGroundedBestPlan?: (input: {
+    turnId: TurnId;
+    requestText: string;
+    toolName: string;
+    toolInput: unknown;
+    evidence: readonly TurnEvidenceEntry[];
+    evidenceDigest: string;
+  }) => Promise<boolean | { satisfied: boolean }>;
   /** 模型目录端口；缺席则 ListModels 报能力缺席，CreateWorkflow 的 subagent_model 被拒。 */
   modelCatalogPort?: ModelCatalogPort;
   runtimeTaskRegistry?: RuntimeTaskRegistry;

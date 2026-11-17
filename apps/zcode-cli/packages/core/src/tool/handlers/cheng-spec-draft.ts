@@ -21,11 +21,25 @@ const CHENG_SPEC_LINK_TYPES: ReadonlySet<string> = new Set([
 const CHENG_SPEC_ORACLE_KINDS: ReadonlySet<string> = new Set(["settle", "property", "scenario"]);
 
 /**
- * task 名同时是落盘文件名段（`<task>-<uuid>.json`），只放行字母/数字/下划线/连字符。
- * `/`、`\`、`..`、空白与控制字符全被排除——路径穿越在字符面上就不可能，而不是靠
- * 落盘前再洗一遍。
+ * task 名同时是落盘文件名段与密封 Bundle 键，只放行小写字母开头的 `[a-z][a-z0-9_]{0,62}`
+ * （禁止 `-` 连字符、大写字母、`/`、`\`、`..`、空白与控制字符）。
  */
-const CHENG_SPEC_TASK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const CHENG_SPEC_TASK_NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
+const CHENG_SPEC_MAX_ORACLE_CASES = 1024;
+
+/**
+ * 当前 M5 发射器仅支持标量集合：若 `modules[].interface` 出现 `str`、复合动态结构或 IO/UI 副作用，
+ * 立即在校验阶段拦截并分流至 Track II（常规 `.cheng` 编码 + `ChengCheckSurface` + `ChengProbeLeaf`）。
+ */
+const NON_SCALAR_SURFACE_PATTERNS: readonly { pattern: RegExp; label: string }[] = [
+  { pattern: /\bstr\b|\bstring\b/i, label: "str/string 类型" },
+  { pattern: /\bseq\s*<|\btable\s*<|\bmap\s*<|\bdict\s*<|\bstruct\b|\bobject\b|\brecord\b|\bclass\b/i, label: "复合数据结构" },
+  { pattern: /\b(?:io|ui|canvas|window|file|socket|http|render|draw|eventloop|stdin|stdout|stderr)\b/i, label: "IO/UI 副作用" },
+];
+
+export interface ValidateChengSpecDraftOptions {
+  requireSettleCases?: boolean;
+}
 
 export type ChengSpecDraftVerdict = { ok: true; task: string } | { ok: false; errors: string[] };
 
@@ -121,7 +135,57 @@ function findComposesCycle(
   return undefined;
 }
 
-export function validateChengSpecDraft(draft: unknown): ChengSpecDraftVerdict {
+function detectNonScalarEmissionSurface(iface: unknown): string | undefined {
+  if (iface === undefined || iface === null) return undefined;
+  const serialized = typeof iface === "string" ? iface : JSON.stringify(iface);
+  if (!serialized) return undefined;
+  for (const { pattern, label } of NON_SCALAR_SURFACE_PATTERNS) {
+    if (pattern.test(serialized)) {
+      return label;
+    }
+  }
+  return undefined;
+}
+
+function validateOracleCaseList(
+  raw: unknown,
+  fieldName: "settleCases" | "evalCases",
+  requiredNonEmpty: boolean,
+  errors: string[],
+): void {
+  if (!Array.isArray(raw)) {
+    errors.push(`${fieldName} 必须是数组`);
+    return;
+  }
+  if (requiredNonEmpty && raw.length === 0) {
+    errors.push(`${fieldName} 不能为空：至少需要一条确定性用例`);
+    return;
+  }
+  if (raw.length > CHENG_SPEC_MAX_ORACLE_CASES) {
+    errors.push(`${fieldName} 超出上限 ${CHENG_SPEC_MAX_ORACLE_CASES}（收到 ${raw.length} 条）`);
+    return;
+  }
+  raw.forEach((item: unknown, index: number) => {
+    if (typeof item === "string") {
+      if (item.trim().length === 0) {
+        errors.push(`${fieldName}[${index}] 不能为空字符串`);
+      }
+      return;
+    }
+    if (!isPlainObject(item)) {
+      errors.push(`${fieldName}[${index}] 必须是对象或非空字符串`);
+      return;
+    }
+    if (Object.keys(item).length === 0) {
+      errors.push(`${fieldName}[${index}] 不能为空对象`);
+    }
+  });
+}
+
+export function validateChengSpecDraft(
+  draft: unknown,
+  options?: ValidateChengSpecDraftOptions,
+): ChengSpecDraftVerdict {
   const errors: string[] = [];
 
   if (!isPlainObject(draft)) {
@@ -158,11 +222,11 @@ export function validateChengSpecDraft(draft: unknown): ChengSpecDraftVerdict {
     }
   }
 
-  // ---- task：非空 + 字符安全（它要进文件名）----
+  // ---- task：非空 + 字符安全（^[a-z][a-z0-9_]{0,62}$，禁止连字符与路径穿越）----
   const task = requireNonEmptyString(draft.task, "task", errors);
   if (task !== undefined && !CHENG_SPEC_TASK_NAME_PATTERN.test(task)) {
     errors.push(
-      `task 名 "${task}" 字符不安全：只允许字母/数字/下划线/连字符（路径分隔符与 ".." 一律拒绝，杜绝路径穿越）`,
+      `task 名 "${task}" 字符不安全：必须匹配 /^[a-z][a-z0-9_]{0,62}$/（禁止连字符 '-'、大写字母、路径分隔符与 ".."）`,
     );
   }
 
@@ -217,7 +281,23 @@ export function validateChengSpecDraft(draft: unknown): ChengSpecDraftVerdict {
         else seenIds.add(id);
       }
       if (name !== undefined && id !== undefined) modules.push({ id, name });
+      const nonScalarReason = detectNonScalarEmissionSurface(module.interface);
+      if (nonScalarReason !== undefined) {
+        errors.push(
+          `modules[${index}].interface 包含 ${nonScalarReason}，超出当前 M5 标量发射面。该任务属 Track II（系统/UI/字符串面），请改用常规 .cheng 编辑工具 + ChengCheckSurface + ChengProbeLeaf 实现`,
+        );
+      }
     });
+  }
+
+  // ---- settleCases / evalCases：存在时严格校验，避免空用例或畸形用例入仓 ----
+  if (draft.settleCases !== undefined) {
+    validateOracleCaseList(draft.settleCases, "settleCases", true, errors);
+  } else if (options?.requireSettleCases) {
+    errors.push("settleCases 不能为空：密封草案必须提供至少一条 settleCases");
+  }
+  if (draft.evalCases !== undefined) {
+    validateOracleCaseList(draft.evalCases, "evalCases", false, errors);
   }
 
   // ---- assertions：非空（id 供 link 解析）----

@@ -1,21 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
 
 import {
   CHENG_EXPLAIN_TOOL_NAME,
   CHENG_GENERATE_TOOL_NAME,
   CHENG_INSPECT_TOOL_NAME,
+  CHENG_JOB_STATES,
   CHENG_PLAN_TOOL_NAME,
   CHENG_VERIFY_TOOL_NAME,
   ChengExplainInputJsonSchema,
   ChengExplainInputSchema,
   ChengExplainOutputJsonSchema,
   ChengExplainOutputSchema,
-  ChengGenerateInputJsonSchema,
-  ChengGenerateInputSchema,
-  ChengGenerateOutputJsonSchema,
-  ChengGenerateOutputSchema,
   ChengInspectInputJsonSchema,
   ChengInspectInputSchema,
   ChengInspectOutputJsonSchema,
@@ -29,10 +27,10 @@ import {
   ChengVerifyOutputJsonSchema,
   ChengVerifyOutputSchema,
   type ChengExplainInput,
-  type ChengGenerateInput,
   type ChengInspectInput,
   type ChengPlanInput,
   type ChengVerifyInput,
+  type JsonSchema,
   type ToolPermissionSpec,
 } from "@zcode/contracts";
 
@@ -46,9 +44,148 @@ import type {
 import { assertWorkspaceWriteLease } from "../types.js";
 import { validateChengSpecDraft } from "./cheng-spec-draft.js";
 
+export const CHENG_CHECK_SURFACE_TOOL_NAME = "ChengCheckSurface";
+export const CHENG_PROBE_LEAF_TOOL_NAME = "ChengProbeLeaf";
+
 const CHENG_TOOL_TIMEOUT_MS = 30_000;
 const CHENG_GENERATE_TIMEOUT_MS = 600_000;
+const CHENG_PROBE_LEAF_TIMEOUT_MS = 35_000;
 const CHENG_TOOL_MAX_OUTPUT_BYTES = 64 * 1024;
+
+const CLOSURE_ROOT_SUFFIXES = [
+  "kernel/driver/selfhost_main.cheng",
+  "src/core/tooling/system_link_exec_pure_main.cheng",
+  "src/core/tooling/backend_driver_dispatch_min.cheng",
+] as const;
+
+function toLocalToolJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+  const raw = z.toJSONSchema(schema) as Record<string, unknown>;
+  const { $schema: _ignored, ...rest } = raw;
+  return rest as JsonSchema;
+}
+
+const ChengCapabilityAbsentSchema = z
+  .object({
+    status: z.literal("capability_absent"),
+    reason: z.string().min(1),
+  })
+  .strict();
+
+const ChengGenerateToolInputSchema = z
+  .object({
+    spec: z.record(z.string(), z.unknown()),
+    budget: z.number().int().min(1).max(900_000).optional(),
+    mode: z.enum(["production", "diagnostic"]).optional(),
+    moves: z.literal("macro").optional(),
+    useLiblearn: z.boolean().optional(),
+    allowDraftUnowned: z.boolean().optional(),
+    waitMode: z.enum(["sync", "bounded"]).optional(),
+    maxWaitMs: z.number().int().min(100).max(600_000).optional(),
+  })
+  .strict();
+
+type ChengGenerateToolInput = z.infer<typeof ChengGenerateToolInputSchema>;
+
+const ChengGenerateOkLocalSchema = z
+  .object({
+    status: z.literal("ok"),
+    jobId: z.string().regex(/^[0-9a-f]{64}$/),
+    runId: z.string().min(1).nullable(),
+    state: z.enum(CHENG_JOB_STATES),
+  })
+  .strict();
+
+const ChengGenerateAcceptedRunningSchema = z
+  .object({
+    status: z.literal("accepted_running"),
+    jobId: z.string().regex(/^[0-9a-f]{64}$/),
+    runId: z.string().min(1).nullable(),
+    state: z.enum(CHENG_JOB_STATES),
+    nextTool: z.literal("ChengInspect"),
+  })
+  .strict();
+
+const ChengGenerateToolOutputSchema = z.union([
+  ChengGenerateOkLocalSchema,
+  ChengCapabilityAbsentSchema,
+  ChengGenerateAcceptedRunningSchema,
+]);
+
+const ChengGenerateToolInputJsonSchema = toLocalToolJsonSchema(ChengGenerateToolInputSchema);
+const ChengGenerateToolOutputJsonSchema = toLocalToolJsonSchema(ChengGenerateToolOutputSchema);
+
+export const ChengCheckSurfaceInputSchema = z
+  .object({
+    filePath: z.string().min(1).optional(),
+    filePaths: z.array(z.string().min(1)).min(1).max(32).optional(),
+  })
+  .strict()
+  .refine((val) => val.filePath !== undefined || (val.filePaths !== undefined && val.filePaths.length > 0), {
+    message: "filePath or filePaths is required",
+  });
+
+const ChengSurfaceViolationSchema = z
+  .object({
+    ruleId: z.string().min(1),
+    line: z.number().int().nonnegative(),
+    column: z.number().int().nonnegative().optional(),
+    message: z.string(),
+  })
+  .strict();
+
+const ChengSurfaceReportSchema = z
+  .object({
+    schema: z.literal("cheng.contract.surface_report.v1").optional(),
+    filePath: z.string().min(1),
+    fileSha256: z.string().optional(),
+    v4Ok: z.boolean(),
+    budgetOk: z.boolean(),
+    lineCount: z.number().int().nonnegative(),
+    lineCapOk: z.boolean(),
+    violations: z.array(ChengSurfaceViolationSchema),
+    truncatedCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const ChengCheckSurfaceOutputSchema = z.union([
+  z
+    .object({
+      status: z.literal("ok"),
+      reports: z.array(ChengSurfaceReportSchema).min(1),
+    })
+    .strict(),
+  ChengCapabilityAbsentSchema,
+]);
+
+export const ChengProbeLeafInputSchema = z
+  .object({
+    filePath: z.string().min(1),
+    allowClosureProbe: z.boolean().optional(),
+  })
+  .strict();
+
+export const ChengProbeLeafOutputSchema = z.union([
+  z
+    .object({
+      status: z.literal("ok"),
+      schema: z.literal("cheng.contract.leaf_probe.v1").optional(),
+      filePath: z.string().min(1),
+      driverSha256: z.string().optional(),
+      exitCode: z.number().int(),
+      objBytes: z.number().int().nonnegative(),
+      compileMaxRssBytes: z.number().int().nonnegative(),
+      wallMs: z.number().int().nonnegative(),
+      admissionTicketId: z.string().optional(),
+      firstError: z.string().nullable(),
+    })
+    .strict(),
+  ChengCapabilityAbsentSchema,
+]);
+
+const ChengCheckSurfaceInputJsonSchema = toLocalToolJsonSchema(ChengCheckSurfaceInputSchema);
+const ChengCheckSurfaceOutputJsonSchema = toLocalToolJsonSchema(ChengCheckSurfaceOutputSchema);
+const ChengProbeLeafInputJsonSchema = toLocalToolJsonSchema(ChengProbeLeafInputSchema);
+const ChengProbeLeafOutputJsonSchema = toLocalToolJsonSchema(ChengProbeLeafOutputSchema);
 
 /** spec 草案的落盘目录（相对 workspaceRoot）；文件名 `<task>-<uuid>.json`，task 已过校验器字符闸。 */
 const CHENG_SPECS_DIR_SEGMENTS = [".chengcode", "cheng-specs"] as const;
@@ -85,7 +222,7 @@ const GENERATE_MODEL_INSTRUCTIONS = [
 ] as const;
 
 function readPort(context: ToolExecutionContext): ChengReadPort | undefined {
-  return context.chengReadPort;
+  return context.chengReadPort ?? context.chengHostPort;
 }
 
 function absent() {
@@ -132,11 +269,11 @@ const planHandler: ToolHandler = async (input, context) => {
 };
 
 const generateHandler: ToolHandler = async (input, context) => {
-  const parsed = ChengGenerateInputSchema.parse(input) as ChengGenerateInput;
-  const port = context.chengGeneratePort;
+  const parsed = ChengGenerateToolInputSchema.parse(input) as ChengGenerateToolInput;
+  const port = context.chengGeneratePort ?? context.chengHostPort;
   if (port === undefined) {
     // 与只读四件套同款的命名能力缺席：宿主没接 cheng host，受理即谎言。
-    return ChengGenerateOutputSchema.parse(absent());
+    return ChengGenerateToolOutputSchema.parse(absent());
   }
   const verdict = validateChengSpecDraft(parsed.spec);
   if (!verdict.ok) {
@@ -149,26 +286,100 @@ const generateHandler: ToolHandler = async (input, context) => {
         .join("\n")}`,
     } satisfies ToolHandlerFailure;
   }
-  const specDir = path.join(context.workspaceRoot, ...CHENG_SPECS_DIR_SEGMENTS);
-  const specPath = path.join(specDir, `${verdict.task}-${randomUUID()}.json`);
-  // 写工具入口统一 admission：目标路径解析出来之后、碰盘之前（端口缺席时零行为）。
-  assertWorkspaceWriteLease(context, CHENG_GENERATE_TOOL_NAME, [specPath]);
-  await mkdir(specDir, { recursive: true });
-  // wx = 排他创建：uuid 撞名的既有文件会让写入失败上浮，而不是覆盖宿主或前次草案。
-  await writeFile(specPath, `${JSON.stringify(parsed.spec, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-  });
+
+  const bundlePrepare = context.chengHostPort?.bundlePrepare ?? port.bundlePrepare;
+  let specPath: string;
+  let bundleDir: string | undefined;
+  let task = verdict.task;
+
+  if (bundlePrepare !== undefined) {
+    const prepared = await bundlePrepare({ draft: parsed.spec });
+    specPath = prepared.specPath;
+    bundleDir = prepared.bundleDir;
+    task = prepared.task;
+  } else {
+    const specDir = path.join(context.workspaceRoot, ...CHENG_SPECS_DIR_SEGMENTS);
+    specPath = path.join(specDir, `${verdict.task}-${randomUUID()}.json`);
+    // 写工具入口统一 admission：目标路径解析出来之后、碰盘之前（端口缺席时零行为）。
+    assertWorkspaceWriteLease(context, CHENG_GENERATE_TOOL_NAME, [specPath]);
+    await mkdir(specDir, { recursive: true });
+    // wx = 排他创建：uuid 撞名的既有文件会让写入失败上浮，而不是覆盖宿主或前次草案。
+    await writeFile(specPath, `${JSON.stringify(parsed.spec, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  }
+
+  const mode = parsed.mode ?? (bundlePrepare !== undefined ? "production" : undefined);
   const result = await port.generate({
     specPath,
-    task: verdict.task,
+    task,
+    ...(bundleDir === undefined ? {} : { bundleDir }),
+    ...(mode === undefined ? {} : { mode }),
     ...(parsed.budget === undefined ? {} : { budget: parsed.budget }),
+    ...(parsed.moves === undefined ? {} : { moves: parsed.moves }),
+    ...(parsed.useLiblearn === undefined ? {} : { useLiblearn: parsed.useLiblearn }),
+    ...(parsed.allowDraftUnowned === undefined ? {} : { allowDraftUnowned: parsed.allowDraftUnowned }),
+    ...(parsed.waitMode === undefined ? {} : { waitMode: parsed.waitMode }),
+    ...(parsed.maxWaitMs === undefined ? {} : { maxWaitMs: parsed.maxWaitMs }),
   });
-  return ChengGenerateOutputSchema.parse({
+
+  if (result.status === "accepted_running") {
+    return ChengGenerateToolOutputSchema.parse({
+      status: "accepted_running",
+      jobId: result.jobId,
+      runId: result.runId,
+      state: result.state,
+      nextTool: result.nextTool ?? "ChengInspect",
+    });
+  }
+
+  return ChengGenerateToolOutputSchema.parse({
     status: "ok",
     jobId: result.jobId,
     runId: result.runId,
     state: result.state,
+  });
+};
+
+const checkSurfaceHandler: ToolHandler = async (input, context) => {
+  const parsed = ChengCheckSurfaceInputSchema.parse(input);
+  const checkSurface = context.chengHostPort?.checkSurface;
+  if (checkSurface === undefined) {
+    return ChengCheckSurfaceOutputSchema.parse(absent());
+  }
+  const targets = parsed.filePaths ?? (parsed.filePath ? [parsed.filePath] : []);
+  const reports = await Promise.all(targets.map((filePath) => checkSurface({ filePath })));
+  return ChengCheckSurfaceOutputSchema.parse({
+    status: "ok",
+    reports,
+  });
+};
+
+const probeLeafHandler: ToolHandler = async (input, context) => {
+  const parsed = ChengProbeLeafInputSchema.parse(input);
+  const normalizedPath = parsed.filePath.replace(/\\/g, "/");
+  if (
+    parsed.allowClosureProbe !== true &&
+    CLOSURE_ROOT_SUFFIXES.some((suffix) => normalizedPath === suffix || normalizedPath.endsWith(`/${suffix}`))
+  ) {
+    return {
+      result: false,
+      errorCode: 400,
+      message: `ChengProbeLeaf rejected top-level closure root "${parsed.filePath}" without allowClosureProbe: true. Probe a single leaf .cheng module or use the formal gate after all edits.`,
+    } satisfies ToolHandlerFailure;
+  }
+  const probeLeaf = context.chengHostPort?.probeLeaf;
+  if (probeLeaf === undefined) {
+    return ChengProbeLeafOutputSchema.parse(absent());
+  }
+  const receipt = await probeLeaf({
+    filePath: parsed.filePath,
+    ...(parsed.allowClosureProbe === undefined ? {} : { allowClosureProbe: parsed.allowClosureProbe }),
+  });
+  return ChengProbeLeafOutputSchema.parse({
+    status: "ok",
+    ...receipt,
   });
 };
 
@@ -386,10 +597,10 @@ export const chengGenerateToolEntry: ToolEntry = {
     needsApproval: true,
   },
   handler: generateHandler,
-  inputSchema: ChengGenerateInputJsonSchema,
-  outputSchema: ChengGenerateOutputJsonSchema,
-  runtimeInputSchema: ChengGenerateInputSchema,
-  runtimeOutputSchema: ChengGenerateOutputSchema,
+  inputSchema: ChengGenerateToolInputJsonSchema,
+  outputSchema: ChengGenerateToolOutputJsonSchema,
+  runtimeInputSchema: ChengGenerateToolInputSchema,
+  runtimeOutputSchema: ChengGenerateToolOutputSchema,
   permission: {
     permission: "cheng.generate",
     reason: "Start a Cheng generate job from a validated spec draft (writes the draft under .chengcode/cheng-specs)",
@@ -424,10 +635,106 @@ export const chengGenerateToolEntry: ToolEntry = {
   },
 };
 
+export const chengCheckSurfaceToolEntry: ToolEntry = {
+  capability: "Check Cheng v4.0 surface syntax and source budget on .cheng files (read-only)",
+  metadata: {
+    shouldDefer: true,
+    name: CHENG_CHECK_SURFACE_TOOL_NAME,
+    description:
+      "Run the <5ms Cheng v4.0 surface and source budget gate on one or more .cheng files (ZD01/UA01/UA02/RL01/line cap). Read-only.",
+    modelInstructions: [...MODEL_INSTRUCTIONS],
+    readOnly: true,
+    destructive: false,
+    concurrentSafe: true,
+    timeoutMs: CHENG_TOOL_TIMEOUT_MS,
+    maxOutputBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    sideEffectScope: "none",
+    riskLevel: "low",
+    needsApproval: false,
+  },
+  handler: checkSurfaceHandler,
+  inputSchema: ChengCheckSurfaceInputJsonSchema,
+  outputSchema: ChengCheckSurfaceOutputJsonSchema,
+  runtimeInputSchema: ChengCheckSurfaceInputSchema,
+  runtimeOutputSchema: ChengCheckSurfaceOutputSchema,
+  permission: chengPermission("cheng.surface.check", "Check .cheng file surface and budget"),
+  resultBudget: {
+    maxInlineBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    maxModelBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    strategy: "truncate",
+    preview: { maxBytes: CHENG_TOOL_MAX_OUTPUT_BYTES, direction: "head" },
+  },
+  timeout: {
+    defaultMs: CHENG_TOOL_TIMEOUT_MS,
+    maxMs: CHENG_TOOL_TIMEOUT_MS,
+    allowCallOverride: false,
+  },
+  cancellation: {
+    supported: true,
+    cleanup: "none",
+    userVisibleMessage: "ChengCheckSurface was cancelled before checking finished",
+  },
+  trace: {
+    required: true,
+    propagateToAdapters: true,
+    recordInput: "summary",
+    recordOutput: "summary",
+  },
+};
+
+export const chengProbeLeafToolEntry: ToolEntry = {
+  capability: "Compile-probe a single leaf .cheng file under admission control (read-only)",
+  metadata: {
+    shouldDefer: true,
+    name: CHENG_PROBE_LEAF_TOOL_NAME,
+    description:
+      "Compile-probe a single leaf .cheng module (<30s, 768 MiB RSS cap) via cheng-host probe admission. Rejects full-closure top-level roots unless allowClosureProbe is true. Read-only.",
+    modelInstructions: [...MODEL_INSTRUCTIONS],
+    readOnly: true,
+    destructive: false,
+    concurrentSafe: true,
+    timeoutMs: CHENG_PROBE_LEAF_TIMEOUT_MS,
+    maxOutputBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    sideEffectScope: "none",
+    riskLevel: "low",
+    needsApproval: false,
+  },
+  handler: probeLeafHandler,
+  inputSchema: ChengProbeLeafInputJsonSchema,
+  outputSchema: ChengProbeLeafOutputJsonSchema,
+  runtimeInputSchema: ChengProbeLeafInputSchema,
+  runtimeOutputSchema: ChengProbeLeafOutputSchema,
+  permission: chengPermission("cheng.leaf.probe", "Compile-probe a single leaf .cheng file"),
+  resultBudget: {
+    maxInlineBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    maxModelBytes: CHENG_TOOL_MAX_OUTPUT_BYTES,
+    strategy: "truncate",
+    preview: { maxBytes: CHENG_TOOL_MAX_OUTPUT_BYTES, direction: "head" },
+  },
+  timeout: {
+    defaultMs: CHENG_PROBE_LEAF_TIMEOUT_MS,
+    maxMs: CHENG_PROBE_LEAF_TIMEOUT_MS,
+    allowCallOverride: false,
+  },
+  cancellation: {
+    supported: true,
+    cleanup: "none",
+    userVisibleMessage: "ChengProbeLeaf was cancelled before probe finished",
+  },
+  trace: {
+    required: true,
+    propagateToAdapters: true,
+    recordInput: "summary",
+    recordOutput: "summary",
+  },
+};
+
 export const chengToolEntries: ToolEntry[] = [
   chengInspectToolEntry,
   chengVerifyToolEntry,
   chengExplainToolEntry,
   chengPlanToolEntry,
   chengGenerateToolEntry,
+  chengCheckSurfaceToolEntry,
+  chengProbeLeafToolEntry,
 ];

@@ -48,6 +48,10 @@ export class ToolExecutorImpl implements ToolExecutor {
       markBestPlan: (turnId) => {
         this.bestPlanTurnId = turnId;
       },
+      turnEvidenceBuffer: options.turnEvidenceBuffer,
+      getTurnEvidenceBuffer: options.getTurnEvidenceBuffer,
+      getTurnRequestText: options.getTurnRequestText,
+      synthesizeGroundedBestPlan: options.synthesizeGroundedBestPlan,
       defaultTimeoutMs: options.defaultTimeoutMs ?? 300000,
       permissionTimeoutMs: options.permissionTimeoutMs,
       logger: options.logger,
@@ -82,6 +86,7 @@ export class ToolExecutorImpl implements ToolExecutor {
       dynamicWorkflowSnippetPort: options.dynamicWorkflowSnippetPort,
       chengReadPort: options.chengReadPort,
       chengGeneratePort: options.chengGeneratePort,
+      chengHostPort: options.chengHostPort,
       modelCatalogPort: options.modelCatalogPort,
       runtimeTaskRegistry: options.runtimeTaskRegistry,
       readFileState: options.readFileState ?? new Map(),

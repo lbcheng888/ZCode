@@ -23,6 +23,7 @@ import {
 } from "./tool-allowlist.js";
 import { isStaleBranchRuntimeTaskEvent } from "../methods/runtime-command-generation.js";
 import { resolveEnabledProjectMemoryRoot } from "./project-memory.js";
+import { TurnEvidenceBuffer } from "./turn-evidence-buffer.js";
 import { sessionHasLoadedSkill } from "../../agent/loaded-skills.js";
 import { sessionControlForRuntime } from "../../tool/session-control/contract.js";
 
@@ -166,12 +167,33 @@ function createRuntimeToolExecutor(
   hookRunner: HookRunner | undefined,
 ): ToolExecutor {
   const browserUseEnabled = resolveRuntimeBrowserUseEnabled(runtime, deps);
+  const turnEvidenceBuffers = new Map<string, TurnEvidenceBuffer>();
   return createToolExecutor({
     agentTelemetry: runtime.agentTelemetry.port,
     agentTelemetryActorKind: runtime.agentTelemetry.actorKind,
     registry: runtime.registry,
     // 主代理工具面才有 ProposeBestPlan；子代理/worker 不注册它，门禁随之关闭。
     bestPlanGate: runtime.registry.has(BEST_PLAN_TOOL_NAME),
+    getTurnEvidenceBuffer:
+      deps.getTurnEvidenceBuffer ??
+      ((turnId) => {
+        let buf = turnEvidenceBuffers.get(turnId);
+        if (buf === undefined) {
+          if (turnEvidenceBuffers.size >= 16) {
+            const oldest = turnEvidenceBuffers.keys().next().value;
+            if (oldest !== undefined) turnEvidenceBuffers.delete(oldest);
+          }
+          buf = new TurnEvidenceBuffer();
+          turnEvidenceBuffers.set(turnId, buf);
+        }
+        return buf;
+      }),
+    ...(deps.getTurnRequestText === undefined
+      ? {}
+      : { getTurnRequestText: deps.getTurnRequestText }),
+    ...(deps.synthesizeGroundedBestPlan === undefined
+      ? {}
+      : { synthesizeGroundedBestPlan: deps.synthesizeGroundedBestPlan }),
     permissionService: runtime.permissionService,
     permissionBroker: runtime.permissionBroker,
     emitEvent: async (event) => {
@@ -248,6 +270,7 @@ function createRuntimeToolExecutor(
     dynamicWorkflowSnippetPort: deps.dynamicWorkflowSnippetPort,
     chengReadPort: deps.chengReadPort,
     chengGeneratePort: deps.chengGeneratePort,
+    chengHostPort: deps.chengHostPort,
     modelCatalogPort: deps.modelCatalogPort,
     runtimeTaskRegistry: runtime.runtimeTaskRegistry,
     registerResidencyBlockingWork: (work) => {

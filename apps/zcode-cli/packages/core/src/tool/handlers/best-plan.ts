@@ -10,18 +10,101 @@
 // 重放得到同一个指纹，卡片与后续回合的动作才能对上。
 
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import {
+  BEST_PLAN_BODY_MAX_CHARS,
+  BEST_PLAN_MAX_CANDIDATE_OPTIONS,
+  BEST_PLAN_MIN_CANDIDATE_OPTIONS,
+  BEST_PLAN_OPTION_MAX_CHARS,
   BEST_PLAN_RECORDED_MESSAGE,
+  BEST_PLAN_SUMMARY_MAX_CHARS,
   BEST_PLAN_TOOL_NAME,
-  BestPlanInputJsonSchema,
-  BestPlanInputSchema,
   BestPlanOutputJsonSchema,
   BestPlanOutputSchema,
-  type BestPlanInput,
   type BestPlanOutput,
+  type JsonSchema,
   type ModelMessageContent,
 } from "@zcode/contracts";
 import type { ToolEntry, ToolHandler } from "../types.js";
+
+export const BestPlanGroundingSchema = z
+  .object({
+    phase: z.enum(["turn_start", "pre_mutation_grounded"]),
+    readToolCallIds: z.array(z.string().min(1)),
+    chengPlanId: z.string().min(1).optional(),
+    chengRunId: z.string().min(1).optional(),
+    evidenceDigest: z.string().min(1),
+  })
+  .strict();
+
+export type BestPlanGrounding = z.infer<typeof BestPlanGroundingSchema>;
+
+const BestPlanCandidateOptionSchema = z
+  .object({
+    option: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_OPTION_MAX_CHARS)
+      .describe("A candidate approach, stated as what would be done."),
+    cost: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_OPTION_MAX_CHARS)
+      .describe("What this candidate costs or risks compared with the others."),
+  })
+  .strict();
+
+export const BestPlanInputSchema = z
+  .object({
+    summary: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_SUMMARY_MAX_CHARS)
+      .describe("One sentence naming the plan."),
+    currentEvidence: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_BODY_MAX_CHARS)
+      .describe(
+        "Verified current-state evidence: file:line references or the actual command output. Not assumptions.",
+      ),
+    candidateOptions: z
+      .array(BestPlanCandidateOptionSchema)
+      .min(BEST_PLAN_MIN_CANDIDATE_OPTIONS)
+      .max(BEST_PLAN_MAX_CANDIDATE_OPTIONS)
+      .describe(
+        `The candidate approaches considered (${BEST_PLAN_MIN_CANDIDATE_OPTIONS}-${BEST_PLAN_MAX_CANDIDATE_OPTIONS}). Each carries its own cost or risk.`,
+      ),
+    recommendation: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_BODY_MAX_CHARS)
+      .describe("The option you will execute, and why it beats the other candidates."),
+    impact: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_BODY_MAX_CHARS)
+      .describe(
+        "Files and packages touched, protocol and storage compatibility, and how to roll back.",
+      ),
+    verification: z
+      .string()
+      .min(1)
+      .max(BEST_PLAN_BODY_MAX_CHARS)
+      .describe("The commands or steps that prove the work, and the success criterion."),
+    grounding: BestPlanGroundingSchema.optional(),
+  })
+  .strict();
+
+export type BestPlanInput = z.infer<typeof BestPlanInputSchema>;
+
+function toLocalToolJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+  const raw = z.toJSONSchema(schema) as Record<string, unknown>;
+  const { $schema: _ignored, ...rest } = raw;
+  return rest as JsonSchema;
+}
+
+export const BestPlanInputJsonSchema = toLocalToolJsonSchema(BestPlanInputSchema);
 
 const MAX_BEST_PLAN_MODEL_BYTES = 4_096;
 

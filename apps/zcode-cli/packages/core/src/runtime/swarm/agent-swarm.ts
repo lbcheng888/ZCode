@@ -32,6 +32,12 @@ import {
   truncateValidationPathSegment,
   type AgentSwarmFileDomainInfo,
 } from "./agent-swarm-file-domains.js";
+export {
+  assertSwarmBashCommandSafe,
+  WORKSPACE_WRITE_LEASE_REJECTED_CODE,
+  WorkspaceWriteLeaseRejectedError,
+  type SwarmBashGuardOptions,
+} from "./agent-swarm-bash-guard.js";
 import type { ToolExecutionContext, ToolHandler } from "../../tool/types.js";
 import { SwarmWorker } from "./swarm-worker.js";
 import type { SwarmTask, SwarmTaskResult } from "./swarm-types.js";

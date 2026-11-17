@@ -16,6 +16,12 @@ export { resolveProjectMemoryRoot } from "./memory/project-root.js";
 
 // Tool components
 export { ToolScheduler, defaultToolScheduler, READ_ONLY_TOOLS } from "./tool/scheduler.js";
+export {
+  assertSwarmBashCommandSafe,
+  WORKSPACE_WRITE_LEASE_REJECTED_CODE,
+  WorkspaceWriteLeaseRejectedError,
+  type SwarmBashGuardOptions,
+} from "./runtime/swarm/agent-swarm-bash-guard.js";
 export type { ToolSchedule, ToolScheduleItem, ToolDependency } from "./tool/scheduler.js";
 export { createToolRegistry, ToolRegistry, ToolRegistryImpl } from "./tool/registry.js";
 export { createToolExecutor, ToolExecutor, ToolExecutorImpl } from "./tool/executor.js";
@@ -89,7 +95,29 @@ export {
   resolveBashTimeoutPolicy,
 } from "./tool/bash-timeout-policy.js";
 export type { BashTimeoutPolicy } from "./tool/bash-timeout-policy.js";
-export type { ChengReadPort, ChengGeneratePort } from "./tool/cheng-read-port.js";
+export type {
+  ChengBundlePrepareInput,
+  ChengBundlePrepareResult,
+  ChengGenerateMode,
+  ChengGeneratePort,
+  ChengGeneratePortInput,
+  ChengGeneratePortResult,
+  ChengGenerateWaitMode,
+  ChengGraphDiffInput,
+  ChengGraphDiffResult,
+  ChengHostToolPort,
+  ChengLeafProbeReceipt,
+  ChengReadPort,
+  ChengSurfaceReport,
+  ChengSurfaceViolation,
+} from "./tool/cheng-read-port.js";
+export {
+  DEFAULT_TURN_EVIDENCE_MAX_BYTES,
+  DEFAULT_TURN_EVIDENCE_MAX_ENTRIES,
+  TurnEvidenceBuffer,
+  type TurnEvidenceBufferOptions,
+  type TurnEvidenceEntry,
+} from "./runtime/helpers/turn-evidence-buffer.js";
 export { CHENG_READ_PORT_UNAVAILABLE_REASON } from "./tool/cheng-read-port.js";
 export type {
   ToolMetadata,
