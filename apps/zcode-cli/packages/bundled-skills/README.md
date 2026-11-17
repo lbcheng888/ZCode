@@ -12,6 +12,9 @@ or the composer's `$` skill picker. The runtime discovers its `skills/` director
 | Skill               | Feature                                           | Contract                             |
 | ------------------- | ------------------------------------------------- | ------------------------------------ |
 | `dynamic-workflows` | dynamic workflows (`/workflow`, `CreateWorkflow`) | `docs/dynamic-workflow/authoring.md` |
+| `cheng-language`    | Cheng v4.0 syntax & core0 surface rules           | `cheng-lang/.agents/skills/cheng-language/SKILL.md` |
+| `cheng-models`      | Cheng 768 MiB memory & compile admission model    | `cheng-lang/.agents/skills/cheng-models/SKILL.md` |
+| `csg-ast`           | CSG-AST spec v2 & Zero-C generation pipeline      | `cheng-lang/.agents/skills/csg-ast/SKILL.md` |
 
 ## How it reaches users
 
@@ -24,6 +27,7 @@ or the composer's `$` skill picker. The runtime discovers its `skills/` director
 - **Remote hosts**: `scripts/prepare-prebuilds.mjs` stages the directory next to the remote
   `zcode.cjs`, like the official plugin packages.
 
-The resolver is `apps/zcode-cli/packages/bootstrap/src/app/bundled-skills.ts`. Every file
-under `skills/dynamic-workflows/` is a required asset: a stage or seed that loses one refuses
-the whole pack and logs a warning instead of shipping a skill with a missing reference file.
+The resolver is `apps/zcode-cli/packages/bootstrap/src/app/bundled-skills.ts`. Every required
+file under `skills/` (`dynamic-workflows/*` and `cheng-language/SKILL.md`,
+`cheng-models/SKILL.md`, `csg-ast/SKILL.md`) is a required asset: a stage or seed that loses one
+refuses the whole pack and logs a warning instead of shipping a skill with a missing reference file.

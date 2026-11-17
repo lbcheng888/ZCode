@@ -16,6 +16,9 @@ export const bundledSkillPackRequiredPaths = [
   "skills/dynamic-workflows/SKILL.md",
   "skills/dynamic-workflows/patterns.md",
   "skills/dynamic-workflows/examples.md",
+  "skills/cheng-language/SKILL.md",
+  "skills/cheng-models/SKILL.md",
+  "skills/csg-ast/SKILL.md",
 ];
 
 export const collectSeaBundledSkillAssets = async ({ root, stagingDirectory }) => {

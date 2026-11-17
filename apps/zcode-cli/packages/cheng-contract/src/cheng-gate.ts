@@ -1,19 +1,23 @@
 import { z } from "zod";
 
 import type { ChengError } from "./cheng-error.js";
+import type { ChengSpecRef } from "./cheng-spec-ref.js";
 import type { RunVolumeReceipt } from "./run-volume.js";
 import type { SettleReceipt } from "./settle-receipt.js";
 import type { StructureReceipt } from "./structure-receipt.js";
+import type { ZeroCReceipt } from "./zero-c-receipt.js";
 
 /**
  * ChengGate：只消费结构化回执的交付/完成门（P4）。
  *
- * 输入只有四类已校验的契约对象：`ChengError`（runner 退出码经 classifyRunnerExit 分类）、
- * `RunVolumeReceipt`（judge/prog/acceptance）、`SettleReceipt`、`StructureReceipt`。
+ * 输入只有已校验的契约对象：`ChengError`（runner 退出码经 classifyRunnerExit 分类）、
+ * `RunVolumeReceipt`（judge/prog/acceptance）、`SettleReceipt`、`StructureReceipt`、
+ * 以及可选的 `ChengSpecRef` 与 `ZeroCReceipt`。
  * 不读日志文本、不猜、不因“看起来像成功”而放行：
  * - 诊断绿只返回 `DIAGNOSTIC_NOT_ACCEPTANCE`，永远不是 `PRODUCTION`；
  * - 生产绿还要求 manifest 完整（显式传入的 runtime manifest 检查结果）；
- * - 单模块 run 没有 modules.tsv：诊断档允许 `structure=null`，生产档拒绝。
+ * - 单模块 run 没有 modules.tsv：诊断档允许 `structure=null`，生产档仅当 `specRef` 明确且无 `composes` 边时允许真空通过；
+ * - 生产档传入 `zeroC` 时要求 `zeroC !== null && zeroC.checks.zeroCProductionOk === true`。
  */
 export interface ChengGateInput {
   readonly error: ChengError | null;
@@ -23,7 +27,35 @@ export interface ChengGateInput {
   readonly mode: "diagnostic" | "production";
   /** 生产档必需：RuntimeManifest 校验是否完整；诊断档忽略。 */
   readonly runtimeManifestComplete?: boolean | null;
+  /** 可选：用于区分单模块生产真空通过与多模块缺失 structure。 */
+  readonly specRef?: ChengSpecRef | null;
+  /** 可选：生产档 Zero-C 纯度回执（传入时必须通过 zeroCProductionOk）。 */
+  readonly zeroC?: ZeroCReceipt | null;
 }
+
+export const ChengGateBlockReasonSchema = z.enum([
+  "run_volume_missing",
+  "judge_rows_undeclared",
+  "program_sha_missing",
+  "program_sha_mismatch",
+  "acceptance_unclassified",
+  "settle_receipt_missing",
+  "settle_not_solved",
+  "settle_invalid_path",
+  "settle_failed",
+  "program_not_authenticated",
+  "settle_zero_examples",
+  "settle_final_counts_mismatch",
+  "settle_program_event_missing",
+  "settle_program_examples_mismatch",
+  "structure_missing",
+  "structure_gate_false",
+  "production_acceptance_false",
+  "runtime_manifest_incomplete",
+  "diagnostic_production_acceptance_must_be_false",
+  "zero_c_violation",
+]);
+export type ChengGateBlockReason = z.infer<typeof ChengGateBlockReasonSchema>;
 
 export const ChengGateLevelSchema = z.enum([
   "PRODUCTION",
@@ -87,8 +119,16 @@ export function evaluateChengGate(input: ChengGateInput): ChengGateResult {
   }
 
   if (input.structure === null) {
-    // 单模块 run 不产 modules.tsv：诊断档允许，生产档必须 fail-closed。
-    if (input.mode === "production") reasons.push("structure_missing");
+    // 单模块 run 不产 modules.tsv：诊断档允许；生产档仅当 specRef 明确且无 composes 边时允许真空通过。
+    if (input.mode === "production") {
+      const hasComposesEdges =
+        input.specRef !== undefined &&
+        input.specRef !== null &&
+        input.specRef.links.some((link) => link.type === "composes");
+      if (input.specRef === undefined || input.specRef === null || hasComposesEdges) {
+        reasons.push("structure_missing");
+      }
+    }
   } else if (!input.structure.checks.structureGateOk) {
     reasons.push("structure_gate_false");
   }
@@ -100,6 +140,12 @@ export function evaluateChengGate(input: ChengGateInput): ChengGateResult {
       if (acceptance.productionAcceptance !== true) reasons.push("production_acceptance_false");
       if (acceptance.verdict !== "PASS") reasons.push(`verdict:${acceptance.verdict ?? "null"}`);
       if (input.runtimeManifestComplete !== true) reasons.push("runtime_manifest_incomplete");
+      if (
+        input.zeroC !== undefined &&
+        (input.zeroC === null || !input.zeroC.checks.zeroCProductionOk)
+      ) {
+        reasons.push("zero_c_violation");
+      }
     } else if (acceptance.level !== "DIAGNOSTIC_NOT_ACCEPTANCE") {
       reasons.push(`acceptance_level:${acceptance.level}`);
     } else if (acceptance.productionAcceptance !== false) {
