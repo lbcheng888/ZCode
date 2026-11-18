@@ -208,17 +208,30 @@ async function executeToolCallImpl(
       const evidenceBuffer = deps.getTurnEvidenceBuffer?.(turnId) ?? deps.turnEvidenceBuffer;
       const evidence = evidenceBuffer ? [...evidenceBuffer.entries()] : [];
       const evidenceDigest = evidenceBuffer ? evidenceBuffer.getDigest() : "";
-      const synthResult = await deps.synthesizeGroundedBestPlan({
-        turnId,
-        requestText: deps.getTurnRequestText?.(turnId) ?? "",
-        toolName: canonicalToolCall.name,
-        toolInput: canonicalToolCall.input,
-        evidence,
-        evidenceDigest,
-      });
-      groundedSatisfied =
-        (typeof synthResult === "boolean" ? synthResult : synthResult.satisfied) ||
-        deps.isBestPlanSatisfied?.(turnId) === true;
+      try {
+        const synthResult = await deps.synthesizeGroundedBestPlan({
+          turnId,
+          requestText: deps.getTurnRequestText?.(turnId) ?? "",
+          toolName: canonicalToolCall.name,
+          toolInput: canonicalToolCall.input,
+          evidence,
+          evidenceDigest,
+        });
+        groundedSatisfied =
+          (typeof synthResult === "boolean" ? synthResult : synthResult.satisfied) ||
+          deps.isBestPlanSatisfied?.(turnId) === true;
+      } catch (error) {
+        deps.logger?.warn("Grounded best-plan synthesis failed; falling back to ProposeBestPlan gate", {
+          ...traceContextToLogContext(traceContext),
+          error: error instanceof Error ? error.message : String(error),
+          event: "tool.call.best_plan_synthesis_failed",
+          module: "core.tool.executor",
+          status: "failed",
+          toolCallId: canonicalToolCall.id,
+          toolName: canonicalToolCall.name,
+        });
+        groundedSatisfied = false;
+      }
     }
 
     if (!groundedSatisfied) {

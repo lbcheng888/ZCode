@@ -49,8 +49,19 @@ Rules:
  * 类型收敛，实际校验闸始终是 JSON.parse + BestPlanInputSchema。
  */
 type BestPlanGenerateTextInput = WorkspaceGenerateTextInput & {
-  responseJsonSchema: JsonSchema;
+  responseJsonSchema?: JsonSchema;
+  onlyIfModelSupportsJsonSchema?: boolean;
 };
+
+function stripOptionalJsonCodeFence(raw: string): string {
+  const trimmed = raw.trim();
+  const match = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed);
+  return match ? (match[1] ?? "").trim() : trimmed;
+}
+
+function isStructuredOutputUnsupportedError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Model does not support structured output");
+}
 
 export interface BestPlanGroundedInput {
   readonly turnId: TurnId;
@@ -202,24 +213,48 @@ export function createBestPlanSuperAgent(deps: CreateBestPlanSuperAgentDeps): Be
         querySource: BEST_PLAN_SUPER_AGENT_QUERY_SOURCE,
         maxOutputTokens: BEST_PLAN_SUPER_AGENT_MAX_OUTPUT_TOKENS,
         responseJsonSchema: BestPlanInputJsonSchema,
+        onlyIfModelSupportsJsonSchema: true,
       };
       if (input.signal?.aborted) return { satisfied: false };
+      const callOptions = {
+        ...(input.signal === undefined ? {} : { abortSignal: input.signal }),
+        traceContext,
+      };
+      const warnModelFailure = (err: unknown) => {
+        deps.logger.warn("Best plan super-agent failed", {
+          ...traceContextToLogContext(traceContext),
+          error: err instanceof Error ? err.message : String(err),
+          event: "best_plan.super_agent.failed",
+          module: "bootstrap",
+          sessionId: String(deps.sessionId),
+          status: "failed",
+          turnId: String(input.turnId),
+        });
+      };
       let generated;
       try {
-        generated = await deps.runtime.generateWorkspaceText(generateInput, {
-          ...(input.signal === undefined ? {} : { abortSignal: input.signal }),
-          traceContext,
-        });
+        generated = await deps.runtime.generateWorkspaceText(generateInput, callOptions);
       } catch (error) {
         if (input.signal?.aborted) return { satisfied: false };
-        throw error;
+        if (!isStructuredOutputUnsupportedError(error)) {
+          warnModelFailure(error);
+          return { satisfied: false };
+        }
+        try {
+          const { responseJsonSchema: _drop, onlyIfModelSupportsJsonSchema: _flag, ...plainInput } =
+            generateInput;
+          generated = await deps.runtime.generateWorkspaceText(plainInput, callOptions);
+        } catch (retryError) {
+          if (!input.signal?.aborted) warnModelFailure(retryError);
+          return { satisfied: false };
+        }
       }
       // 主回合可能在模型调用期间结束；TurnComplete 后投影会丢弃同 turn 的 tool 事件。
       if (input.signal?.aborted) return { satisfied: false };
 
       let plan: BestPlanInput;
       try {
-        plan = BestPlanInputSchema.parse(JSON.parse(generated.text));
+        plan = BestPlanInputSchema.parse(JSON.parse(stripOptionalJsonCodeFence(generated.text)));
       } catch (error) {
         // 解析失败不兜底造卡：worker 会撞上写前硬门禁，被引回 ProposeBestPlan 自行提交。
         deps.logger.warn("Best plan super-agent returned unusable JSON", {

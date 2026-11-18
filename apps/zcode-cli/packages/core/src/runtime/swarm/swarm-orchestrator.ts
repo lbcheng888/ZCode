@@ -221,7 +221,9 @@ export class SwarmOrchestrator {
         ],
         // 分解与 memory selector 同属辅助调用：最低推理档 + 受限输出预算。
         options: auxiliaryModelOptions(this.deps.model),
-        responseJsonSchema: createSwarmDecompositionResponseSchema(minTasks),
+        ...(this.deps.model.properties?.supportsJsonSchemaOutput === false
+          ? {}
+          : { responseJsonSchema: createSwarmDecompositionResponseSchema(minTasks) }),
         ...(signal === undefined ? {} : { abortSignal: signal }),
       });
     } catch (error) {

@@ -40,6 +40,8 @@ export interface WorkspaceGenerateTextInput {
   tools?: ModelToolContract[];
   /** 结构化输出 Schema，原样交给 Model；是否支持由模型能力与适配层决定，不在此处兜底。 */
   responseJsonSchema?: Record<string, unknown>;
+  /** 为 true 时，仅当模型 properties.supportsJsonSchemaOutput !== false 才下发 responseJsonSchema。 */
+  onlyIfModelSupportsJsonSchema?: boolean;
   querySource: string;
   maxOutputTokens?: number;
 }
@@ -207,8 +209,11 @@ async function generateWorkspaceTextImpl(
     ...(requestMaxOutputTokens === undefined
       ? {}
       : { options: { maxOutputTokens: requestMaxOutputTokens } }),
-    // 未传时保持键缺失，避免把 undefined 当成显式结构化输出请求发给适配层。
-    ...(input.responseJsonSchema === undefined
+    // 未传时保持键缺失，避免把 undefined 当成显式结构化输出请求发给适配层；
+    // 若调用方声明 onlyIfModelSupportsJsonSchema，且当前模型明确不支持结构化输出，则省略 schema 改走纯 JSON 解析。
+    ...(input.responseJsonSchema === undefined ||
+    (input.onlyIfModelSupportsJsonSchema === true &&
+      model.properties.supportsJsonSchemaOutput === false)
       ? {}
       : { responseJsonSchema: input.responseJsonSchema }),
   };

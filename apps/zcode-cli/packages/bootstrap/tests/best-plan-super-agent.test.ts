@@ -63,7 +63,8 @@ interface GenerateCallInput {
   querySource: string;
   maxOutputTokens: number;
   selection: FakeSelection;
-  responseJsonSchema: unknown;
+  responseJsonSchema?: unknown;
+  onlyIfModelSupportsJsonSchema?: boolean;
 }
 
 interface FakeRuntimeOptions {
@@ -259,6 +260,7 @@ describe("createBestPlanSuperAgent", () => {
       querySource: "best_plan_super_agent",
       maxOutputTokens: 2048,
       responseJsonSchema: BestPlanInputJsonSchema,
+      onlyIfModelSupportsJsonSchema: true,
     });
     expect(generateOptions).toEqual({ traceContext: input.traceContext });
     expect(generateInput.messages[0]?.role).toBe("system");
@@ -474,5 +476,45 @@ describe("createBestPlanSuperAgent reminder queue", () => {
     });
     // 卡片已成立：持久化恢复层不依赖提醒队列。
     expect(harness.persistSyntheticToolPart).toHaveBeenCalledTimes(1);
+  });
+
+  it("兼容 markdown ```json 围栏包裹的响应并在结构化输出不支持时无 schema 重试", async () => {
+    const harness = createHarness();
+    let callCount = 0;
+    harness.generateWorkspaceText.mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw new Error("Model does not support structured output");
+      }
+      return {
+        text: `\`\`\`json\n${JSON.stringify(VALID_PLAN)}\n\`\`\``,
+        selection: { providerId: "provider-a", modelId: "model-a" },
+        finishReason: "stop",
+      };
+    });
+
+    const res = await harness.agent.synthesizeGroundedBestPlan(groundedInput());
+    expect(res).toEqual({ satisfied: true });
+    expect(harness.generateWorkspaceText).toHaveBeenCalledTimes(2);
+    expect(harness.generateWorkspaceText.mock.calls[0]![0]).toMatchObject({
+      onlyIfModelSupportsJsonSchema: true,
+      responseJsonSchema: BestPlanInputJsonSchema,
+    });
+    const retryInput = harness.generateWorkspaceText.mock.calls[1]![0];
+    expect(retryInput.responseJsonSchema).toBeUndefined();
+    expect(retryInput.onlyIfModelSupportsJsonSchema).toBeUndefined();
+    expect(harness.executeTools).toHaveBeenCalledTimes(1);
+  });
+
+  it("模型调用一般性失败时不抛断主回合，warn 后返回 satisfied: false 交由门禁接管", async () => {
+    const harness = createHarness();
+    harness.generateWorkspaceText.mockRejectedValueOnce(new Error("Model does not support structured output"));
+    harness.generateWorkspaceText.mockRejectedValueOnce(new Error("upstream 503"));
+
+    await expect(harness.agent.synthesizeGroundedBestPlan(groundedInput())).resolves.toEqual({
+      satisfied: false,
+    });
+    expect(warnedEvents(harness.logger)).toEqual(["best_plan.super_agent.failed"]);
+    expect(harness.executeTools).not.toHaveBeenCalled();
   });
 });

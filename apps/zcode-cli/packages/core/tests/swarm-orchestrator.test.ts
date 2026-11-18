@@ -334,6 +334,34 @@ describe("SwarmOrchestrator.decomposeGoal", () => {
     expect(journal[1]?.taskToolCallIds).toEqual(tasks.map((task) => String(task.parentToolCallId)));
   });
 
+  it("omits responseJsonSchema when model supportsJsonSchemaOutput is false", async () => {
+    const requests: ModelRequest[] = [];
+    const base = createTestRuntimeModel({
+      generateText: async (request) => {
+        requests.push(request);
+        return textResult(
+          JSON.stringify({
+            tasks: [{ description: "子任务 A" }, { description: "子任务 B" }],
+          }),
+        );
+      },
+    });
+    const model = {
+      ...base,
+      properties: { ...base.properties, supportsJsonSchemaOutput: false },
+    } as unknown as Model;
+
+    const tasks = await createOrchestrator({
+      model,
+      port: createPort(async () => completedOutput()),
+      runtime: createRuntime(),
+    }).decomposeGoal("兼容无结构化输出模型");
+
+    expect(tasks).toHaveLength(2);
+    expect(Object.keys(requests[0]!)).not.toContain("responseJsonSchema");
+    expect(requests[0]).not.toHaveProperty("responseJsonSchema");
+  });
+
   it("strips ```json fences from the decomposition response", async () => {
     const model = createTestRuntimeModel({
       generateText: async () =>

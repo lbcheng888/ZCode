@@ -128,4 +128,49 @@ describe("workspace generateText responseJsonSchema", () => {
     expect(requests[0]!.responseJsonSchema).toBe(RESPONSE_SCHEMA);
     expect(requests[0]!.options).toEqual({ maxOutputTokens: 2_048 });
   });
+
+  it("omits responseJsonSchema when onlyIfModelSupportsJsonSchema=true and supportsJsonSchemaOutput=false", async () => {
+    const requests: ModelRequest[] = [];
+    const baseModel = createCapturingModel(requests);
+    const noSchemaModel = {
+      ...baseModel,
+      properties: {
+        ...baseModel.properties,
+        supportsJsonSchemaOutput: false,
+      },
+      bind() {
+        return noSchemaModel;
+      },
+    } as unknown as Model;
+    const runtime = createRuntimeWithModel(noSchemaModel);
+
+    await runtime.generateWorkspaceText({
+      selection: { providerId: "test-provider", modelId: "glm-test" },
+      prompt: "Generate a six-field plan",
+      querySource: "best_plan_super_agent",
+      maxOutputTokens: 2_048,
+      responseJsonSchema: RESPONSE_SCHEMA,
+      onlyIfModelSupportsJsonSchema: true,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(Object.keys(requests[0]!)).not.toContain("responseJsonSchema");
+    expect(requests[0]).not.toHaveProperty("responseJsonSchema");
+  });
+
+  it("keeps responseJsonSchema when onlyIfModelSupportsJsonSchema=true and supportsJsonSchemaOutput=true", async () => {
+    const requests: ModelRequest[] = [];
+    const runtime = createRuntimeWithModel(createCapturingModel(requests));
+
+    await runtime.generateWorkspaceText({
+      selection: { providerId: "test-provider", modelId: "glm-test" },
+      prompt: "Generate a six-field plan",
+      querySource: "best_plan_super_agent",
+      responseJsonSchema: RESPONSE_SCHEMA,
+      onlyIfModelSupportsJsonSchema: true,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.responseJsonSchema).toBe(RESPONSE_SCHEMA);
+  });
 });

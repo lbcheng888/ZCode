@@ -481,6 +481,45 @@ describe("Cheng SuperAgent Core (Waves 1-3)", () => {
       expect(blockedRes.success).toBe(false);
       expect(blockedRes.error?.type).toBe(CoreErrorType.InvalidStateTransition);
       expect(blockedRes.modelContent).toContain(BEST_PLAN_TOOL_NAME);
+
+      // If synthesizeGroundedBestPlan throws (e.g. "Model does not support structured output"),
+      // call-runner logs and falls back to the recoverable ProposeBestPlan gate rather than crashing the turn.
+      const warnSpy = vi.fn();
+      const throwingExecutor = createToolExecutor({
+        registry,
+        permissionService: new PermissionService({ ...defaultPermissionConfig, defaultMode: "bypassPermissions" }),
+        permissionBroker: { requestPermission: async () => ({ decision: "allow" as const }) },
+        emitEvent: async () => undefined,
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: warnSpy,
+          error: vi.fn(),
+          child: vi.fn(),
+        } as never,
+        sessionId: "sess-bp-3" as never,
+        turnId: "turn-bp-3" as TurnId,
+        bestPlanGate: true,
+        synthesizeGroundedBestPlan: async () => {
+          throw new Error("Model does not support structured output");
+        },
+        getWorkingDirectory: () => root,
+        getWorkspaceRoot: () => root,
+        runtimeScope: "root",
+        getMode: () => "bypassPermissions",
+      });
+      const fallbackRes = await throwingExecutor.execute({
+        id: "call-write-3",
+        name: "Write",
+        input: { file_path: targetFile, content: "export const x = 4;\n" },
+      });
+      expect(fallbackRes.success).toBe(false);
+      expect(fallbackRes.error?.type).toBe(CoreErrorType.InvalidStateTransition);
+      expect(fallbackRes.error?.message).toContain("Call ProposeBestPlan before");
+      expect(fallbackRes.modelContent).toContain(BEST_PLAN_TOOL_NAME);
+      expect(
+        warnSpy.mock.calls.map((call) => (call[1] as { event?: string } | undefined)?.event),
+      ).toEqual(["tool.call.best_plan_synthesis_failed", "tool.call.best_plan_required"]);
     });
   });
 });
